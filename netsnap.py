@@ -16,7 +16,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import os
 import re
@@ -480,6 +480,24 @@ ORDEM_MENU = list(PERFIS.keys())
 # As credenciais são lidas em tempo de execução do arquivo de configuração
 # local e ficam apenas em variável de ambiente do processo cliente, de modo
 # que não aparecem na linha de comando (ps) nem no relatório gerado.
+DEF_Q_WANGUARD = (
+    # Credenciais do Wanguard 9: host e senha ficam em arquivos separados,
+    # cada um contendo apenas o valor. O usuário e o banco chamam-se
+    # 'andrisoft' por padrão; o banco é confirmado com SHOW DATABASES.
+    "WH=$({S}cat /opt/andrisoft/etc/dbhost.conf 2>/dev/null | tr -d ' \\r\\n'); "
+    "WP=$({S}cat /opt/andrisoft/etc/dbpass.conf 2>/dev/null | tr -d ' \\r\\n'); "
+    "WU=andrisoft; "
+    "WD=$(MYSQL_PWD=\"$WP\" mysql -h \"${WH:-localhost}\" -u \"$WU\" -N -B "
+    "-e 'SHOW DATABASES' 2>/dev/null | grep -i -m1 -E 'andrisoft|wanguard'); "
+    "W(){ if [ -z \"$WP\" ]; then echo '(credenciais do banco inacessiveis "
+    "- requer sudo)'; elif ! command -v mysql >/dev/null 2>&1; then "
+    "echo '(cliente mysql ausente no servidor)'; "
+    "elif [ -z \"$WD\" ]; then echo '(banco do Wanguard nao localizado)'; "
+    "else MYSQL_PWD=\"$WP\" mysql -h \"${WH:-localhost}\" -u \"$WU\" "
+    "-D \"$WD\" -B -e \"$1\" 2>&1; fi; }; "
+    "echo \"banco: ${WD:-nao identificado} em ${WH:-localhost}\""
+)
+
 DEF_Q_ZABBIX = (
     "C=$(ls /etc/zabbix/zabbix_server.conf /usr/local/etc/zabbix_server.conf "
     "2>/dev/null | head -n1); CONF=$({S}cat \"$C\" 2>/dev/null); "
@@ -536,37 +554,54 @@ APPS_LINUX = {
             # Inventário do diretório antes de ler: mostra o que existe de fato
             "{S}ls -la /opt/andrisoft/ /opt/andrisoft/etc/ /etc/wanguard* "
             "2>/dev/null",
-            # Leitura por glob, sem depender do nome do arquivo de configuração
+            # Leitura por glob, pulando arquivos que contêm apenas segredo
+            # (dbpass.conf e similares) e limitando o volume por arquivo:
+            # a partir do Wanguard 9 o etc/ traz influxdb.conf com centenas
+            # de linhas de comentário que nada acrescentam ao diagnóstico.
             "for f in /opt/andrisoft/etc/*.conf /opt/andrisoft/etc/*.cfg "
-            "/etc/wanguard*.conf /etc/wanguard.conf; do [ -f \"$f\" ] && "
-            "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+            "/etc/wanguard*.conf /etc/wanguard.conf; do [ -f \"$f\" ] || continue; "
+            "case \"$f\" in *pass*|*secret*|*key*|*cred*) "
+            "echo \"===== $f (omitido: arquivo de credencial)\"; continue;; esac; "
+            "echo \"===== $f\"; {S}grep -v -E '^[[:space:]]*#|^[[:space:]]*$' "
+            "\"$f\" | head -n 120; done",
             # Unidades descobertas por padrão de nome, não por lista fixa
             "systemctl list-units --no-pager --all --plain 2>/dev/null | "
-            "grep -i -E 'wanguard|andrisoft|wansupervisor'",
-            "{S}ls -la /opt/andrisoft/web/ 2>/dev/null | head -n 20",
+            "grep -i -E 'wanguard|andrisoft|wansupervisor|wanflow|wanfilter'",
+            # Console web: o diretório é 'webroot' a partir do Wanguard 9
+            "{S}ls -la /opt/andrisoft/webroot/ /opt/andrisoft/web/ "
+            "/opt/andrisoft/api/ 2>/dev/null | head -n 30",
         ],
         "logs": [
             # Só executa journalctl se houver unit correspondente; sem a
             # guarda, a expansão vazia despejaria o journal inteiro do
             # sistema rotulado como log do WANGuard.
             "U=$(systemctl list-units --no-pager --plain --no-legend 2>/dev/null "
-            "| awk '/wanguard|andrisoft|WANsupervisor/{printf \" -u \"$1}'); "
+            "| awk '/wanguard|andrisoft|WANsupervisor|WANflow|WANfilter/"
+            "{printf \" -u \"$1}'); "
             "if [ -n \"$U\" ]; then {S}journalctl $U -n 300 --no-pager 2>&1; "
             "else echo '(nenhuma unit systemd do WANGuard encontrada)'; fi",
-            "{S}grep -h -i -E 'anomaly|attack|mitigat|blackhole|flowspec' "
-            "/var/log/syslog /var/log/messages 2>/dev/null | tail -n 200",
-            "{S}ls -la /opt/andrisoft/var/log/ 2>/dev/null",
-            "for f in /opt/andrisoft/var/log/*.log; do [ -f \"$f\" ] && "
-            "{ echo \"===== $f\"; {S}tail -n 60 \"$f\"; }; done",
+            # Filtra pelo processo do WANGuard: procurar apenas por palavras
+            # como 'mitigation' traz mitigações de CPU do kernel (Spectre,
+            # MMIO) e nada de DDoS.
+            "{S}grep -h -i -E '(wanguard|andrisoft|WAN(supervisor|flow|filter|"
+            "sensor))' /var/log/syslog /var/log/messages 2>/dev/null | "
+            "grep -i -E 'anomal|attack|mitigat|blackhole|flowspec|threshold|"
+            "decision' | tail -n 200",
+            # Caminho de log descoberto, não presumido
+            "{S}find /opt/andrisoft /var/log -maxdepth 3 "
+            "\\( -iname '*wanguard*' -o -iname '*andrisoft*' -o -iname 'WAN*' \\) "
+            "-name '*.log' 2>/dev/null | head -n 20",
         ],
         "basico": [
             # Estado dos serviços realmente presentes, descobertos acima
             "U=$(systemctl list-units --no-pager --plain --no-legend 2>/dev/null "
-            "| awk '/wanguard|andrisoft|WANsupervisor/{printf \" \"$1}'); "
+            "| awk '/wanguard|andrisoft|WANsupervisor|WANflow|WANfilter/"
+            "{printf \" \"$1}'); "
             "if [ -n \"$U\" ]; then systemctl status --no-pager $U 2>&1 | "
             "head -n 80; else echo '(nenhuma unit systemd do WANGuard)'; fi",
             "{S}ps -eo pid,etime,pcpu,pmem,comm,args --sort=-pcpu 2>/dev/null | "
-            "grep -i -E 'wanguard|andrisoft|wansupervisor' | grep -v grep",
+            "grep -i -E 'wanguard|andrisoft|WANsupervisor|WANflow|WANfilter|"
+            "WANsensor' | grep -v grep",
             "ip -br address",
             # Mitigação ativa: regras de filtro em uso
             "{S}iptables -L -n -v 2>/dev/null | head -n 120",
@@ -576,25 +611,61 @@ APPS_LINUX = {
             "for b in birdc birdcl vtysh exabgpcli; do command -v $b "
             ">/dev/null 2>&1 && { echo \"===== $b\"; case $b in "
             "birdc|birdcl) {S}$b show protocols 2>&1 | head -n 30;; "
-            "vtysh) {S}$b -c 'show bgp summary' 2>&1 | head -n 30;; "
+            "vtysh) {S}$b -c 'show bgp summary' 2>&1 | head -n 30; "
+            "{S}$b -c 'show run' 2>&1 | head -n 60;; "
             "exabgpcli) {S}$b show neighbor summary 2>&1 | head -n 30;; "
             "esac; }; done",
+            # Os processos chamam-se WANflow/WANsupervisor: filtrar por
+            # 'wanguard' não os encontra. Portas de flow são configuráveis.
             "{S}ss -tulpn 2>/dev/null | grep -i -E "
-            "'wanguard|andrisoft|:179|:161|:2055|:6343'",
+            "'WAN[a-z]+|andrisoft|:179|:161|:2055|:4739|:6343|:9996'",
         ],
         "inventario": [
             # Binários apenas listados; a execução com -v usa timeout para
             # não travar a coleta caso o binário seja um daemon.
-            "{S}ls -la /opt/andrisoft/bin/ 2>/dev/null",
-            "for p in /opt/andrisoft/bin/*; do [ -x \"$p\" ] || continue; "
-            "echo \"===== $(basename \"$p\")\"; "
-            "timeout 5 \"$p\" -v 2>&1 | head -n 3; done",
+            "{S}ls -la /opt/andrisoft/bin/ 2>/dev/null | head -n 40",
+            # Todos os binários reportam a mesma versão: uma amostra basta.
+            "for p in /opt/andrisoft/bin/WANsupervisor "
+            "/opt/andrisoft/bin/WANflow /opt/andrisoft/bin/WANfilter "
+            "/opt/andrisoft/bin/WANsensor; do [ -x \"$p\" ] && "
+            "{ echo \"===== $(basename \"$p\")\"; "
+            "timeout 5 \"$p\" -v 2>&1 | head -n 3; }; done",
             "for f in /opt/andrisoft/etc/license* /opt/andrisoft/etc/*.lic "
             "/etc/wanguard*licen*; do [ -f \"$f\" ] && "
             "{ echo \"===== $f\"; {S}head -n 25 \"$f\"; }; done",
             "(dpkg -l 2>/dev/null | grep -i -E 'wanguard|andrisoft') "
             "|| (rpm -qa 2>/dev/null | grep -i -E 'wanguard|andrisoft')",
         ],
+        # A partir do Wanguard 9 a configuração operacional (sensores,
+        # grupos de IP, filtros, respostas, anomalias e licença) fica no
+        # MariaDB, não em arquivo: o etc/ contém apenas Apache, InfluxDB e
+        # as credenciais do banco. Sem esta seção, a coleta não registra
+        # nada do que o WANGuard realmente monitora.
+        "extra": {
+            "titulo": "Configuração operacional no banco (sensores, grupos, "
+                      "filtros, anomalias e licença)",
+            "comandos": [
+                DEF_Q_WANGUARD,
+                "W \"SHOW TABLES\"",
+                # Estrutura e volume das tabelas relevantes, descobertas pelo
+                # nome — o esquema varia entre versões do Wanguard.
+                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
+                "grep -i -E 'sensor|anomal|licen|ip_?group|ip_?zone|filter|"
+                "response|decision|threshold|comment'); do "
+                "echo \"===== $t\"; W \"SELECT COUNT(*) AS registros FROM $t\"; "
+                "done",
+                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
+                "grep -i -E 'sensor|licen|ip_?group|ip_?zone'); do "
+                "echo \"===== $t (estrutura)\"; W \"DESCRIBE $t\"; done",
+                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
+                "grep -i -E 'sensor|licen|ip_?group|ip_?zone'); do "
+                "echo \"===== $t (amostra)\"; "
+                "W \"SELECT * FROM $t LIMIT 20\"; done",
+                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
+                "grep -i -E 'anomal'); do echo \"===== $t (mais recentes)\"; "
+                "W \"SELECT * FROM $t ORDER BY 1 DESC LIMIT 30\"; done",
+            ],
+        },
     },
     "zabbix": {
         "nome": "Zabbix (servidor/proxy de monitoramento)",
@@ -833,9 +904,25 @@ PADROES_SENSIVEIS = [
 ]
 PADRAO_CERT = re.compile(r"-----BEGIN[\s\S]*?-----END[^-]*-----")
 
+# Arquivos cujo conteúdo é integralmente um segredo, sem par chave=valor que
+# permita detecção por padrão (ex.: /opt/andrisoft/etc/dbpass.conf contém
+# apenas a senha). Os blocos de despejo de arquivo do netsnap são marcados
+# com "===== /caminho/arquivo"; ao encontrar um arquivo com esse perfil de
+# nome, todo o conteúdo até o próximo marcador é suprimido.
+PADRAO_ARQUIVO_SEGREDO = re.compile(
+    r"(?im)^(=====\s+\S*(?:dbpass|passwd|password|secret|shadow|"
+    r"\.key|_key|privkey|credential|token)\S*)\s*$"
+    r"((?:\n(?!=====).*)*)"
+)
+
+
+def _suprimir_arquivo(m):
+    return f"{m.group(1)}\n***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***"
+
 
 def sanitizar(texto: str) -> str:
     texto = PADRAO_CERT.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
+    texto = PADRAO_ARQUIVO_SEGREDO.sub(_suprimir_arquivo, texto)
     for padrao in PADROES_SENSIVEIS:
         texto = padrao.sub(r"\1***REMOVIDO***", texto)
     return texto
