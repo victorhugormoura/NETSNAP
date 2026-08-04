@@ -16,7 +16,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.9.0"
+__version__ = "1.9.2"
 
 import os
 import re
@@ -168,9 +168,24 @@ PERFIS = {
             "show bgp summary",
             "show ospf neighbor",
             "show route summary",
+            # Em BNG, o essencial é a contagem e a distribuição de sessões,
+            # não a lista de assinantes — que muda a cada minuto e chega a
+            # milhares de linhas.
+            "show subscribers summary",
+            "show pppoe statistics",
         ],
         "optica": [
-            "show interfaces terse",
+            # Filtro positivo pelas interfaces de infraestrutura. Um filtro
+            # negativo ('| except pp0\\.') não serviria: a saída do terse usa
+            # linhas de continuação para famílias adicionais (inet6), e
+            # remover apenas a linha do nome deixaria milhares de linhas
+            # órfãs, sem indicação de a que interface pertencem.
+            "show interfaces terse | match "
+            "\"^(ge-|xe-|et-|fe-|ae|irb|lo0|em0|fxp|si-|demux0 |lc-|pfe|pfh)\"",
+            # Sessões de assinante são efêmeras e chegam a milhares num BNG:
+            # entram como contagem, não como lista.
+            "show interfaces terse | match \"pp0\\.\" | count",
+            "show interfaces terse | match \"demux0\\.[0-9]\" | count",
             "show interfaces descriptions",
             # DOM completo: Rx/Tx, temperatura, bias e limiares de alarme
             "show interfaces diagnostics optics",
@@ -178,19 +193,25 @@ PERFIS = {
             "show chassis hardware detail",
             # Velocidade, modo de enlace e contadores por interface física
             "show interfaces media",
-            # Filtrado: 'show interfaces extensive' completo é inviável em
-            # BNG com muitas subinterfaces
-            "show interfaces extensive | match \"Physical interface|"
-            "Description|Link-level type|Speed|Input rate|Output rate|"
-            "Input errors|Output errors|Errors:|Drops:|CRC|Framing|"
-            "Resource errors\"",
+            # 'show interfaces extensive' foi retirado: mede-se 52 s de
+            # média por equipamento (91 s no pior caso), porque o Junos
+            # gera a saída completa antes de aplicar o filtro. O
+            # 'show interfaces media' acima já traz Speed, Description,
+            # Input/Output rate, last flapped, alarmes e estatísticas PCS.
         ],
         "vizinhanca": [
             "show lldp neighbors",
+            # Distingue "sem vizinho" de "LLDP desabilitado": retorno vazio
+            # em 'show lldp neighbors' não diz qual dos dois é o caso.
+            "show lldp",
+            "show configuration protocols lldp",
             "show lldp local-information",
         ],
         "inventario": [
-            "show version detail",
+            # 'show version detail' custa mais de 20 s por equipamento e
+            # acrescenta a lista de pacotes internos, de pouco proveito para
+            # inventário e triagem: a release vem em 'show version'.
+            "show version",
             "show chassis hardware detail",
             "show chassis firmware",
             "show system license",
@@ -1200,7 +1221,17 @@ PADRAO_ERRO_LIVRE = re.compile(
 # devolver dezenas de MB (por exemplo 'named-checkconf -p' em servidor com
 # dezenas de milhares de zonas), o que inviabiliza a leitura do snapshot por
 # um modelo de linguagem. O corte é explícito no relatório.
-LIMITE_SAIDA_COMANDO = 256 * 1024
+LIMITE_SAIDA_COMANDO = 512 * 1024
+
+# A configuração é o conteúdo que justifica o snapshot: truncá-la inutiliza
+# o documento para reconstruir ou auditar o equipamento. Um roteador de borda
+# com políticas de BGP e filtros passa facilmente de 400 KB, então esta seção
+# tem folga muito maior que as demais.
+LIMITE_POR_SECAO = {
+    "config": 8 * 1024 * 1024,
+    "logs": 512 * 1024,
+    "inventario": 512 * 1024,
+}
 
 
 def normalizar_saida(texto: str, limite: int = None) -> str:
@@ -1359,15 +1390,24 @@ def porta_aberta(ip: str, porta: int, tempo: int = 3) -> bool:
 # Confiança 'media' : indica a família, mas exige confirmação (OpenSSH é usado
 #                     por Linux, Junos e NX-OS).
 # ---------------------------------------------------------------------------
+# Cada entrada mapeia um padrão de banner para uma lista ordenada de
+# candidatos. Confiança 'alta' dispensa confirmação; 'media' confirma o
+# primeiro candidato que responder ao comando de verificação.
 BANNER_PLATAFORMA = [
-    (re.compile(r"(?i)ROSSSH|RouterOS"), "mikrotik_routeros", "alta"),
-    (re.compile(r"(?i)Cisco-1\.\d+"), "cisco_ios", "media"),
-    (re.compile(r"(?i)Cisco-2\.\d+"), "cisco_xr", "media"),
-    (re.compile(r"(?i)HUAWEI|VRP"), "huawei", "media"),
-    (re.compile(r"(?i)OpenSSH.*(Ubuntu|Debian|Raspbian|el[789]|SUSE|FreeBSD)"),
-     "linux", "media"),
-    (re.compile(r"(?i)Junos|JUNOSSSH"), "juniper_junos", "media"),
-    (re.compile(r"(?i)FiberHome|AN[56]\d{3}"), "fiberhome", "media"),
+    (re.compile(r"(?i)ROSSSH|RouterOS"), ["mikrotik_routeros"], "alta"),
+    # JSSH é o servidor SSH do Junos e não aparece em outra plataforma.
+    (re.compile(r"(?i)JSSH|Junos|JUNOSSSH"), ["juniper_junos"], "alta"),
+    (re.compile(r"(?i)Cisco-1\.\d+"), ["cisco_ios"], "media"),
+    (re.compile(r"(?i)Cisco-2\.\d+"), ["cisco_xr", "cisco_ios"], "media"),
+    (re.compile(r"(?i)HUAWEI|VRP"), ["huawei"], "media"),
+    (re.compile(r"(?i)FiberHome|AN[56]\d{3}"), ["fiberhome"], "media"),
+    # Sufixo de distribuição identifica Linux com boa margem.
+    (re.compile(r"(?i)OpenSSH.*(Ubuntu|Debian|Raspbian|el[789]|SUSE|"
+                r"Amazon|CentOS)"), ["linux"], "media"),
+    # OpenSSH sem sufixo de distribuição: os MX usam essa forma, assim como
+    # appliances baseados em BSD. Testar dois candidatos custa poucos
+    # segundos e evita o SSHDetect, que leva mais de dez.
+    (re.compile(r"(?i)OpenSSH"), ["juniper_junos", "linux"], "media"),
 ]
 
 
@@ -1389,13 +1429,13 @@ def ler_banner(ip: str, porta: int, tempo: int = 4):
 
 
 def plataforma_por_banner(banner: str):
-    """Retorna (perfil, confianca) a partir do banner, ou (None, None)."""
+    """Retorna (lista de candidatos, confianca) a partir do banner."""
     if not banner:
-        return None, None
-    for padrao, perfil, confianca in BANNER_PLATAFORMA:
+        return [], None
+    for padrao, candidatos, confianca in BANNER_PLATAFORMA:
         if padrao.search(banner):
-            return perfil, confianca
-    return None, None
+            return list(candidatos), confianca
+    return [], None
 
 
 def confirmar_plataforma(ip, usuario, senha, porta, tipo) -> bool:
@@ -1475,20 +1515,27 @@ def detectar(ip, usuario, senha, porta):
         raise NetmikoTimeoutException(f"sem resposta TCP na porta {porta}")
     depurar(ip, "banner", f"{banner!r} em {time.perf_counter()-t0:.2f}s")
 
-    candidato, confianca = plataforma_por_banner(banner)
-    if candidato:
-        depurar(ip, "banner->palpite", f"{candidato} (confianca {confianca})")
-        log(ip, f"banner indica {PERFIS[candidato]['nome']}; confirmando ...")
-        if confianca == "alta" or confirmar_plataforma(ip, usuario, senha,
-                                                       porta, candidato):
-            if candidato == "huawei" and eh_smartax(ip, usuario, senha, porta):
-                candidato = "huawei_smartax"
-            log(ip, f"identificado: {PERFIS[candidato]['nome']} "
-                    f"({time.perf_counter()-t0:.1f}s, via banner)")
-            depurar(ip, "identificado",
-                    f"{candidato} em {time.perf_counter()-t0:.2f}s (via banner)")
-            return candidato
-        depurar(ip, "banner->palpite", "nao confirmado; caindo para SSHDetect")
+    candidatos, confianca = plataforma_por_banner(banner)
+    if candidatos:
+        depurar(ip, "banner->palpite",
+                f"{candidatos} (confianca {confianca})")
+        log(ip, f"banner indica {PERFIS[candidatos[0]]['nome']}"
+                + (" e outros" if len(candidatos) > 1 else "")
+                + "; confirmando ...")
+        for candidato in candidatos:
+            if confianca == "alta" or confirmar_plataforma(
+                    ip, usuario, senha, porta, candidato):
+                if candidato == "huawei" and eh_smartax(ip, usuario, senha,
+                                                        porta):
+                    candidato = "huawei_smartax"
+                log(ip, f"identificado: {PERFIS[candidato]['nome']} "
+                        f"({time.perf_counter()-t0:.1f}s, via banner)")
+                depurar(ip, "identificado",
+                        f"{candidato} em {time.perf_counter()-t0:.2f}s "
+                        "(via banner)")
+                return candidato
+        depurar(ip, "banner->palpite",
+                "nenhum candidato confirmado; caindo para SSHDetect")
 
     log(ip, "detectando plataforma ...")
     detectado = None
@@ -1554,7 +1601,7 @@ def detectar(ip, usuario, senha, porta):
 # ---------------------------------------------------------------------------
 # Execução de comandos e montagem do relatório
 # ---------------------------------------------------------------------------
-def executar_comando(conn, cmd, usa_timing, ip="-"):
+def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
     """Executa um comando de leitura e registra tempo e retorno no debug."""
     t0 = time.perf_counter()
     depurar(ip, "envia comando", cmd)
@@ -1565,7 +1612,7 @@ def executar_comando(conn, cmd, usa_timing, ip="-"):
             saida = conn.send_command(cmd, read_timeout=180)
         dur = time.perf_counter() - t0
         bruto = len(saida or "")
-        saida = normalizar_saida(saida)
+        saida = normalizar_saida(saida, limite)
         depurar(ip, "retorno",
                 f"{dur:.2f}s | {bruto} bytes"
                 + (f" -> {len(saida)} apos normalizar" if len(saida) != bruto
@@ -1664,10 +1711,12 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                 continue
             if tipo == "mikrotik_routeros" and secao == "config" and not incluir_sensivel:
                 comandos = ["/export hide-sensitive"]
+            limite = LIMITE_POR_SECAO.get(secao)
             saidas = []
             for cmd in comandos:
                 log(ip, f"-> {cmd[:70]}")
-                saidas.append((cmd, executar_comando(conn, cmd, usa_timing, ip)))
+                saidas.append((cmd, executar_comando(conn, cmd, usa_timing,
+                                                     ip, limite)))
             blocos.append((TITULOS[secao], saidas))
 
         # Módulos de aplicação (Linux)
@@ -1678,10 +1727,12 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                             for c in app.get(secao, [])]
                 if not comandos:
                     continue
+                limite = LIMITE_POR_SECAO.get(secao)
                 saidas = []
                 for cmd in comandos:
                     log(ip, f"-> [{chave}] {cmd[:70]}")
-                    saidas.append((cmd, executar_comando(conn, cmd, False, ip)))
+                    saidas.append((cmd, executar_comando(conn, cmd, False,
+                                                         ip, limite)))
                 blocos.append((f"{app['nome']} — {TITULOS[secao]}", saidas))
             extra = app.get("extra")
             if extra and set(secoes) & {"config", "basico", "inventario"}:

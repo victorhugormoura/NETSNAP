@@ -160,7 +160,7 @@ Cada arquivo contém cabeçalho de metadados (data, plataforma, modo de extraç�
 Toda saída passa por normalização antes de ir para o snapshot, porque o destino é leitura por pessoas e por modelos de linguagem:
 
 - **Códigos ANSI são removidos.** O `journald` colore a saída, e as sequências de escape aparecem no meio do texto sem acrescentar informação — atrapalham tanto a leitura quanto a tokenização.
-- **Saídas excessivas são truncadas com aviso explícito** (`LIMITE_SAIDA_COMANDO`, 256 KB por comando). O corte aparece no documento como `[SAÍDA TRUNCADA PELO netsnap — N bytes no total, M linha(s) omitida(s)]`, nunca de forma silenciosa.
+- **Saídas excessivas são truncadas com aviso explícito.** O teto padrão é 512 KB por comando, mas a seção *Configuração* tem 8 MB (`LIMITE_POR_SECAO`): truncar a configuração inutilizaria o snapshot para reconstruir ou auditar o equipamento, e um roteador de borda com políticas de BGP passa de 400 KB. O corte aparece no documento como `[SAÍDA TRUNCADA PELO netsnap — N bytes no total, M linha(s) omitida(s)]`, nunca de forma silenciosa.
 - **Comandos que explodem em escala têm tratamento próprio.** Em servidor de bloqueio DNS, `named-checkconf -p` pode devolver centenas de milhares de linhas (84 mil zonas observadas em produção, 8 MB). A coleta separa a configuração global — `options`, `acl`, `logging`, `response-policy` com as zonas RPZ — das declarações de zona em massa, que viram contagem e amostra.
 
 ---
@@ -179,6 +179,14 @@ Ligado pelo menu (`Gerar log de depuração da coleta?`) ou por `python3 netsnap
 ```
 
 Registra a identificação passo a passo (banner recebido, palpite, confirmação, SSHDetect, alias, sondas), **cada comando enviado ao equipamento** com tempo, bytes, linhas e uma amostra do retorno, além de detecção de sudo e de aplicações. Erros aparecem como `ERRO no comando` com o tipo da exceção. É o arquivo a anexar quando algo não funcionar.
+
+---
+
+## Equipamentos com muitas subinterfaces (BNG/BRAS)
+
+Num BRAS com PPPoE, as sessões de assinante dominam a saída: um MX80 em produção apresentou 1.321 interfaces `pp0.N` e 54 `demux0.N` num total de 3.993 linhas de `show interfaces terse` — 282 KB de conteúdo efêmero, que muda a cada minuto e não descreve a topologia.
+
+O perfil Junos usa **filtro positivo** pelas interfaces de infraestrutura (`ge-`, `xe-`, `et-`, `ae`, `irb`, `lo0`, `si-`, `demux0`, `lc-`, `pfe`, `pfh`), reduzindo a saída em 98% sem perder nenhuma interface física. Um filtro negativo não serviria: o `terse` usa linhas de continuação para famílias adicionais (inet6), e remover só a linha do nome deixaria milhares de linhas órfãs. As sessões entram como **contagem** em comando separado, e `show subscribers summary` e `show pppoe statistics` trazem o quadro agregado.
 
 ---
 
