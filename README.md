@@ -31,7 +31,7 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 | **Grafana** | `grafana.ini` sem comentários, provisionamento declarativo (`provisioning/datasources`, `dashboards`, `alerting`), plugins, `/api/health`, versões e pacotes |
 | **Grafana — conteúdo** | Consulta ao banco (somente `SELECT`, SQLite/MySQL/PostgreSQL): **dashboards e pastas** com uid e versão, **datasources** com tipo e URL, **regras de alerta** e estado, dashboards provisionados e usuários |
 | **BIND9** | Configuração efetiva (`named-checkconf -p`), `named.conf` e includes, lista e contagem de zonas, `rndc status`, versão e pacotes, logs do serviço |
-| **BIND9 — RPZ / AnaBlock** | Seção dedicada: bloco `response-policy` em uso, zonas RPZ/AnaBlock declaradas, `rndc zonestatus` de cada uma (serial carregado = prova de que está *atuando*), arquivos de zona com contagem de entradas, serviços e cronjobs de atualização |
+| **BIND9 — bloqueio DNS (RPZ / AnaBlock)** | Identifica **qual mecanismo está em uso** — RPZ (bloco `response-policy`) ou sinkhole por zona, técnica do AnaBlock, que declara cada domínio bloqueado como zona master apontando para um arquivo único. Traz o alvo do sinkhole, a lista instalada com contagem de zonas, o script e o cron de atualização, e a **prova de efetividade por consulta real**: `dig` nos domínios de teste do próprio AnaBlock, numa amostra da lista instalada e num domínio de controle fora dela |
 
 \* O Netmiko não possui driver nativo para FiberHome; o netsnap usa o driver `generic` com leitura por temporização. Como a CLI FiberHome exige contexto privilegiado (`enable`, e em várias famílias também `config`) **mesmo para comandos `show`**, o perfil acessa esse contexto — executando exclusivamente comandos de leitura e saindo ao final. Isso está registrado no cabeçalho de cada relatório FiberHome. Por variar bastante entre famílias e firmwares, o perfil executa um conjunto amplo de comandos candidatos; os não suportados são marcados e não poluem a saída. Ajuste a lista em `PERFIS` conforme o seu parque.
 
@@ -94,7 +94,18 @@ Fluxo:
 5. Usuário SSH
 6. Senha SSH
 7. Porta SSH [22]
-8. Alvos (IP, IP:porta, CIDR ou range) — ENTER vazio encerra
+8. Alvos (IP, IP:porta, CIDR ou range) — ENTER abre o menu de sessão
+```
+
+Ao pressionar ENTER sem informar alvo, aparece o menu:
+
+```
+  1) Nova coleta — reconfigurar tudo (inclusive usuário e senha)
+  2) Continuar nesta sessão — informar mais alvos
+  3) Sair
+```
+
+A opção 1 volta à tela de configuração sem encerrar o programa, útil quando o próximo grupo de equipamentos usa credenciais diferentes. Cada sessão gera seu próprio resumo e, ao sair, é impresso um resumo geral com todas elas.
 ```
 
 Ao final da fase paralela, hosts acessíveis que não foram identificados são apresentados um a um para escolha manual do tipo (com opção de pular).
@@ -141,6 +152,45 @@ snapshots/
 ```
 
 Cada arquivo contém cabeçalho de metadados (data, plataforma, modo de extração, tratamento de sensíveis) e a saída de cada comando em bloco de código.
+
+---
+
+## Volume e legibilidade da saída
+
+Toda saída passa por normalização antes de ir para o snapshot, porque o destino é leitura por pessoas e por modelos de linguagem:
+
+- **Códigos ANSI são removidos.** O `journald` colore a saída, e as sequências de escape aparecem no meio do texto sem acrescentar informação — atrapalham tanto a leitura quanto a tokenização.
+- **Saídas excessivas são truncadas com aviso explícito** (`LIMITE_SAIDA_COMANDO`, 256 KB por comando). O corte aparece no documento como `[SAÍDA TRUNCADA PELO netsnap — N bytes no total, M linha(s) omitida(s)]`, nunca de forma silenciosa.
+- **Comandos que explodem em escala têm tratamento próprio.** Em servidor de bloqueio DNS, `named-checkconf -p` pode devolver centenas de milhares de linhas (84 mil zonas observadas em produção, 8 MB). A coleta separa a configuração global — `options`, `acl`, `logging`, `response-policy` com as zonas RPZ — das declarações de zona em massa, que viram contagem e amostra.
+
+---
+
+## Modo de depuração
+
+Ligado pelo menu (`Gerar log de depuração da coleta?`) ou por `python3 netsnap.py --debug`, gera um `_debug_*.log` **separado do snapshot**, com uma linha por evento:
+
+```
+19:28:53.864 | 177.92.253.99      | banner                 | 'SSH-2.0-OpenSSH_8.9p1 Ubuntu' em 0.09s
+19:28:53.958 | 177.92.253.99      | banner->palpite        | linux (confianca media)
+19:28:54.612 | 177.92.253.99      | identificado           | linux em 0.75s (via banner)
+19:28:55.104 | 177.92.253.99      | sudo                   | disponivel
+19:28:55.221 | 177.92.253.99      | envia comando          | ip route show table all
+19:28:55.398 | 177.92.253.99      | retorno                | 0.18s | 412 bytes | 9 linhas | default via ...
+```
+
+Registra a identificação passo a passo (banner recebido, palpite, confirmação, SSHDetect, alias, sondas), **cada comando enviado ao equipamento** com tempo, bytes, linhas e uma amostra do retorno, além de detecção de sudo e de aplicações. Erros aparecem como `ERRO no comando` com o tipo da exceção. É o arquivo a anexar quando algo não funcionar.
+
+---
+
+## Velocidade da identificação
+
+A identificação passou a usar três níveis, do mais barato ao mais caro:
+
+1. **Banner SSH** — o servidor anuncia sua identificação antes de qualquer autenticação (RFC 4253). Ler essa linha custa uma conexão TCP de milissegundos. `SSH-2.0-ROSSSH` é MikroTik com certeza; `OpenSSH_8.9p1 Ubuntu` indica Linux; `Cisco-1.25` indica IOS.
+2. **Confirmação** — um comando em uma conexão, quando o banner sugere mas não prova.
+3. **SSHDetect do Netmiko** — só quando os dois anteriores não resolvem.
+
+O ganho é maior justamente onde era pior: um servidor Linux antes passava pelo SSHDetect (que autentica e testa comandos de vários fabricantes, todos falhando), depois por uma sonda `uname` em conexão separada, e só então pela conexão de coleta — três conexões e dezenas de segundos. Agora resolve com a leitura do banner e uma confirmação.
 
 ---
 
@@ -264,7 +314,15 @@ python3 netcve.py snapshots/                    # analisa a pasta de snapshots
 python3 netcve.py snapshots/ --api-key SUA_CHAVE
 python3 netcve.py snapshots/ --sem-rede         # só heurísticas locais
 python3 netcve.py snapshots/ --csv              # gera CSV além do Markdown
+python3 netcve.py snapshots/ --todos            # inclui coletas antigas do mesmo host
+python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver abaixo)
 ```
+
+**Coletas repetidas:** por padrão, quando a pasta tem vários snapshots do mesmo host, apenas o mais recente é analisado — evita linhas duplicadas no relatório e consultas desnecessárias à NVD. Use `--todos` para incluir o histórico.
+
+**Sem a seção Inventário:** um snapshot coletado apenas no modo *Configuração* raramente declara a versão do sistema. O netcve avisa quais hosts estão nessa condição e ainda tenta deduzir a versão da própria configuração — em Junos, por exemplo, o `display set` traz `set version`. Para triagem completa, colete com *Inventário* ou *Extração total*.
+
+**Falha de certificado TLS:** se as consultas falharem com `CERTIFICATE_VERIFY_FAILED ... certificate has expired`, o problema costuma estar no repositório de autoridades da estação, não no servidor. O netcve usa o pacote `certifi` automaticamente quando instalado (`pip install --upgrade certifi`) e, ao detectar essa falha, interrompe as consultas e explica as opções em vez de repetir o erro para cada versão.
 
 **Chave da API NVD:** opcional e gratuita (<https://nvd.nist.gov/developers/request-an-api-key>). Sem chave o limite é de 5 requisições a cada 30 segundos (~6,5 s por consulta); com chave, 50 a cada 30 segundos. Pode ser passada em `--api-key` ou na variável de ambiente `NVD_API_KEY`. Versões repetidas no parque são consultadas uma única vez e o resultado fica em cache local por 7 dias.
 
