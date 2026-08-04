@@ -22,7 +22,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import os
 import re
@@ -56,6 +56,11 @@ DELAY_COM_CHAVE = 0.8
 MAPA_VERSAO = {
     "juniper_junos": [
         (r"(?im)^\s*Junos:\s*([0-9][\w.\-]+)", "juniper", "junos", "Junos"),
+        # A configuração em 'display set' declara a release; permite triagem
+        # mesmo em snapshot coletado apenas no modo Configuração.
+        (r"(?im)^set version\s+([0-9][\w.\-]+)", "juniper", "junos", "Junos"),
+        (r"(?im)^\s*version\s+([0-9]+\.[0-9]+[A-Z][\w.\-]*)",
+         "juniper", "junos", "Junos"),
         (r"(?i)JUNOS\s+(?:Software\s+Release\s+)?\[?([0-9][\w.\-]+)\]?",
          "juniper", "junos", "Junos"),
     ],
@@ -76,6 +81,8 @@ MAPA_VERSAO = {
     ],
     "cisco_nxos": [
         (r"(?im)^\s*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)",
+         "cisco", "nx-os", "NX-OS"),
+        (r"(?im)^version\s+([0-9]+\.[0-9]+\([0-9][\w.)]*)",
          "cisco", "nx-os", "NX-OS"),
     ],
     "cisco_xr": [
@@ -283,11 +290,59 @@ def avaliar_config(meta, texto):
 # ---------------------------------------------------------------------------
 # Consulta NVD e CISA KEV
 # ---------------------------------------------------------------------------
+# Verificação TLS. Em estações com repositório de certificados desatualizado
+# (comum no Windows e em sistemas antigos), a validação falha com
+# "certificate has expired" mesmo o servidor estando correto. O pacote
+# certifi traz um conjunto atualizado de autoridades e é usado quando presente.
+VERIFICAR_TLS = True
+
+
+def contexto_ssl():
+    if not VERIFICAR_TLS:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def http_json(url, timeout=45, headers=None):
     req = urllib.request.Request(url, headers=headers or {"User-Agent": UA})
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+    with urllib.request.urlopen(req, timeout=timeout,
+                                context=contexto_ssl()) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def explicar_falha_tls(e) -> str:
+    """Traduz a falha de validação TLS em uma orientação prática."""
+    texto = str(e)
+    if "CERTIFICATE_VERIFY_FAILED" not in texto:
+        return ""
+    try:
+        import certifi  # noqa: F401
+        tem_certifi = True
+    except ImportError:
+        tem_certifi = False
+    aviso = ["", "[!] A validação do certificado TLS falhou.",
+             "    Isso costuma indicar repositório de autoridades "
+             "desatualizado na estação, não problema no servidor consultado.",
+             "    Soluções, em ordem de preferência:"]
+    if not tem_certifi:
+        aviso.append("      1. pip install --upgrade certifi   "
+                     "(o netcve passa a usar esse conjunto automaticamente)")
+    else:
+        aviso.append("      1. pip install --upgrade certifi   "
+                     "(certifi está instalado, mas pode estar desatualizado)")
+    aviso.append("      2. atualizar os certificados do sistema operacional")
+    aviso.append("      3. --sem-rede  (aplica apenas as heurísticas locais "
+                 "de configuração)")
+    aviso.append("      4. --inseguro  (ignora a validação TLS; use apenas "
+                 "em rede confiável e sabendo do risco)")
+    return "\n".join(aviso)
 
 
 def carregar_cache():
@@ -317,6 +372,9 @@ def baixar_kev():
         return {v["cveID"] for v in dados.get("vulnerabilities", [])}
     except Exception as e:
         print(f"[!] Não foi possível obter o catálogo CISA KEV: {e}")
+        ajuda = explicar_falha_tls(e)
+        if ajuda:
+            print(ajuda)
         return set()
 
 
@@ -547,9 +605,20 @@ def main():
                     help="máximo de CVEs listados por versão (padrão: 15)")
     ap.add_argument("--csv", action="store_true",
                     help="gera também um CSV para planilha")
+    ap.add_argument("--todos", action="store_true",
+                    help="analisa todos os snapshots, inclusive coletas "
+                         "antigas do mesmo host (padrão: só a mais recente)")
+    ap.add_argument("--inseguro", action="store_true",
+                    help="ignora a validação do certificado TLS nas consultas "
+                         "à NVD e à CISA (use apenas em rede confiável)")
     ap.add_argument("-v", "--version", action="version",
                     version=f"netcve {__version__}")
     args = ap.parse_args()
+
+    global VERIFICAR_TLS
+    if args.inseguro:
+        VERIFICAR_TLS = False
+        print("[!] Validação de certificado TLS desativada (--inseguro).")
 
     if not os.path.isdir(args.pasta):
         alternativa = os.path.join(os.path.expanduser("~"), "netsnap_snapshots")
@@ -575,12 +644,34 @@ def main():
         print("[!] Sem chave da API NVD: limite de 5 req/30s "
               "(~6,5s por consulta). Chave gratuita acelera 10x.")
 
+    # A pasta costuma acumular coletas sucessivas do mesmo equipamento.
+    # Analisar todas produz linhas repetidas no relatório e consultas
+    # desnecessárias; por padrão fica apenas a mais recente de cada host.
+    if not args.todos:
+        recentes = {}
+        for caminho in arquivos:
+            meta, _ = ler_snapshot(caminho)
+            chave = (meta.get("host"), meta.get("ip"))
+            anterior = recentes.get(chave)
+            if not anterior or meta.get("collected_at", "") >= anterior[0]:
+                recentes[chave] = (meta.get("collected_at", ""), caminho)
+        selecionados = sorted(c for _, c in recentes.values())
+        if len(selecionados) < len(arquivos):
+            print(f"[+] {len(arquivos) - len(selecionados)} snapshot(s) "
+                  f"antigo(s) do mesmo host ignorado(s) "
+                  f"(use --todos para incluir)")
+        arquivos = selecionados
+
     hosts = []
     consultas = {}
+    sem_inventario = []
     for caminho in arquivos:
         meta, texto = ler_snapshot(caminho)
         versoes = extrair_versoes(meta, texto)
         config = avaliar_config(meta, texto)
+        secoes = meta.get("sections") or []
+        if isinstance(secoes, list) and secoes and "inventario" not in secoes:
+            sem_inventario.append(meta.get("host"))
         hosts.append({
             "host": meta.get("host"),
             "ip": meta.get("ip"),
@@ -595,6 +686,15 @@ def main():
             if v["consultavel"]:
                 consultas.setdefault(
                     (v["cpe_fornecedor"], v["cpe_produto"], v["versao"]), [])
+
+    if sem_inventario:
+        print(f"\n[!] {len(sem_inventario)} snapshot(s) sem a seção "
+              "*Inventário*: a versão só pode ser deduzida da configuração, "
+              "quando declarada.")
+        print("    Para triagem completa, colete com a opção 'Inventário' ou "
+              "'Extração total' no netsnap.")
+        print(f"    Host(s): {', '.join(sem_inventario[:8])}"
+              + (" ..." if len(sem_inventario) > 8 else ""))
 
     kev = set()
     if not args.sem_rede:
@@ -619,6 +719,13 @@ def main():
                     time.sleep(delay)
             except Exception as e:
                 print(f"        [!] Falha: {e}")
+                ajuda = explicar_falha_tls(e)
+                if ajuda:
+                    print(ajuda)
+                    print("    Consultas à NVD interrompidas; o relatório "
+                          "será gerado apenas com as heurísticas locais.\n")
+                    consultas = {k: [] for k in consultas}
+                    break
                 consultas[(fornecedor, produto, versao)] = []
         salvar_cache(cache)
 
