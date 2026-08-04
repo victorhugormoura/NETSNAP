@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# NETSNAP
-=======
 # netsnap
 
 Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de rede e servidores em produção. Conecta via SSH, autodetecta a plataforma, coleta as informações escolhidas em paralelo e gera um arquivo **Markdown por host** — pronto para análise humana, ingestão em outra IA ou arquivamento.
@@ -27,7 +24,8 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 
 | Módulo | O que extrai |
 |---|---|
-| **WANGuard** | Configuração (descoberta por glob — o nome do arquivo muda entre versões), unidades systemd e processos ativos, endereçamento, mitigação em uso (`iptables`, `nftables`, `ipset`), sessões BGP de blackhole/flowspec (BIRD, FRR, ExaBGP), log de anomalias e ataques, binários e licença |
+| **WANGuard** | Configuração (descoberta por glob — o nome do arquivo muda entre versões; arquivos de credencial são pulados), unidades systemd e processos ativos, endereçamento, mitigação em uso (`iptables`, `nftables`, `ipset`), sessões BGP de blackhole/flowspec (BIRD, FRR, ExaBGP), log de anomalias, binários e versão |
+| **WANGuard — configuração operacional** | A partir do Wanguard 9 sensores, grupos de IP, filtros, respostas, anomalias e licença ficam no MariaDB, não em arquivo. Consulta ao banco (somente `SELECT`/`SHOW`/`DESCRIBE`) com descoberta automática das tabelas |
 | **Zabbix** | `zabbix_server.conf` / `zabbix_proxy.conf` / agente **sem linhas comentadas**, includes, frontend e vhost, scripts externos e de alerta, estado dos serviços e portas, versões e pacotes |
 | **Zabbix — inventário monitorado** | Consulta ao banco (somente `SELECT`): contagem de hosts/itens/triggers, **lista de hosts com IP e estado**, grupos, templates, **problemas ativos com severidade**, ações, tipos de mídia, dashboards e proxies |
 | **Grafana** | `grafana.ini` sem comentários, provisionamento declarativo (`provisioning/datasources`, `dashboards`, `alerting`), plugins, `/api/health`, versões e pacotes |
@@ -295,4 +293,3 @@ Trate o relatório como **triagem para priorizar investigação**, não como lau
 Distribuído sob a licença [MIT](LICENSE).
 
 Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
->>>>>>> a11c8a2 (Initial Commit)
