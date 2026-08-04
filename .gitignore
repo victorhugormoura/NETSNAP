@@ -1,0 +1,33 @@
+# Saídas das ferramentas — contêm dados de infraestrutura em produção
+snapshots/
+netsnap_snapshots/
+diagnosticos/
+netdiag_diagnosticos/
+_cve_triagem_*.md
+_cve_triagem_*.csv
+_diagnostico_*.md
+_diagnostico_*.json
+_indice_*.md
+
+# Cache local do netcve (resultados da NVD)
+.netcve_cache.json
+
+# Listas de equipamentos e credenciais
+ips.txt
+*.ips
+alvos*.txt
+.env
+credenciais*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editores / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
