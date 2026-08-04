@@ -16,7 +16,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.5.0"
+__version__ = "1.9.0"
 
 import os
 import re
@@ -43,6 +43,50 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 PASTA_SAIDA = "snapshots"
 PRINT_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Depuração: registra em arquivo próprio cada etapa da identificação e cada
+# comando enviado ao equipamento, com tempo e volume de retorno. O arquivo é
+# independente do snapshot e destina-se a diagnóstico da própria coleta.
+# ---------------------------------------------------------------------------
+DEBUG = False
+ARQUIVO_DEBUG = None
+DEBUG_LOCK = threading.Lock()
+DEBUG_LIMITE_AMOSTRA = 400   # caracteres de retorno registrados por comando
+
+
+def iniciar_debug(pasta):
+    global ARQUIVO_DEBUG
+    ARQUIVO_DEBUG = os.path.join(
+        pasta, f"_debug_{datetime.now():%Y%m%d_%H%M%S}.log")
+    with open(ARQUIVO_DEBUG, "w", encoding="utf-8") as f:
+        f.write(f"# netsnap {__version__} — log de depuração\n")
+        f.write(f"# iniciado em {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"# python {platform.python_version()} em "
+                f"{platform.system()} {platform.release()}\n")
+        f.write("# formato: hora | host | evento | detalhe\n\n")
+    return ARQUIVO_DEBUG
+
+
+def depurar(host, evento, detalhe=""):
+    """Registra um evento no log de depuração (sem efeito se DEBUG=False)."""
+    if not DEBUG or not ARQUIVO_DEBUG:
+        return
+    linha = (f"{datetime.now():%H:%M:%S.%f}"[:-3] +
+             f" | {host:<18} | {evento:<22} | {detalhe}")
+    with DEBUG_LOCK:
+        try:
+            with open(ARQUIVO_DEBUG, "a", encoding="utf-8") as f:
+                f.write(linha + "\n")
+        except OSError:
+            pass
+
+
+def resumir_saida(texto, limite=DEBUG_LIMITE_AMOSTRA):
+    """Compacta um retorno para registro no log, preservando o essencial."""
+    t = PADRAO_ANSI.sub("", texto or "")
+    t = " ".join(t.split())
+    return t[:limite] + (" [...]" if len(t) > limite else "")
 
 SECOES = ["config", "logs", "basico", "optica", "vizinhanca", "inventario"]
 TITULOS = {
@@ -416,13 +460,55 @@ PERFIS = {
     "linux": {
         "nome": "Servidor Linux",
         "fabricante": "Linux",
+        # A coleta busca o necessário para reconstruir o servidor: identidade,
+        # rede completa (endereços, rotas de todas as tabelas, regras, firewall),
+        # serviços habilitados, agendamentos, repositórios e usuários.
         "config": [
             "cat /etc/os-release",
+            "cat /etc/hostname /etc/hosts /etc/resolv.conf 2>/dev/null",
             "ip -br address",
-            "ip route",
-            "ss -tulpn",
+            "ip -d address",
+            "ip route show table all",
+            "ip rule show",
+            # O BIND abre um socket UDP por worker thread por interface (832
+            # sockets em 14 endereços num servidor de 32 núcleos). A remoção
+            # do descritor de arquivo colapsa as repetições sem perder
+            # nenhuma combinação de endereço, porta e processo.
+            "ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "sort -u | head -n 150",
+            # Firewall: as três implementações possíveis
+            "{S}iptables-save 2>/dev/null | head -n 300",
+            "{S}nft list ruleset 2>/dev/null | head -n 300",
+            "{S}ufw status verbose 2>/dev/null",
+            # Serviços: habilitados no boot é o que reconstrói o servidor;
+            # 'running' mostra o estado atual
+            "systemctl list-unit-files --type=service --state=enabled --no-pager",
             "systemctl list-units --type=service --state=running --no-pager",
-            "systemctl list-unit-files --type=service --no-pager",
+            "systemctl list-timers --all --no-pager",
+            "systemctl --failed --no-pager",
+            # Agendamentos
+            "{S}ls -la /etc/cron.d/ /etc/cron.daily/ /etc/cron.hourly/ 2>/dev/null",
+            "{S}crontab -l 2>/dev/null; for u in $(cut -d: -f1 /etc/passwd); do "
+            "c=$({S}crontab -u \"$u\" -l 2>/dev/null); [ -n \"$c\" ] && "
+            "{ echo \"===== crontab de $u\"; echo \"$c\"; }; done",
+            # Montagens e repositórios
+            "cat /etc/fstab 2>/dev/null",
+            "findmnt -t ext4,xfs,btrfs,nfs,nfs4,vfat --noheadings 2>/dev/null "
+            "|| mount | grep -v -E 'cgroup|proc|sysfs|tmpfs'",
+            "cat /etc/apt/sources.list /etc/apt/sources.list.d/*.list "
+            "/etc/apt/sources.list.d/*.sources 2>/dev/null | "
+            "grep -v -E '^[[:space:]]*#|^[[:space:]]*$'",
+            "cat /etc/yum.repos.d/*.repo 2>/dev/null | "
+            "grep -v -E '^[[:space:]]*#|^[[:space:]]*$'",
+            # Usuários e acesso
+            "getent passwd | awk -F: '$3>=1000 || $3==0 {print $1\":\"$3\":\"$6\":\"$7}'",
+            "getent group | grep -E 'sudo|wheel|adm|docker'",
+            "{S}grep -v -E '^[[:space:]]*#|^[[:space:]]*$' /etc/ssh/sshd_config "
+            "2>/dev/null; {S}cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null",
+            "{S}ls -la /etc/sudoers.d/ 2>/dev/null",
+            # Parâmetros de rede alterados em relação ao padrão
+            "{S}cat /etc/sysctl.conf /etc/sysctl.d/*.conf 2>/dev/null | "
+            "grep -v -E '^[[:space:]]*#|^[[:space:]]*$'",
         ],
         "logs": ["journalctl -n 300 --no-pager"],
         "basico": [
@@ -460,8 +546,17 @@ PERFIS = {
         "inventario": [
             "cat /etc/os-release",
             "uname -a",
+            "lsmod 2>/dev/null | head -n 60",
+            "{S}dmidecode -s system-manufacturer -s system-product-name "
+            "2>/dev/null; {S}systemd-detect-virt 2>/dev/null",
             "(dpkg -l 2>/dev/null || rpm -qa 2>/dev/null) | head -n 400",
-            "(command -v docker >/dev/null && docker ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}') 2>/dev/null",
+            "{S}ls -1 /etc/apt/sources.list.d/ 2>/dev/null; "
+            "apt list --upgradable 2>/dev/null | head -n 40",
+            "(command -v docker >/dev/null && {S}docker ps -a --format "
+            "'{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}') 2>/dev/null",
+            "{S}find /opt /srv /root /home -maxdepth 3 "
+            "\\( -name 'docker-compose.y*ml' -o -name 'compose.y*ml' \\) "
+            "2>/dev/null | head -n 10",
             "ls -la /etc/*licen* /opt/*/licen* /opt/*/etc/*licen* 2>/dev/null",
         ],
     },
@@ -495,6 +590,17 @@ DEF_Q_WANGUARD = (
     "elif [ -z \"$WD\" ]; then echo '(banco do Wanguard nao localizado)'; "
     "else MYSQL_PWD=\"$WP\" mysql -h \"${WH:-localhost}\" -u \"$WU\" "
     "-D \"$WD\" -B -e \"$1\" 2>&1; fi; }; "
+    # WT(): despeja uma tabela excluindo colunas cujo nome indique segredo.
+    # Necessário porque a saída do mysql é tabular: um valor sob a coluna
+    # 'password' não seria detectado pelo sanitizador, que procura par
+    # chave=valor. A exclusão é feita na origem, pela lista de colunas.
+    "WT(){ C=$(W \"DESCRIBE \\`$1\\`\" 2>/dev/null | tail -n +2 | "
+    "awk '{print $1}' | grep -v -i -E "
+    "'pass|secret|_key$|^key$|token|community|credential|hash|salt|"
+    "^license$|^prev_license$' | "
+    "sed 's/^/`/;s/$/`/' | paste -sd, -); "
+    "[ -z \"$C\" ] && { echo \"(tabela $1 inacessivel)\"; return; }; "
+    "W \"SELECT $C FROM \\`$1\\` ${2:-LIMIT 50}\"; }; "
     "echo \"banco: ${WD:-nao identificado} em ${WH:-localhost}\""
 )
 
@@ -641,29 +747,78 @@ APPS_LINUX = {
         # MariaDB, não em arquivo: o etc/ contém apenas Apache, InfluxDB e
         # as credenciais do banco. Sem esta seção, a coleta não registra
         # nada do que o WANGuard realmente monitora.
+        # A partir do Wanguard 9 a configuração operacional fica no MariaDB.
+        # As tabelas abaixo foram confirmadas em uma instalação 9.0-3; as que
+        # não existirem em outra versão são marcadas e não poluem o relatório.
+        # Tabelas de autenticação (company_staff, httpauth, ldapauth,
+        # radiusauth, samlauth) são deliberadamente omitidas por conterem
+        # credenciais de operador.
         "extra": {
-            "titulo": "Configuração operacional no banco (sensores, grupos, "
-                      "filtros, anomalias e licença)",
+            "titulo": "Configuração operacional no banco (componentes, "
+                      "zonas de IP, respostas, ataques e licença)",
             "comandos": [
                 DEF_Q_WANGUARD,
-                "W \"SHOW TABLES\"",
-                # Estrutura e volume das tabelas relevantes, descobertas pelo
-                # nome — o esquema varia entre versões do Wanguard.
-                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
-                "grep -i -E 'sensor|anomal|licen|ip_?group|ip_?zone|filter|"
-                "response|decision|threshold|comment'); do "
-                "echo \"===== $t\"; W \"SELECT COUNT(*) AS registros FROM $t\"; "
-                "done",
-                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
-                "grep -i -E 'sensor|licen|ip_?group|ip_?zone'); do "
-                "echo \"===== $t (estrutura)\"; W \"DESCRIBE $t\"; done",
-                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
-                "grep -i -E 'sensor|licen|ip_?group|ip_?zone'); do "
-                "echo \"===== $t (amostra)\"; "
-                "W \"SELECT * FROM $t LIMIT 20\"; done",
-                "for t in $(W \"SHOW TABLES\" 2>/dev/null | tail -n +2 | "
-                "grep -i -E 'anomal'); do echo \"===== $t (mais recentes)\"; "
-                "W \"SELECT * FROM $t ORDER BY 1 DESC LIMIT 30\"; done",
+                # Identificação e licença. A coluna 'license' guarda a
+                # chave em base64 (segredo do contrato) e não é despejada:
+                # só os metadados que interessam ao inventário.
+                "WT version",
+                "W \"SELECT id, filename, update_time, "
+                "LENGTH(license) AS tamanho_chave, "
+                "CASE WHEN license IS NULL OR license='' THEN 'ausente' "
+                "ELSE 'presente' END AS chave FROM license\"",
+                # Componentes: cada linha é um sensor/filtro configurado
+                "for t in wanserver wansensor wansensor_virtual wanflow "
+                "wansniff wansnmp wanfilter wanconsole wanwatcher; do "
+                "echo \"===== $t\"; WT $t; done",
+                # Interfaces monitoradas por componente
+                "for t in wanserver_interfaces wanflow_interfaces "
+                "wansnmp_interfaces; do echo \"===== $t\"; WT $t; done",
+                # Zonas de IP, prefixos monitorados e regras por prefixo
+                "for t in ipaddr ipaddrdesc ipaddrrules; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 300\"; done",
+                # Perfis de detecção de anomalia e limiares
+                "for t in anomalies templates templatesrules "
+                "profiling_templates profiling_templatesrules "
+                "profiling_ipaddrrules baseline_profiles; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
+                # Respostas automáticas: o que o WANGuard faz ao detectar
+                "for t in actions actions_bgp actions_filters "
+                "actions_reconfigure actions_snmp actions_syslog "
+                "actions_notify actions_webhook actions_reports "
+                "actions_scripts actions_dumps; do echo \"===== $t\"; "
+                "WT $t \"LIMIT 100\"; done",
+                # Roteadores e BGP usados para blackhole/flowspec
+                "for t in router quagga scrubber_tunnels "
+                "scrubber_tunnel_settings; do echo \"===== $t\"; WT $t; done",
+                # Exceções, listas brancas e regras de filtragem
+                "for t in whitelists exceptions blacklist_settings "
+                "blacklist_ds fr_settings fr_list fw_custom_fr; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
+                # Mitigação em vigor neste instante
+                "echo '===== active_fw_rules (mitigacao ativa agora)'; "
+                "WT active_fw_rules \"LIMIT 200\"",
+                # Histórico recente de ataques — o que de fato aconteceu
+                "echo '===== attacks (30 mais recentes)'; "
+                "WT attacks \"ORDER BY 1 DESC LIMIT 30\"",
+                "echo '===== attacks_logs (60 mais recentes)'; "
+                "WT attacks_logs \"ORDER BY 1 DESC LIMIT 60\"",
+                # Volume das tabelas de séries temporais, sem despejá-las
+                "W \"SELECT table_name, table_rows, "
+                "ROUND(data_length/1024/1024) AS mb FROM "
+                "information_schema.tables WHERE table_schema=DATABASE() "
+                "AND table_name NOT LIKE 'acct%' ORDER BY data_length DESC "
+                "LIMIT 40\"",
+                # Contagem das tabelas de accounting diário, que são milhares
+                "W \"SELECT COUNT(*) AS tabelas_de_accounting FROM "
+                "information_schema.tables WHERE table_schema=DATABASE() "
+                "AND table_name LIKE 'acct%'\"",
+                # Demais tabelas existentes, para diagnóstico de versão
+                "W \"SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=DATABASE() AND table_name NOT LIKE 'acct%' "
+                "ORDER BY table_name\"",
+                # Agendamentos, relatórios e saúde
+                "for t in schedule_reports wanhealth_check maintenance "
+                "defaults; do echo \"===== $t\"; WT $t \"LIMIT 100\"; done",
             ],
         },
     },
@@ -825,7 +980,25 @@ APPS_LINUX = {
         "deteccao": "command -v named >/dev/null 2>&1 || test -d /etc/bind "
                     "&& echo PRESENTE",
         "config": [
-            "{S}named-checkconf -p 2>&1",
+            # Em servidor de bloqueio DNS a configuração efetiva chega a
+            # centenas de milhares de linhas (84 mil zonas observadas em
+            # produção). O despejo integral inviabiliza a leitura, então a
+            # coleta separa a configuração global das declarações de zona,
+            # que são resumidas e amostradas logo abaixo.
+            # O awk conta chaves para suprimir apenas os blocos de zona
+            # completos. Linhas como 'zone "rpz.anablock";' dentro de
+            # response-policy não abrem bloco e são preservadas — são
+            # exatamente as que interessam.
+            "{S}named-checkconf -p 2>/dev/null | awk '"
+            "/^[[:space:]]*zone[[:space:]]+\"/ && /{/ "
+            "{d=gsub(/{/,\"{\")-gsub(/}/,\"}\"); if(d>0) z=1; next} "
+            "z {d+=gsub(/{/,\"{\")-gsub(/}/,\"}\"); if(d<=0) z=0; next} "
+            "{print}' | head -n 400",
+            "echo \"total de zonas declaradas: $({S}named-checkconf -p "
+            "2>/dev/null | grep -c '^[[:space:]]*zone[[:space:]]*\"')\"",
+            "{S}named-checkconf -p 2>/dev/null | "
+            "sed -n 's/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+            "| head -n 100",
             "for f in /etc/bind/named.conf /etc/named.conf "
             "/etc/bind/named.conf.options /etc/bind/named.conf.local; do "
             "[ -f \"$f\" ] && { echo \"===== $f\"; {S}cat \"$f\"; }; done",
@@ -838,44 +1011,112 @@ APPS_LINUX = {
             "{S}ls -la /var/log/named* /var/log/bind* 2>/dev/null",
         ],
         "basico": [
+            # Amostra e contagem: a lista completa de zonas pode ter
+            # dezenas de milhares de entradas e não cabe no documento.
             "{S}named-checkconf -p 2>/dev/null | "
             "sed -n 's/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-            "| sort -u | head -n 200",
-            "{S}named-checkconf -p 2>/dev/null | "
+            "| sort -u | head -n 150",
+            "echo \"zonas distintas: $({S}named-checkconf -p 2>/dev/null | "
             "sed -n 's/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-            "| sort -u | wc -l",
+            "| sort -u | wc -l)\"",
+            # rndc status traz a contagem que o próprio BIND reconhece
+            "{S}rndc status 2>&1 | head -n 20",
             "dig @127.0.0.1 . SOA +time=3 +tries=1 2>&1 | head -n 20",
-            "{S}ss -lnup 2>/dev/null | grep :53",
+            "{S}ss -lnup 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "grep :53 | sort -u | head -n 40",
         ],
         "inventario": [
             "named -v 2>&1; named -V 2>&1 | head -n 20",
             "(dpkg -l 2>/dev/null | grep -i -E 'bind9|bind-') "
             "|| (rpm -qa 2>/dev/null | grep -i '^bind')",
         ],
-        # Seção exclusiva: verificação de RPZ / AnaBlock
+        # Verificação do bloqueio DNS. Existem dois mecanismos distintos em
+        # uso no mercado brasileiro, e a coleta identifica qual está ativo:
+        #
+        #   RPZ (Response Policy Zone) — bloco 'response-policy' em named.conf
+        #   apontando para zonas de política; o BIND reescreve a resposta.
+        #
+        #   Sinkhole por zona — usado pelo AnaBlock: declara cada domínio
+        #   bloqueado como zona master apontando para um arquivo único
+        #   (tipicamente db.local), de modo que o recursor passa a responder
+        #   como autoritativo pelo domínio. Não há bloco 'response-policy'.
+        #
+        # A efetividade é comprovada por consulta real ao próprio resolvedor,
+        # não pela presença da configuração.
         "extra": {
-            "titulo": "Bloqueio DNS (RPZ / AnaBlock) — status e efetividade",
+            "titulo": "Bloqueio DNS (RPZ / AnaBlock) — mecanismo, "
+                      "abrangência e prova de efetividade",
             "comandos": [
-                "{S}named-checkconf -p 2>/dev/null | "
-                "awk '/response-policy/,/};/' ",
+                # 1. Qual mecanismo está em uso
+                "R=$({S}named-checkconf -p 2>/dev/null | "
+                "awk '/response-policy/,/};/'); "
+                "if [ -n \"$R\" ]; then echo 'mecanismo: RPZ (response-policy)'; "
+                "echo \"$R\"; else echo 'mecanismo: sem bloco response-policy "
+                "— bloqueio por zona-sinkhole (padrao AnaBlock) ou ausente'; fi",
+                # 2. Arquivo de listas e volume
+                "{S}find /etc/bind /var/named /etc/anablock /opt/anablock "
+                "-maxdepth 3 \\( -iname '*anablock*' -o -iname '*rpz*' \\) "
+                "2>/dev/null | head -n 20",
+                "for f in $({S}find /etc/bind /etc/anablock /opt/anablock "
+                "-maxdepth 2 -iname '*anablock*.conf' -o -maxdepth 2 "
+                "-iname '*rpz*.conf' 2>/dev/null | head -n 3); do "
+                "echo \"===== $f: $({S}grep -c '' \"$f\" 2>/dev/null) linhas, "
+                "$({S}grep -c '^[[:space:]]*zone' \"$f\" 2>/dev/null) zona(s)\"; "
+                "{S}head -n 5 \"$f\"; done",
+                # 3. Zonas de política declaradas (filtro ancorado: evita
+                # domínios bloqueados que apenas contenham 'block' no nome)
                 "{S}named-checkconf -p 2>/dev/null | "
                 "sed -n 's/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-                "| grep -i -E 'rpz|block|anablock' | sort -u",
+                "| grep -i -E '(^|\\.)(rpz|anablock)([.-]|$)|\\.rpz\\.|^rpz' "
+                "| sort -u | head -n 20",
+                # 4. Alvo do sinkhole: para onde os domínios bloqueados apontam
+                "for f in /etc/bind/db.local /etc/bind/db.blocked "
+                "/etc/bind/db.anablock; do [ -f \"$f\" ] && "
+                "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+                # 5. PROVA DE EFETIVIDADE — consulta real ao resolvedor local.
+                # O AnaBlock publica domínios de teste próprios; a resposta
+                # deles demonstra se o bloqueio está de fato atuando.
+                "for d in block-test.anablock.net.br blocktest.anablock.net.br; "
+                "do echo \"===== teste oficial: $d\"; "
+                "dig @127.0.0.1 \"$d\" A +short +time=3 +tries=1 2>&1 | "
+                "head -n 5; done",
+                # Amostra tirada da própria lista instalada
+                "F=$({S}find /etc/bind /etc/anablock -maxdepth 2 "
+                "-iname '*anablock*.conf' 2>/dev/null | head -n1); "
+                "if [ -n \"$F\" ]; then for d in $({S}sed -n "
+                "'s/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+                "\"$F\" | head -n 3); do echo \"===== bloqueado (amostra): $d\"; "
+                "dig @127.0.0.1 \"$d\" A +short +time=3 +tries=1 2>&1 | "
+                "head -n 3; done; fi",
+                # Controle: domínio fora da lista deve resolver normalmente
+                "echo '===== controle (nao bloqueado): iana.org'; "
+                "dig @127.0.0.1 iana.org A +short +time=3 +tries=1 2>&1 | "
+                "head -n 3",
+                # 6. Estado das zonas de política no BIND (carregadas?)
                 "for z in $({S}named-checkconf -p 2>/dev/null | "
                 "sed -n 's/^[[:space:]]*zone[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-                "| grep -i -E 'rpz|block|anablock' | sort -u); do "
-                "echo \"===== zona: $z\"; {S}rndc zonestatus \"$z\" 2>&1; done",
-                "{S}find /etc/bind /var/named /var/cache/bind /etc/anablock "
-                "/opt/anablock -maxdepth 3 -iname '*rpz*' -o -iname '*anablock*' "
-                "-o -iname '*block*' 2>/dev/null | head -n 40",
-                "for f in $({S}find /etc/bind /var/named /var/cache/bind "
-                "-maxdepth 3 -iname '*rpz*' -o -iname '*anablock*' 2>/dev/null "
-                "| head -n 5); do echo \"===== $f ($({S}grep -c . \"$f\" "
-                "2>/dev/null) linhas)\"; {S}head -n 15 \"$f\"; done",
+                "| grep -i -E '(^|\\.)(rpz|anablock)([.-]|$)' | sort -u "
+                "| head -n 5); do echo \"===== zonestatus: $z\"; "
+                "{S}rndc zonestatus \"$z\" 2>&1 | head -n 8; done",
+                # 7. Atualização da lista: serviço, cron e script
                 "systemctl list-units --no-pager --all 2>/dev/null | "
-                "grep -i -E 'anablock|rpz'",
+                "grep -i -E 'anablock|rpz'; systemctl list-timers --all "
+                "--no-pager 2>/dev/null | grep -i -E 'anablock|rpz'",
                 "{S}crontab -l 2>/dev/null | grep -i -E 'anablock|rpz'; "
-                "{S}grep -r -i -l -E 'anablock|rpz' /etc/cron* 2>/dev/null",
+                "{S}grep -r -h -i -E 'anablock|rpz' /etc/crontab "
+                "/etc/cron.d/ 2>/dev/null | head -n 10",
+                "for s in $({S}find /etc/bind /etc/anablock /opt/anablock "
+                "-maxdepth 2 \\( -iname '*anablock*.sh' -o -iname '*rpz*.sh' \\) "
+                "2>/dev/null | head -n 3); do echo \"===== $s\"; "
+                "{S}head -n 60 \"$s\"; done",
+                # 8. Dimensão do bloqueio frente ao total de zonas
+                "echo \"zonas totais no BIND: $({S}rndc status 2>/dev/null | "
+                "sed -n 's/.*number of zones: *\\([0-9]*\\).*/\\1/p')\"; "
+                "echo \"zonas em arquivos de bloqueio: $({S}find /etc/bind "
+                "/etc/anablock -maxdepth 2 -iname '*anablock*.conf' -o "
+                "-maxdepth 2 -iname '*rpz*.conf' 2>/dev/null | "
+                "xargs -r {S}grep -h -c '^[[:space:]]*zone' 2>/dev/null | "
+                "paste -sd+ - | bc 2>/dev/null)\"",
                 "{S}rndc status 2>&1 | grep -i -E 'zones|recursive|server is up'",
             ],
         },
@@ -955,6 +1196,35 @@ PADRAO_ERRO_LIVRE = re.compile(
 )
 
 
+# Volume máximo gravado por comando. Existe porque um único comando pode
+# devolver dezenas de MB (por exemplo 'named-checkconf -p' em servidor com
+# dezenas de milhares de zonas), o que inviabiliza a leitura do snapshot por
+# um modelo de linguagem. O corte é explícito no relatório.
+LIMITE_SAIDA_COMANDO = 256 * 1024
+
+
+def normalizar_saida(texto: str, limite: int = None) -> str:
+    """Remove códigos ANSI (o journald colore a saída, o que polui o
+    documento sem acrescentar informação) e trunca volumes excessivos,
+    registrando o corte de forma explícita."""
+    if not texto:
+        return texto
+    texto = PADRAO_ANSI.sub("", texto)
+    texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+    limite = LIMITE_SAIDA_COMANDO if limite is None else limite
+    if limite and len(texto) > limite:
+        total_linhas = len(texto.splitlines())
+        corte = texto[:limite]
+        corte = corte[:corte.rfind("\n")] if "\n" in corte else corte
+        omitidas = total_linhas - len(corte.splitlines())
+        corte += (f"\n\n[SAÍDA TRUNCADA PELO netsnap — {len(texto)} bytes no "
+                  f"total, {omitidas} linha(s) omitida(s). O conteúdo acima é "
+                  f"o início da saída; ajuste LIMITE_SAIDA_COMANDO para "
+                  f"ampliar.]")
+        return corte
+    return texto
+
+
 def sem_saida_util(saida: str) -> bool:
     """Identifica retorno vazio ou de comando não suportado pela plataforma."""
     texto = PADRAO_ANSI.sub("", saida or "").strip()
@@ -1003,6 +1273,11 @@ def escolher_instancias() -> int:
     if op.isdigit() and 1 <= int(op) <= 10:
         return int(op)
     return 5
+
+
+def escolher_debug() -> bool:
+    op = input("Gerar log de depuração da coleta? [s/N]: ").strip().lower()
+    return op == "s"
 
 
 def escolher_varredura() -> str:
@@ -1072,6 +1347,87 @@ def porta_aberta(ip: str, porta: int, tempo: int = 3) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Identificação rápida pelo banner SSH
+#
+# O servidor SSH anuncia sua identificação antes de qualquer autenticação
+# (RFC 4253, seção 4.2). Ler essa linha custa uma conexão TCP de milissegundos
+# e, em boa parte do parque, já determina a plataforma — evitando o
+# SSHDetect do Netmiko, que autentica e testa uma sequência de comandos de
+# vários fabricantes até acertar.
+#
+# Confiança 'alta'  : o banner identifica o fabricante sem ambiguidade.
+# Confiança 'media' : indica a família, mas exige confirmação (OpenSSH é usado
+#                     por Linux, Junos e NX-OS).
+# ---------------------------------------------------------------------------
+BANNER_PLATAFORMA = [
+    (re.compile(r"(?i)ROSSSH|RouterOS"), "mikrotik_routeros", "alta"),
+    (re.compile(r"(?i)Cisco-1\.\d+"), "cisco_ios", "media"),
+    (re.compile(r"(?i)Cisco-2\.\d+"), "cisco_xr", "media"),
+    (re.compile(r"(?i)HUAWEI|VRP"), "huawei", "media"),
+    (re.compile(r"(?i)OpenSSH.*(Ubuntu|Debian|Raspbian|el[789]|SUSE|FreeBSD)"),
+     "linux", "media"),
+    (re.compile(r"(?i)Junos|JUNOSSSH"), "juniper_junos", "media"),
+    (re.compile(r"(?i)FiberHome|AN[56]\d{3}"), "fiberhome", "media"),
+]
+
+
+def ler_banner(ip: str, porta: int, tempo: int = 4):
+    """Lê a linha de identificação do servidor SSH sem autenticar.
+    Retorna o banner, ou None se a porta não responder."""
+    try:
+        with socket.create_connection((ip, porta), timeout=tempo) as s:
+            s.settimeout(tempo)
+            dados = b""
+            while b"\n" not in dados and len(dados) < 512:
+                pedaco = s.recv(256)
+                if not pedaco:
+                    break
+                dados += pedaco
+        return dados.decode("utf-8", "replace").strip() or None
+    except OSError:
+        return None
+
+
+def plataforma_por_banner(banner: str):
+    """Retorna (perfil, confianca) a partir do banner, ou (None, None)."""
+    if not banner:
+        return None, None
+    for padrao, perfil, confianca in BANNER_PLATAFORMA:
+        if padrao.search(banner):
+            return perfil, confianca
+    return None, None
+
+
+def confirmar_plataforma(ip, usuario, senha, porta, tipo) -> bool:
+    """Confirma um palpite do banner com uma única conexão e um comando."""
+    verificacao = {
+        "linux": ("uname -s", r"Linux"),
+        "mikrotik_routeros": ("/system resource print", r"(?i)routeros|mikrotik"),
+        "juniper_junos": ("show version", r"(?i)junos"),
+        "cisco_ios": ("show version", r"(?i)cisco ios"),
+        "cisco_xr": ("show version", r"(?i)ios xr"),
+        "huawei": ("display version", r"(?i)huawei|VRP"),
+    }
+    if tipo not in verificacao:
+        return False
+    cmd, esperado = verificacao[tipo]
+    perfil = PERFIS[tipo]
+    try:
+        with ConnectHandler(device_type=perfil.get("driver", tipo), host=ip,
+                            username=usuario, password=senha, port=porta,
+                            timeout=25, conn_timeout=12) as conn:
+            saida = conn.send_command(cmd, read_timeout=25)
+        ok = bool(re.search(esperado, saida or ""))
+        depurar(ip, "confirmacao", f"{tipo}: '{cmd}' -> "
+                                   f"{'confirmado' if ok else 'nao confere'} "
+                                   f"({resumir_saida(saida, 120)})")
+        return ok
+    except Exception as e:
+        depurar(ip, "confirmacao", f"{tipo}: falhou ({type(e).__name__}: {e})")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Detecção de plataforma
 # ---------------------------------------------------------------------------
 class NaoIdentificado(Exception):
@@ -1103,27 +1459,57 @@ def eh_linux(ip, usuario, senha, porta) -> bool:
 
 def detectar(ip, usuario, senha, porta):
     """Identifica a plataforma via SSH.
-    Retorna o perfil identificado; levanta NaoIdentificado quando o host
-    responde mas não é reconhecido (segue para a fila de pendentes);
+
+    Estratégia em três níveis, do mais barato ao mais caro:
+      1. banner SSH (uma conexão TCP, sem autenticação) — resolve sozinho os
+         casos inequívocos e sugere um candidato nos demais;
+      2. confirmação do candidato com uma conexão e um comando;
+      3. SSHDetect do Netmiko, que testa comandos de vários fabricantes.
+
+    Levanta NaoIdentificado quando o host responde mas não é reconhecido;
     levanta exceção de conexão/autenticação nos demais casos."""
-    if not porta_aberta(ip, porta):
+    t0 = time.perf_counter()
+    banner = ler_banner(ip, porta)
+    if banner is None:
+        depurar(ip, "banner", f"sem resposta TCP em {porta}")
         raise NetmikoTimeoutException(f"sem resposta TCP na porta {porta}")
+    depurar(ip, "banner", f"{banner!r} em {time.perf_counter()-t0:.2f}s")
+
+    candidato, confianca = plataforma_por_banner(banner)
+    if candidato:
+        depurar(ip, "banner->palpite", f"{candidato} (confianca {confianca})")
+        log(ip, f"banner indica {PERFIS[candidato]['nome']}; confirmando ...")
+        if confianca == "alta" or confirmar_plataforma(ip, usuario, senha,
+                                                       porta, candidato):
+            if candidato == "huawei" and eh_smartax(ip, usuario, senha, porta):
+                candidato = "huawei_smartax"
+            log(ip, f"identificado: {PERFIS[candidato]['nome']} "
+                    f"({time.perf_counter()-t0:.1f}s, via banner)")
+            depurar(ip, "identificado",
+                    f"{candidato} em {time.perf_counter()-t0:.2f}s (via banner)")
+            return candidato
+        depurar(ip, "banner->palpite", "nao confirmado; caindo para SSHDetect")
 
     log(ip, "detectando plataforma ...")
     detectado = None
     ultimo_erro = None
     for tentativa in range(2):
         try:
+            t1 = time.perf_counter()
             guesser = SSHDetect(device_type="autodetect", host=ip,
                                 username=usuario, password=senha, port=porta,
                                 timeout=20, conn_timeout=15)
             detectado = guesser.autodetect()
+            depurar(ip, "SSHDetect",
+                    f"retornou {detectado!r} em {time.perf_counter()-t1:.2f}s")
             ultimo_erro = None
             break
         except NetmikoAuthenticationException:
+            depurar(ip, "SSHDetect", "falha de autenticacao")
             raise
         except Exception as e:
             ultimo_erro = e
+            depurar(ip, "SSHDetect", f"{type(e).__name__}: {e}")
             if "banner" in str(e).lower() and tentativa == 0:
                 # Banner não recebido: típico de rate-limit ou proteção
                 # anti-brute-force no host. Aguarda e tenta uma única vez.
@@ -1141,30 +1527,56 @@ def detectar(ip, usuario, senha, porta):
 
     if detectado not in PERFIS:
         alias = {"cisco_xe": "cisco_ios", "huawei_vrpv8": "huawei"}
+        anterior = detectado
         detectado = alias.get(detectado)
+        if anterior and detectado:
+            depurar(ip, "alias", f"{anterior} -> {detectado}")
 
     if detectado == "huawei" and eh_smartax(ip, usuario, senha, porta):
         detectado = "huawei_smartax"
 
     if detectado is None and eh_linux(ip, usuario, senha, porta):
         detectado = "linux"
+        depurar(ip, "sonda linux", "uname -s confirmou Linux")
 
     if detectado in PERFIS:
-        log(ip, f"identificado: {PERFIS[detectado]['nome']}")
+        log(ip, f"identificado: {PERFIS[detectado]['nome']} "
+                f"({time.perf_counter()-t0:.1f}s)")
+        depurar(ip, "identificado",
+                f"{detectado} em {time.perf_counter()-t0:.2f}s (via SSHDetect)")
         return detectado
 
+    depurar(ip, "nao identificado",
+            f"banner={banner!r} SSHDetect={detectado!r}")
     raise NaoIdentificado(ip)
 
 
 # ---------------------------------------------------------------------------
 # Execução de comandos e montagem do relatório
 # ---------------------------------------------------------------------------
-def executar_comando(conn, cmd, usa_timing):
+def executar_comando(conn, cmd, usa_timing, ip="-"):
+    """Executa um comando de leitura e registra tempo e retorno no debug."""
+    t0 = time.perf_counter()
+    depurar(ip, "envia comando", cmd)
     try:
         if usa_timing:
-            return conn.send_command_timing(cmd, read_timeout=180, last_read=3)
-        return conn.send_command(cmd, read_timeout=180)
+            saida = conn.send_command_timing(cmd, read_timeout=180, last_read=3)
+        else:
+            saida = conn.send_command(cmd, read_timeout=180)
+        dur = time.perf_counter() - t0
+        bruto = len(saida or "")
+        saida = normalizar_saida(saida)
+        depurar(ip, "retorno",
+                f"{dur:.2f}s | {bruto} bytes"
+                + (f" -> {len(saida)} apos normalizar" if len(saida) != bruto
+                   else "")
+                + f" | {len((saida or '').splitlines())} linhas | "
+                f"{resumir_saida(saida)}")
+        return saida
     except Exception as e:
+        dur = time.perf_counter() - t0
+        depurar(ip, "ERRO no comando",
+                f"{dur:.2f}s | {type(e).__name__}: {e} | cmd: {cmd[:120]}")
         return f"[ERRO ao executar comando: {e}]"
 
 
@@ -1231,9 +1643,13 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                 if "SUDO_OK" in (r or ""):
                     prefixo_sudo = "sudo -n "
                     log(ip, "sudo não interativo disponível")
+                depurar(ip, "sudo", "disponivel" if prefixo_sudo
+                        else "indisponivel (comandos privilegiados falharao)")
             except Exception:
                 pass
             apps_detectados = detectar_apps_linux(conn, prefixo_sudo)
+            depurar(ip, "apps detectados",
+                    ", ".join(apps_detectados) or "nenhum")
             if apps_detectados:
                 nomes = ", ".join(APPS_LINUX[a]["nome"] for a in apps_detectados)
                 log(ip, f"aplicações detectadas: {nomes}")
@@ -1251,7 +1667,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
             saidas = []
             for cmd in comandos:
                 log(ip, f"-> {cmd[:70]}")
-                saidas.append((cmd, executar_comando(conn, cmd, usa_timing)))
+                saidas.append((cmd, executar_comando(conn, cmd, usa_timing, ip)))
             blocos.append((TITULOS[secao], saidas))
 
         # Módulos de aplicação (Linux)
@@ -1265,7 +1681,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                 saidas = []
                 for cmd in comandos:
                     log(ip, f"-> [{chave}] {cmd[:70]}")
-                    saidas.append((cmd, executar_comando(conn, cmd, False)))
+                    saidas.append((cmd, executar_comando(conn, cmd, False, ip)))
                 blocos.append((f"{app['nome']} — {TITULOS[secao]}", saidas))
             extra = app.get("extra")
             if extra and set(secoes) & {"config", "basico", "inventario"}:
@@ -1273,7 +1689,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                 for cmd in [c.replace("{S}", prefixo_sudo)
                             for c in extra["comandos"]]:
                     log(ip, f"-> [{chave}] {cmd[:70]}")
-                    saidas.append((cmd, executar_comando(conn, cmd, False)))
+                    saidas.append((cmd, executar_comando(conn, cmd, False, ip)))
                 blocos.append((f"{app['nome']} — {extra['titulo']}", saidas))
 
         for cmd in perfil.get("sair", []):
@@ -1534,6 +1950,7 @@ def processar_lote(alvos, instancias, usuario, senha, secoes,
 
     def trabalho(ip, porta):
         try:
+            depurar(ip, "inicio", f"porta {porta}")
             tipo = detectar(ip, usuario, senha, porta)
             arq, host = coletar(ip, porta, tipo, usuario, senha, secoes,
                                 nome_modo, incluir_sensivel)
@@ -1589,26 +2006,29 @@ def processar_pendentes(pendentes, usuario, senha, secoes,
 # ---------------------------------------------------------------------------
 # Ponto de entrada
 # ---------------------------------------------------------------------------
-def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("-v", "--version"):
-        print(f"netsnap {__version__}")
-        return
-    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
-        print(__doc__)
-        print("Uso: python3 netsnap.py [arquivo_de_alvos.txt]")
-        return
+def menu_fim_sessao() -> str:
+    """Oferece o que fazer ao encerrar a fila de alvos da sessão atual."""
+    print("\n" + "-" * 68)
+    print("  1) Nova coleta — reconfigurar tudo (inclusive usuário e senha)")
+    print("  2) Continuar nesta sessão — informar mais alvos")
+    print("  3) Sair")
+    while True:
+        op = input("Escolha [1-3, padrão 3]: ").strip()
+        if op in ("", "3"):
+            return "sair"
+        if op == "1":
+            return "reconfigurar"
+        if op == "2":
+            return "continuar"
 
-    print("=" * 68)
-    print(f" netsnap v{__version__} — Snapshot multi-vendor (somente leitura)")
-    print(" Juniper | Huawei/OLT | FiberHome | Cisco | MikroTik | Linux")
-    print(" Módulos Linux: WANGuard, Zabbix, Grafana, BIND9 (RPZ/AnaBlock)")
-    print("=" * 68)
 
-    pasta = preparar_ambiente()
-    print(f"[+] Pasta de saída: {pasta}")
-
+def configurar_sessao():
+    """Coleta os parâmetros de uma sessão. Retorna um dicionário de opções."""
     secoes, nome_modo = escolher_modo()
     incluir_sensivel = escolher_sensivel()
+    global DEBUG
+    if not DEBUG:
+        DEBUG = escolher_debug()
     varredura = escolher_varredura()
     instancias = escolher_instancias()
 
@@ -1617,44 +2037,17 @@ def main():
     porta_txt = input("Porta SSH [22]: ").strip()
     porta_padrao = int(porta_txt) if porta_txt.isdigit() else 22
 
-    resultados = []
-    inicio = time.time()
+    return {
+        "secoes": secoes, "nome_modo": nome_modo,
+        "incluir_sensivel": incluir_sensivel, "varredura": varredura,
+        "instancias": instancias, "usuario": usuario, "senha": senha,
+        "porta_padrao": porta_padrao,
+    }
 
-    def executar(alvos):
-        if not alvos:
-            return
-        if varredura == "fast":
-            alvos, mortos = varrer_icmp(alvos)
-            for ip, _ in mortos:
-                resultados.append((ip, False, "sem resposta ICMP (modo fast)", ip))
-        if not alvos:
-            return
-        print(f"\n[+] Coletando {len(alvos)} alvo(s) com "
-              f"{instancias} instância(s) simultânea(s) ...\n")
-        pendentes = processar_lote(alvos, instancias, usuario, senha, secoes,
-                                   nome_modo, incluir_sensivel, resultados)
-        processar_pendentes(pendentes, usuario, senha, secoes,
-                            nome_modo, incluir_sensivel, resultados)
 
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        entradas = ler_ips(sys.argv[1])
-        alvos = montar_alvos(entradas, porta_padrao)
-        print(f"\n[+] Modo lote: {len(entradas)} entrada(s) de "
-              f"'{sys.argv[1]}' -> {len(alvos)} alvo(s)")
-        executar(alvos)
-    else:
-        while True:
-            entrada = input(
-                "\nIP, IP:porta, CIDR (10.0.0.0/24) ou range "
-                "(10.0.0.1-100) — ENTER para sair: "
-            ).strip()
-            if not entrada:
-                break
-            executar(montar_alvos([entrada], porta_padrao))
-
-    duracao = time.time() - inicio
+def imprimir_resumo(resultados, duracao, titulo="RESUMO"):
     print("\n" + "=" * 68)
-    print(" RESUMO")
+    print(f" {titulo}")
     print("=" * 68)
     ok = [r for r in resultados if r[1] is True]
     pulados = [r for r in resultados if r[1] is None]
@@ -1675,10 +2068,121 @@ def main():
     if icmp_mortos:
         print(f"  [SEM ICMP] {len(icmp_mortos)} IP(s) não responderam ping "
               "(use BUSCA PROFUNDA se algum bloqueia ICMP)")
+    return ok
 
-    indice = escrever_indice(resultados, nome_modo, inicio)
+
+def main():
+    global DEBUG
+    if "--debug" in sys.argv:
+        DEBUG = True
+        sys.argv.remove("--debug")
+    if len(sys.argv) > 1 and sys.argv[1] in ("-v", "--version"):
+        print(f"netsnap {__version__}")
+        return
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        print("Uso: python3 netsnap.py [arquivo_de_alvos.txt] [--debug]")
+        return
+
+    print("=" * 68)
+    print(f" netsnap v{__version__} — Snapshot multi-vendor (somente leitura)")
+    print(" Juniper | Huawei/OLT | FiberHome | Cisco | MikroTik | Linux")
+    print(" Módulos Linux: WANGuard, Zabbix, Grafana, BIND9 (RPZ/AnaBlock)")
+    print("=" * 68)
+
+    pasta = preparar_ambiente()
+    print(f"[+] Pasta de saída: {pasta}")
+
+    arquivo_lote = (sys.argv[1] if len(sys.argv) > 1
+                    and os.path.isfile(sys.argv[1]) else None)
+    todos_resultados = []
+    inicio_geral = time.time()
+    sessao = 0
+
+    while True:
+        sessao += 1
+        if sessao > 1:
+            print("\n" + "=" * 68)
+            print(f" NOVA COLETA (sessão {sessao})")
+            print("=" * 68)
+        opcoes = configurar_sessao()
+        if DEBUG and not ARQUIVO_DEBUG:
+            caminho = iniciar_debug(pasta)
+            print(f"[+] Log de depuração: {os.path.basename(caminho)}")
+        depurar("-", "sessao", f"inicio da sessao {sessao} "
+                              f"(modo: {opcoes['nome_modo']}, "
+                              f"usuario: {opcoes['usuario']})")
+
+        resultados = []
+        inicio = time.time()
+
+        def executar(alvos):
+            if not alvos:
+                return
+            lista = alvos
+            if opcoes["varredura"] == "fast":
+                lista, mortos = varrer_icmp(lista)
+                for ip, _ in mortos:
+                    resultados.append(
+                        (ip, False, "sem resposta ICMP (modo fast)", ip))
+            if not lista:
+                return
+            print(f"\n[+] Coletando {len(lista)} alvo(s) com "
+                  f"{opcoes['instancias']} instância(s) simultânea(s) ...\n")
+            pendentes = processar_lote(
+                lista, opcoes["instancias"], opcoes["usuario"],
+                opcoes["senha"], opcoes["secoes"], opcoes["nome_modo"],
+                opcoes["incluir_sensivel"], resultados)
+            processar_pendentes(
+                pendentes, opcoes["usuario"], opcoes["senha"],
+                opcoes["secoes"], opcoes["nome_modo"],
+                opcoes["incluir_sensivel"], resultados)
+
+        if arquivo_lote:
+            entradas = ler_ips(arquivo_lote)
+            alvos = montar_alvos(entradas, opcoes["porta_padrao"])
+            print(f"\n[+] Modo lote: {len(entradas)} entrada(s) de "
+                  f"'{arquivo_lote}' -> {len(alvos)} alvo(s)")
+            executar(alvos)
+            acao = menu_fim_sessao()
+        else:
+            acao = None
+            while acao is None:
+                entrada = input(
+                    "\nIP, IP:porta, CIDR (10.0.0.0/24) ou range "
+                    "(10.0.0.1-100) — ENTER para o menu: "
+                ).strip()
+                if not entrada:
+                    acao = menu_fim_sessao()
+                    if acao == "continuar":
+                        acao = None
+                    continue
+                executar(montar_alvos([entrada], opcoes["porta_padrao"]))
+
+        imprimir_resumo(resultados, time.time() - inicio,
+                        f"RESUMO DA SESSÃO {sessao}" if sessao > 1
+                        else "RESUMO")
+        todos_resultados.extend(resultados)
+
+        if acao == "reconfigurar":
+            # As credenciais da sessão anterior saem de escopo aqui.
+            opcoes = None
+            continue
+        break
+
+    if sessao > 1:
+        imprimir_resumo(todos_resultados, time.time() - inicio_geral,
+                        f"RESUMO GERAL ({sessao} sessões)")
+
+    indice = escrever_indice(todos_resultados, "sessões combinadas"
+                             if sessao > 1 else "coleta", inicio_geral)
     if indice:
         print(f"\nÍndice da coleta: {os.path.basename(indice)}")
+    if DEBUG and ARQUIVO_DEBUG:
+        depurar("-", "fim da execucao",
+                f"{sessao} sessao(oes), "
+                f"{len([r for r in todos_resultados if r[1] is True])} host(s)")
+        print(f"Log de depuração: {os.path.basename(ARQUIVO_DEBUG)}")
     print(f"Arquivos Markdown em: {PASTA_SAIDA}")
 
 
