@@ -7,16 +7,17 @@ Coleta configuração, logs, dados operacionais, vizinhança L2 e inventário de
 versões/licenças de equipamentos de rede e servidores, gerando um arquivo
 Markdown por host, estruturado para leitura por humanos e por sistemas de IA.
 
-Plataformas: Juniper Junos, Huawei VRP, Huawei SmartAX (OLT), FiberHome OLT,
-Cisco NX-OS, Cisco IOS/IOS-XE, Cisco IOS-XR, MikroTik RouterOS, Linux.
+Plataformas: Juniper Junos, Huawei VRP V5 (campus), Huawei VRP V8
+(CloudEngine/NE), Huawei SmartAX (OLT), FiberHome OLT, Cisco NX-OS,
+Cisco IOS/IOS-XE, Cisco IOS-XR, MikroTik RouterOS e Linux.
 Módulos de aplicação em Linux: WANGuard, Zabbix, Grafana e BIND9
-(este último com verificação de RPZ/AnaBlock).
+(este último com verificação do bloqueio por RPZ ou por zona-sinkhole).
 
 Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.9.2"
+__version__ = "1.10.1"
 
 import os
 import re
@@ -219,7 +220,10 @@ PERFIS = {
         ],
     },
     "huawei": {
-        "nome": "Huawei VRP (S6730/CE/NE8000)",
+        # VRP V5 — linha campus/agregação (S5700, S6720, S6730, S9700).
+        # Distingue-se do CloudEngine pelo 'display version': V5 reporta
+        # "Version 5.x", o CloudEngine reporta "Version 8.x".
+        "nome": "Huawei VRP V5 (S6730/S5700/S9700)",
         "fabricante": "Huawei",
         "config": ["display current-configuration"],
         "logs": ["display logbuffer"],
@@ -230,6 +234,7 @@ PERFIS = {
             "display alarm active",
             "display bgp peer",
             "display ospf peer brief",
+            "display temperature all",
         ],
         "optica": [
             # Traz utilização (InUti/OutUti) e contadores de erro por porta
@@ -239,8 +244,52 @@ PERFIS = {
             "display transceiver verbose",
             "display transceiver diagnosis interface",
             "display interface",
+            # Em VRP V5 'display interface counters errors' é recusado com
+            # "Wrong parameter"; a forma aceita não leva o qualificador.
+            "display interface counters",
+        ],
+        "vizinhanca": [
+            "display lldp neighbor brief",
+            "display lldp neighbor",
+        ],
+        "inventario": [
+            "display version",
+            "display device",
+            "display device manufacture-info",
+            "display esn",
+            "display patch-information",
+            "display license",
+            "display startup",
+        ],
+    },
+    "huawei_ce": {
+        # VRP V8 — CloudEngine (CE6800/CE6860/CE8800) e NE. A sintaxe diverge
+        # da linha campus: não há 'display cpu-usage' nem 'display memory-usage'
+        # (ambos recusados com "Unrecognized command"); o estado de hardware
+        # vem agregado em 'display health'.
+        "nome": "Huawei VRP V8 (CloudEngine CE/NE)",
+        "fabricante": "Huawei",
+        "config": ["display current-configuration"],
+        "logs": ["display logbuffer"],
+        "basico": [
+            "display health",
+            "display device",
+            "display alarm active",
+            "display bgp peer",
+            "display ospf peer brief",
+            "display fan",
+            "display power",
+        ],
+        "optica": [
+            "display interface brief",
+            "display interface description",
+            # Em VRP V8 a forma com 'verbose' é recusada; as variantes
+            # abaixo cobrem as sub-versões encontradas em campo.
+            "display transceiver",
+            "display transceiver diagnosis",
+            "display interface transceiver",
+            "display interface",
             "display interface counters errors",
-            "display port state all",
         ],
         "vizinhanca": [
             "display lldp neighbor brief",
@@ -1400,6 +1449,13 @@ BANNER_PLATAFORMA = [
     (re.compile(r"(?i)Cisco-1\.\d+"), ["cisco_ios"], "media"),
     (re.compile(r"(?i)Cisco-2\.\d+"), ["cisco_xr", "cisco_ios"], "media"),
     (re.compile(r"(?i)HUAWEI|VRP"), ["huawei"], "media"),
+    # O VRP não publica a identificação do software: anuncia apenas
+    # "SSH-2.0--" ou "SSH-1.99--". A ausência da string é, ela própria, a
+    # assinatura — pouquíssimos servidores se comportam assim, e o SSH-1.99
+    # (compatibilidade com SSHv1) reforça tratar-se de equipamento de rede.
+    # A família exata (V5, V8 ou SmartAX) é resolvida depois, por
+    # classificar_huawei().
+    (re.compile(r"^SSH-\d+\.\d+-+\s*$"), ["huawei", "cisco_ios"], "media"),
     (re.compile(r"(?i)FiberHome|AN[56]\d{3}"), ["fiberhome"], "media"),
     # Sufixo de distribuição identifica Linux com boa margem.
     (re.compile(r"(?i)OpenSSH.*(Ubuntu|Debian|Raspbian|el[789]|SUSE|"
@@ -1447,6 +1503,7 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo) -> bool:
         "cisco_ios": ("show version", r"(?i)cisco ios"),
         "cisco_xr": ("show version", r"(?i)ios xr"),
         "huawei": ("display version", r"(?i)huawei|VRP"),
+        "huawei_ce": ("display version", r"(?i)huawei|VRP"),
     }
     if tipo not in verificacao:
         return False
@@ -1474,16 +1531,34 @@ class NaoIdentificado(Exception):
     """Host acessível cuja plataforma não foi identificada automaticamente."""
 
 
-def eh_smartax(ip, usuario, senha, porta) -> bool:
-    """Distingue OLT SmartAX de VRP convencional pela saída de display version."""
+def classificar_huawei(ip, usuario, senha, porta) -> str:
+    """Determina a família Huawei a partir de 'display version'.
+
+    Três linhas com sintaxes distintas compartilham o driver 'huawei' do
+    Netmiko e precisam de perfis próprios:
+      huawei         VRP V5, linha campus (S5700/S6720/S6730/S9700)
+      huawei_ce      VRP V8, CloudEngine (CE6800/CE6860/CE8800) e NE
+      huawei_smartax SmartAX (OLT MA5600/MA5800)
+    Uma única conexão decide entre as três."""
     try:
         with ConnectHandler(device_type="huawei", host=ip, username=usuario,
                             password=senha, port=porta, timeout=25,
                             conn_timeout=12) as conn:
             versao = conn.send_command("display version", read_timeout=25)
-        return bool(re.search(r"(?i)MA5[68]\d\d|SmartAX", versao))
-    except Exception:
-        return False
+    except Exception as e:
+        depurar(ip, "familia huawei", f"falha na sonda: {type(e).__name__}")
+        return "huawei"
+
+    if re.search(r"(?i)MA5[68]\d\d|SmartAX", versao or ""):
+        depurar(ip, "familia huawei", "SmartAX (OLT)")
+        return "huawei_smartax"
+    # A versão do VRP é o critério primário; o modelo confirma.
+    if re.search(r"(?i)Version\s+8\.", versao or "") or \
+            re.search(r"(?i)\bCE\d{4}|CloudEngine|NE\d{4}", versao or ""):
+        depurar(ip, "familia huawei", "VRP V8 (CloudEngine/NE)")
+        return "huawei_ce"
+    depurar(ip, "familia huawei", "VRP V5 (campus)")
+    return "huawei"
 
 
 def eh_linux(ip, usuario, senha, porta) -> bool:
@@ -1525,9 +1600,8 @@ def detectar(ip, usuario, senha, porta):
         for candidato in candidatos:
             if confianca == "alta" or confirmar_plataforma(
                     ip, usuario, senha, porta, candidato):
-                if candidato == "huawei" and eh_smartax(ip, usuario, senha,
-                                                        porta):
-                    candidato = "huawei_smartax"
+                if candidato == "huawei":
+                    candidato = classificar_huawei(ip, usuario, senha, porta)
                 log(ip, f"identificado: {PERFIS[candidato]['nome']} "
                         f"({time.perf_counter()-t0:.1f}s, via banner)")
                 depurar(ip, "identificado",
@@ -1579,8 +1653,8 @@ def detectar(ip, usuario, senha, porta):
         if anterior and detectado:
             depurar(ip, "alias", f"{anterior} -> {detectado}")
 
-    if detectado == "huawei" and eh_smartax(ip, usuario, senha, porta):
-        detectado = "huawei_smartax"
+    if detectado == "huawei":
+        detectado = classificar_huawei(ip, usuario, senha, porta)
 
     if detectado is None and eh_linux(ip, usuario, senha, porta):
         detectado = "linux"
