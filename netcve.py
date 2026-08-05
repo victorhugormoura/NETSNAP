@@ -22,7 +22,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 import os
 import re
@@ -32,9 +32,10 @@ import ssl
 import json
 import time
 import argparse
+import importlib.util
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
@@ -68,6 +69,10 @@ MAPA_VERSAO = {
         (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei", "vrp", "VRP"),
         (r"(?i)VRP\s*\(R\)\s*software,?\s*Version\s*([0-9][\w.]*)",
          "huawei", "vrp", "VRP"),
+    ],
+    "huawei_ce": [
+        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei", "vrp", "VRP V8"),
+        (r"(?i)Version\s+(8\.\d+)", "huawei", "vrp", "VRP V8"),
     ],
     "huawei_smartax": [
         (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei",
@@ -303,11 +308,10 @@ def contexto_ssl():
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-    try:
+    if importlib.util.find_spec("certifi") is not None:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    return ssl.create_default_context()
 
 
 def http_json(url, timeout=45, headers=None):
@@ -322,11 +326,7 @@ def explicar_falha_tls(e) -> str:
     texto = str(e)
     if "CERTIFICATE_VERIFY_FAILED" not in texto:
         return ""
-    try:
-        import certifi  # noqa: F401
-        tem_certifi = True
-    except ImportError:
-        tem_certifi = False
+    tem_certifi = importlib.util.find_spec("certifi") is not None
     aviso = ["", "[!] A validação do certificado TLS falhou.",
              "    Isso costuma indicar repositório de autoridades "
              "desatualizado na estação, não problema no servidor consultado.",
@@ -534,7 +534,7 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
                 md.append("_Nenhuma correspondência retornada pela NVD para "
                           "esta versão (ver ressalva sobre falsos negativos)._\n")
                 continue
-            md.append(f"| CVE | Sev. | CVSS | Publicado | Resumo |")
+            md.append("| CVE | Sev. | CVSS | Publicado | Resumo |")
             md.append("|---|---|---|---|---|")
             for c in v["cves"][:limite_cve]:
                 marca = " **KEV**" if c["id"] in kev else ""
