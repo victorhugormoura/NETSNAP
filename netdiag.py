@@ -23,7 +23,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import os
 import re
@@ -45,8 +45,7 @@ except ImportError:
 try:
     from netmiko import ConnectHandler
     from netmiko.ssh_autodetect import SSHDetect
-    from netmiko.exceptions import (NetmikoTimeoutException,
-                                    NetmikoAuthenticationException)
+    from netmiko.exceptions import NetmikoAuthenticationException
     import netmiko
 except ImportError:
     print("[ERRO] Netmiko não instalado: pip install netmiko")
@@ -153,19 +152,51 @@ def detectar_detalhado(ip, usuario, senha, porta, forcado=None):
     """Reproduz a detecção do netsnap registrando cada etapa."""
     etapas = []
     inicio = time.perf_counter()
-    aberta = ns.porta_aberta(ip, porta)
+    banner = ns.ler_banner(ip, porta)
     etapas.append({
-        "etapa": "teste TCP",
-        "resultado": "porta aberta" if aberta else "sem resposta",
+        "etapa": "banner SSH",
+        "resultado": banner or "sem resposta TCP",
         "segundos": round(time.perf_counter() - inicio, 2),
     })
-    if not aberta:
+    if banner is None:
         return None, etapas
 
     if forcado:
         etapas.append({"etapa": "plataforma forçada por parâmetro",
                        "resultado": forcado, "segundos": 0.0})
         return forcado, etapas
+
+    # Mesmo caminho do netsnap: o banner sugere candidatos, que são
+    # confirmados por um comando antes de recorrer ao SSHDetect.
+    candidatos, confianca = ns.plataforma_por_banner(banner)
+    if candidatos:
+        etapas.append({
+            "etapa": "candidatos pelo banner",
+            "resultado": f"{', '.join(candidatos)} (confiança {confianca})",
+            "segundos": 0.0,
+        })
+        for cand in candidatos:
+            t0 = time.perf_counter()
+            if confianca == "alta":
+                confirmado = True
+            else:
+                confirmado = ns.confirmar_plataforma(ip, usuario, senha,
+                                                     porta, cand)
+            etapas.append({
+                "etapa": f"confirmação de {cand}",
+                "resultado": "confirmado" if confirmado else "não confere",
+                "segundos": round(time.perf_counter() - t0, 2),
+            })
+            if confirmado:
+                if cand == "huawei":
+                    t1 = time.perf_counter()
+                    cand = ns.classificar_huawei(ip, usuario, senha, porta)
+                    etapas.append({
+                        "etapa": "sonda de família Huawei",
+                        "resultado": f"{cand} — {ns.PERFIS[cand]['nome']}",
+                        "segundos": round(time.perf_counter() - t1, 2),
+                    })
+                return cand, etapas
 
     bruto, erro = None, None
     t0 = time.perf_counter()
@@ -198,14 +229,13 @@ def detectar_detalhado(ip, usuario, senha, porta, forcado=None):
 
     if detectado == "huawei":
         t0 = time.perf_counter()
-        smartax = ns.eh_smartax(ip, usuario, senha, porta)
+        familia = ns.classificar_huawei(ip, usuario, senha, porta)
         etapas.append({
-            "etapa": "sonda SmartAX (display version)",
-            "resultado": "é OLT MA5800" if smartax else "VRP convencional",
+            "etapa": "sonda de família Huawei (display version)",
+            "resultado": f"{familia} — {ns.PERFIS[familia]['nome']}",
             "segundos": round(time.perf_counter() - t0, 2),
         })
-        if smartax:
-            detectado = "huawei_smartax"
+        detectado = familia
 
     if detectado is None:
         t0 = time.perf_counter()

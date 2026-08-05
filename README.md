@@ -11,7 +11,8 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 | Plataforma | `device_type` | Exemplos |
 |---|---|---|
 | Juniper Junos | `juniper_junos` | MX80, MX104, MX204 |
-| Huawei VRP | `huawei` | S6730, CE6730/CE6860, NE8000 |
+| Huawei VRP V5 | `huawei` | S5700, S6720, S6730, S9700 (linha campus) |
+| Huawei VRP V8 | `huawei_ce` | CE6800, CE6860, CE8800, NE8000 (CloudEngine/NE) |
 | Huawei SmartAX | `huawei_smartax` | OLT MA5800 |
 | FiberHome OLT | `fiberhome`* | AN5516, AN6000 |
 | Cisco NX-OS | `cisco_nxos` | Nexus |
@@ -190,6 +191,20 @@ O perfil Junos usa **filtro positivo** pelas interfaces de infraestrutura (`ge-`
 
 ---
 
+## Famílias Huawei
+
+As três linhas Huawei compartilham o driver `huawei` do Netmiko, mas a sintaxe diverge o bastante para exigir perfis separados. O netsnap decide por `display version`, numa única conexão:
+
+| Família | Critério | Diferenças observadas em campo |
+|---|---|---|
+| `huawei` (VRP V5) | `Version 5.x` | aceita `display cpu-usage` e `display memory-usage`; recusa `display interface counters errors` com *"Wrong parameter"* |
+| `huawei_ce` (VRP V8) | `Version 8.x`, ou modelo `CE####`/`NE####` | recusa `cpu-usage`, `memory-usage` e `transceiver verbose` com *"Unrecognized command"*; o estado de hardware vem de `display health` |
+| `huawei_smartax` | modelo `MA5###` ou `SmartAX` | OLT, comandos de placa e PON |
+
+Um CE6860 e um S6730 no mesmo anel, com o mesmo perfil, produziam 7 e 5 comandos recusados respectivamente. Com perfis próprios, cada um recebe a sintaxe que entende.
+
+---
+
 ## Velocidade da identificação
 
 A identificação passou a usar três níveis, do mais barato ao mais caro:
@@ -268,6 +283,9 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 ---
 
 ## netdiag — diagnóstico da extração (ferramenta complementar)
+
+> As três ferramentas evoluem juntas: o `netdiag` importa os perfis do `netsnap`, e o `netcve` depende do formato de saída dele. Mantenha as três na mesma versão do repositório.
+
 
 O `netdiag.py` executa, um a um, **todos os comandos que o netsnap usaria** em um equipamento e mede cada resultado. Serve para descobrir onde a extração falha num firmware específico e para gerar um relatório enviável a quem mantém os perfis.
 
