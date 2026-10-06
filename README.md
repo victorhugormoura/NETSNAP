@@ -13,8 +13,8 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 | Juniper Junos | `juniper_junos` | MX80, MX104, MX204 |
 | Huawei VRP V5 | `huawei` | S5700, S6720, S6730, S9700 (linha campus) |
 | Huawei VRP V8 | `huawei_ce` | CE6800, CE6860, CE8800, NE8000 (CloudEngine/NE) |
-| Huawei SmartAX | `huawei_smartax` | OLT MA5800 |
-| FiberHome OLT | `fiberhome`* | AN5516, AN6000 |
+| Huawei SmartAX | `huawei_smartax` | OLT MA5600/MA5800 (SSH ou Telnet) |
+| FiberHome OLT | `fiberhome`* | AN551x, AN6000 (SSH ou Telnet) |
 | Cisco NX-OS | `cisco_nxos` | Nexus |
 | Cisco IOS / IOS-XE | `cisco_ios` | ASR 1000 |
 | Cisco IOS-XR | `cisco_xr` | ASR 9000 |
@@ -25,8 +25,13 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 
 | Módulo | O que extrai |
 |---|---|
+| **BIRD** | Configuração completa (`bird.conf` e `conf.d/`), estado de todas as sessões com `show protocols all` — vizinho, tempo de sessão, rotas importadas e exportadas, motivo da última queda —, contagem de rotas, memória, símbolos e sockets na porta 179. Cobre BIRD 1 (`birdc`/`birdc6`) e BIRD 2 (`birdc`/`birdcl`) |
+| **SmokePing** | `config` e `config.d/` sem comentários, com destaque para `Targets` (a topologia medida), contagem de alvos, estado do serviço e volume da base RRD |
+| **ISP-Stack** | Identidade do provedor (`provider.conf`) e módulos efetivamente instalados (`/etc/isp-stack/state/`); configuração de Unbound com adblock, Chrony, SNMP, Prometheus com alvos e regras, Alertmanager, Blackbox, Routinator, Apache com os vhosts do stack, jump host, unidades `isp-*` e endurecimento (fail2ban, unattended-upgrades, auditd) |
+| **ISP-Stack — estado operacional** | Serviços e timers ativos, portas do stack em escuta, `unbound-control status` e estatísticas, `chronyc tracking/sources`, status e métricas do Routinator (sem disparar validação), alvos e alertas do Prometheus, estado do Alertmanager, última execução do backup e certificados do certbot |
+| **ISP-Stack — conformidade** | Executa `install.sh --audit` e `--verify`, que são as entradas **não interativas** do próprio stack, para obter o diagnóstico oficial da instalação |
 | **WANGuard** | Configuração (descoberta por glob — o nome do arquivo muda entre versões; arquivos de credencial são pulados), unidades systemd e processos ativos, endereçamento, mitigação em uso (`iptables`, `nftables`, `ipset`), sessões BGP de blackhole/flowspec (BIRD, FRR, ExaBGP), log de anomalias, binários e versão |
-| **WANGuard — configuração operacional** | A partir do Wanguard 9 sensores, grupos de IP, filtros, respostas, anomalias e licença ficam no MariaDB, não em arquivo. Consulta ao banco (somente `SELECT`/`SHOW`/`DESCRIBE`) com descoberta automática das tabelas |
+| **WANGuard — configuração operacional** | Toda a configuração do Wanguard 9 vive no MariaDB. Consulta somente leitura a: componentes (server, sensor, flow, sniff, snmp, filter, console, BGP), interfaces monitoradas com tipo de enlace e velocidade, zonas de IP e prefixos, perfis de detecção e limiares, respostas automáticas, roteadores com blackhole e **Flowspec**, listas brancas e exceções, mitigação ativa no instante, **as 1.000 anomalias mais recentes** com distribuição por tipo e por dia, e descoberta automática de tabelas não previstas |
 | **Zabbix** | `zabbix_server.conf` / `zabbix_proxy.conf` / agente **sem linhas comentadas**, includes, frontend e vhost, scripts externos e de alerta, estado dos serviços e portas, versões e pacotes |
 | **Zabbix — inventário monitorado** | Consulta ao banco (somente `SELECT`): contagem de hosts/itens/triggers, **lista de hosts com IP e estado**, grupos, templates, **problemas ativos com severidade**, ações, tipos de mídia, dashboards e proxies |
 | **Grafana** | `grafana.ini` sem comentários, provisionamento declarativo (`provisioning/datasources`, `dashboards`, `alerting`), plugins, `/api/health`, versões e pacotes |
@@ -46,7 +51,7 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
   - **FAST** — ping ICMP em todos os alvos antes de qualquer SSH; IPs sem resposta são descartados de imediato. Ideal para ranges/CIDR com buracos. Equipamentos que bloqueiam ICMP serão pulados
   - **BUSCA PROFUNDA** — tenta conexão em todos os IPs, sem filtro prévio
 - **Autodetecção individual por host** — identificou, segue direto com a extração; host acessível mas não reconhecido entra numa **fila de pendentes** consultada ao final da fase paralela (nenhuma instância fica parada aguardando o operador). A lista pode misturar fabricantes livremente. Servidores Linux são reconhecidos por sonda própria (`uname`); OLTs SmartAX são distinguidas de switches VRP automaticamente
-- **Aceita CIDR e ranges**: `10.0.0.0/24`, `10.0.0.1-10.0.0.100` ou `10.0.0.1-100` — além do ICMP do modo FAST, cada alvo passa por teste TCP rápido (3 s) antes do SSH
+- **Aceita IP, nome DNS, CIDR e ranges**: `10.0.0.5`, `olt-centro.isp.net`, `10.0.0.0/24`, `10.0.0.1-10.0.0.100`, `10.0.0.1-100`, IPv6 (`2001:db8::1`, `[2001:db8::1]:2222`). Em `/31` e `/127` os dois endereços entram (enlace ponto a ponto). Além do ICMP do modo FAST, cada alvo passa por teste TCP rápido (3 s) antes do SSH
 - **Menu de extração** com seis seções independentes e dois modos combinados:
   1. **Configuração completa** — em Linux, inclui serviços (`systemctl`), portas em escuta (`ss -tulpn`), endereçamento e rotas
   2. **Logs**
@@ -59,9 +64,36 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 - **Saída preparada para análise por IA**: cada arquivo abre com front-matter YAML (host, IP, plataforma, fabricante, data, seções, aplicações, flag de sanitização), seguido de um guia de interpretação do documento, índice de seções e os comandos com saída bruta. Ao final da execução é gerado um `_indice_*.md` consolidando toda a coleta — útil para ingerir um site inteiro de uma vez
 - **Comandos sem suporte são marcados, não poluem**: retorno vazio ou erro de sintaxe vira `_(sem saída útil — retorno: ...)_` em vez de despejar a mensagem de erro no relatório
 - **Porta SSH configurável** — padrão perguntado na inicialização; porta individual por entrada: `IP:porta`, `10.0.0.0/24:2222`
-- **Filtro de dados sensíveis (opcional)** — remove senhas, ciphers, communities SNMP, chaves SSH e blocos de certificado. No MikroTik usa o mecanismo nativo (`/export hide-sensitive`)
+- **Filtro de dados sensíveis (opcional)** — remove senhas e hashes (inclusive com qualificador: `password irreversible-cipher $1c$...`, `enable secret 9 ...`, `authentication-key 1 type md5 value "$9$..."`), chaves de BGP/OSPF/NTP/TACACS/RADIUS, communities SNMP (v1/v2c e credenciais v3), chaves WireGuard, chaves SSH e blocos de certificado. Comunidades **BGP** (`policy-options community X members ...`) são preservadas, por não serem segredo e serem necessárias para ler as políticas. No MikroTik usa também o mecanismo nativo (`/export hide-sensitive`, com recuo para `/export` no RouterOS v7, que já oculta por padrão). O log de depuração é sempre sanitizado, independentemente da opção
 - **Modo interativo** ou **modo lote** (arquivo de entradas)
 - **Resumo final** com sucessos, pulados, falhas (com motivo) e tempo total
+
+---
+
+## Telnet
+
+Boa parte do parque de OLTs não oferece SSH — MA5800 e AN551x costumam sair de fábrica apenas com Telnet, e em muitos provedores continuam assim. O protocolo é escolhido no menu inicial, com porta padrão 23.
+
+Como não há banner de protocolo para ler, a identificação usa o **texto de login** que o equipamento apresenta antes da autenticação: o SmartAX pede `>>User name:`, o VRP de switch pede `Username:`, as OLTs FiberHome apresentam `Login:`, e muitas trazem o modelo no banner. A negociação de opções do Telnet (bytes IAC, RFC 854) é descartada antes da análise. Sem pista no prompt, os perfis mais prováveis nesse protocolo são testados em ordem — o Netmiko não autodetecta por Telnet.
+
+| Plataforma | driver SSH | driver Telnet |
+|---|---|---|
+| Huawei SmartAX (MA5800) | `huawei_smartax` | `huawei_olt_telnet` |
+| FiberHome (AN551x) | `generic` | `generic_telnet` + login próprio |
+| MikroTik / Linux | nativos | `generic_telnet` + login próprio |
+| Huawei VRP V5 / V8 | `huawei` / `huawei_vrpv8` | `huawei_telnet` |
+| Cisco IOS / NX-OS / XR | nativos | `cisco_*_telnet` |
+| Juniper Junos | `juniper_junos` | `juniper_junos_telnet` |
+
+O driver `generic_telnet` do Netmiko é o de servidor de terminal e, por projeto, **não envia usuário nem senha**. Era essa a causa da falha observada na OLT FiberHome: o pedido de `Login:` ficava sem resposta, os comandos preparatórios eram digitados no campo de usuário e o equipamento encerrava a sessão. O netsnap faz esse login por conta própria, com duas proteções contra bloqueio de conta: as credenciais são enviadas **uma única vez** (um novo pedido de usuário ou senha é tratado como recusa, sem nova tentativa) e a negociação de opções é respondida antes da leitura do banner, porque vários equipamentos só exibem o pedido de login depois disso.
+
+Alguns equipamentos exigem uma tecla depois da autenticação — a OLT FiberHome apresenta `--Press any key to continue Ctrl+c to stop--` antes de liberar a CLI. Sem enviar essa tecla, esse aviso é capturado como se fosse o prompt e o primeiro comando derruba a sessão. A coleta reconhece o pedido, envia um retorno e relê o prompt.
+
+Como cada tentativa de identificação por Telnet é um login completo, e OLT costuma ter limite baixo de sessões simultâneas e bloqueio por tentativas, o número de perfis testados às cegas é reduzido a dois, com intervalo entre eles. Não identificando, o equipamento entra na fila de escolha manual em vez de acumular tentativas.
+
+Se o equipamento encerrar a sessão no meio da coleta, os comandos restantes não são enviados: o snapshot registra `session_lost: true` e traz uma nota informando que as seções ausentes indicam interrupção, não recurso inexistente.
+
+**O Telnet transmite usuário, senha e toda a sessão em texto claro.** O menu avisa na seleção, o snapshot registra `transport: telnet` nos metadados, e o documento traz uma nota informando que a sessão que o originou era legível por qualquer sistema no caminho de rede. Use apenas em rede de gerência confiável e prefira SSH onde a plataforma suportar.
 
 ---
 
@@ -69,11 +101,13 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 
 - Python 3.8+
 - [Netmiko](https://github.com/ktbyers/netmiko)
-- Acesso SSH (leitura) aos hosts
+- Acesso SSH ou Telnet (leitura) aos hosts
 
 ```bash
 pip install netmiko
 ```
+
+O `netsnap_transporte.py` implementa SSH e Telnet sem dependências externas (ver `DEPENDENCIAS.md`), mas **ainda não está integrado ao `netsnap.py`**, que continua usando o Netmiko.
 
 ---
 
@@ -90,12 +124,14 @@ Fluxo:
 ```
 1. Tipo de extração [1-8]
 2. Incluir dados sensíveis? [s/N]
-3. Modo de varredura: FAST (ICMP prévio) ou BUSCA PROFUNDA [1-2]
-4. Instâncias simultâneas [1-10, padrão 5]
-5. Usuário SSH
-6. Senha SSH
-7. Porta SSH [22]
-8. Alvos (IP, IP:porta, CIDR ou range) — ENTER abre o menu de sessão
+3. Modo de depuração? [s/N]   (omitido quando executado com --debug)
+4. Protocolo: SSH ou Telnet
+5. Modo de varredura: FAST (ICMP prévio) ou BUSCA PROFUNDA [1-2]
+6. Instâncias simultâneas [1-10, padrão 5]
+7. Usuário
+8. Senha
+9. Porta [22 para SSH, 23 para Telnet]
+10. Alvos (IP, nome, IP:porta, CIDR ou range) — ENTER abre o menu de sessão
 ```
 
 Ao pressionar ENTER sem informar alvo, aparece o menu:
@@ -107,7 +143,6 @@ Ao pressionar ENTER sem informar alvo, aparece o menu:
 ```
 
 A opção 1 volta à tela de configuração sem encerrar o programa, útil quando o próximo grupo de equipamentos usa credenciais diferentes. Cada sessão gera seu próprio resumo e, ao sair, é impresso um resumo geral com todas elas.
-```
 
 Ao final da fase paralela, hosts acessíveis que não foram identificados são apresentados um a um para escolha manual do tipo (com opção de pular).
 
@@ -129,9 +164,16 @@ Crie um arquivo `ips.txt` com uma entrada por linha — formatos e fabricantes p
 10.251.0.0/28:2200
 
 # OLTs e servidores
-10.200.1.1
+10.200.1.1            # OLT Centro
+olt-norte.isp.net
 10.10.0.5
+
+# Enlace ponto a ponto e IPv6
+100.64.0.0/31
+[2001:db8::10]:2222
 ```
+
+Comentários podem ocupar a linha inteira ou vir depois da entrada. Arquivos salvos com BOM (Bloco de Notas do Windows) são aceitos. Em IPv6 a porta só é reconhecida entre colchetes: `2001:db8::1:22` é um endereço válido, e separar o `:22` apontaria para outro host.
 
 Execute:
 
@@ -147,7 +189,7 @@ Um arquivo por host em `snapshots/` (ao lado do script) ou `~/netsnap_snapshots`
 
 ```
 snapshots/
-├── BRAS-TUPA_172.16.0.1_20260722_141002.md
+├── BRAS-NORTE_172.16.0.1_20260722_141002.md
 ├── SW-CENTRO_10.200.0.10_20260722_141130.md
 └── srv-zabbix_10.10.0.5_20260722_141355.md
 ```
@@ -171,12 +213,12 @@ Toda saída passa por normalização antes de ir para o snapshot, porque o desti
 Ligado pelo menu (`Gerar log de depuração da coleta?`) ou por `python3 netsnap.py --debug`, gera um `_debug_*.log` **separado do snapshot**, com uma linha por evento:
 
 ```
-19:28:53.864 | 177.92.253.99      | banner                 | 'SSH-2.0-OpenSSH_8.9p1 Ubuntu' em 0.09s
-19:28:53.958 | 177.92.253.99      | banner->palpite        | linux (confianca media)
-19:28:54.612 | 177.92.253.99      | identificado           | linux em 0.75s (via banner)
-19:28:55.104 | 177.92.253.99      | sudo                   | disponivel
-19:28:55.221 | 177.92.253.99      | envia comando          | ip route show table all
-19:28:55.398 | 177.92.253.99      | retorno                | 0.18s | 412 bytes | 9 linhas | default via ...
+19:28:53.864 | 203.0.113.99      | banner                 | 'SSH-2.0-OpenSSH_8.9p1 Ubuntu' em 0.09s
+19:28:53.958 | 203.0.113.99      | banner->palpite        | linux (confianca media)
+19:28:54.612 | 203.0.113.99      | identificado           | linux em 0.75s (via banner)
+19:28:55.104 | 203.0.113.99      | sudo                   | disponivel
+19:28:55.221 | 203.0.113.99      | envia comando          | ip route show table all
+19:28:55.398 | 203.0.113.99      | retorno                | 0.18s | 412 bytes | 9 linhas | default via ...
 ```
 
 Registra a identificação passo a passo (banner recebido, palpite, confirmação, SSHDetect, alias, sondas), **cada comando enviado ao equipamento** com tempo, bytes, linhas e uma amostra do retorno, além de detecção de sudo e de aplicações. Erros aparecem como `ERRO no comando` com o tipo da exceção. É o arquivo a anexar quando algo não funcionar.
@@ -257,6 +299,48 @@ Módulos de aplicação Linux ficam em `APPS_LINUX`, com um comando `deteccao` (
 
 ---
 
+### ISP-Stack
+
+O [ISP-Stack](https://github.com/victorhugormoura/ISP-Stack) instala os módulos de forma seletiva, e o netsnap reflete isso: a detecção usa `/etc/isp-stack`, e o inventário lista `state/`, onde o instalador registra um arquivo por módulo instalado. Assim o relatório distingue **módulo ausente** de **módulo com falha** — sem essa lista, as duas situações produziriam a mesma saída vazia.
+
+Os verificadores do próprio stack são chamados apenas por `install.sh --audit` e `install.sh --verify`. Executar `audit.sh` diretamente abriria o menu interativo e chegaria a perguntar se deve gravar o relatório em `/var/log/isp-stack` — escrita no servidor, o que o netsnap não faz. Pelas flags, o `install.sh` invoca `audit_executar_sem_perguntar` e `verify_executar`, que apenas leem e imprimem; o stdin é fechado (`</dev/null`) e há timeout para o caso de alguma versão futura voltar a perguntar algo.
+
+As consultas HTTP são todas a `127.0.0.1` e apenas de leitura: `GET` em `/status` e `/metrics` do Routinator, `/api/v1/targets` e `/api/v1/alerts` do Prometheus, `/api/v2/status` do Alertmanager.
+
+---
+
+### Tempo reportado
+
+O índice e o resumo informam o **tempo de coleta**: varredura, detecção e execução dos comandos. O tempo em que o programa fica parado esperando o operador digitar um alvo ou escolher no menu não entra na conta.
+
+A diferença não é pequena. Numa execução medida, o relógio de parede marcou 1007 s e a coleta efetiva foram 25 s — os outros 982 s foram o prompt aguardando resposta. Reportar o relógio de parede tornaria impossível comparar duas coletas ou identificar um comando lento.
+
+Quando a diferença passa de cinco segundos, o resumo mostra as duas medidas: `Coleta: 25s | Sessão: 1007s`.
+
+---
+
+### Logs com repetição
+
+Serviço em falha repete a mesma mensagem centenas de vezes. Num servidor WANGuard real, 285 das 300 linhas coletadas eram o mesmo erro de conexão com o ClickHouse, cada uma arrastando o comando SQL inteiro: 97 KB para dizer uma coisa só.
+
+As seções de log em hosts Linux passam por um filtro que trunca linhas muito longas, agrupa as que têm a mesma assinatura (dígitos normalizados) e informa quantas foram omitidas — `[+35 linha(s) semelhante(s) omitida(s)]`. No caso acima a saída caiu 89% e a repetição ficou **mais** visível, não menos.
+
+---
+
+### WANGuard: leitura do banco
+
+O Wanguard grava endereços IP como `VARBINARY`. Um despejo direto produz bytes nulos ilegíveis em vez do endereço — a zona de IP inteira sai como lixo. O netsnap monta o `SELECT` a partir do `DESCRIBE` e aplica três transformações na origem:
+
+- colunas binárias recebem `INET6_NTOA`, devolvendo o IP legível;
+- marcas de tempo Unix recebem `FROM_UNIXTIME`;
+- colunas cujo nome indique segredo são excluídas antes da consulta, porque a saída do mysql é tabular e um valor sob a coluna `password` não seria detectado pelo sanitizador, que procura par chave=valor.
+
+O que fica de fora, por decisão: séries temporais e dados de fluxo (`top_bin_*`, `top_live_*`, `sensorstats`, `events`, `as_numbers`, `ipacct*`), que somam dezenas de gigabytes e alimentam gráficos; as 2.424 tabelas de accounting diário, que entram apenas como contagem; e as tabelas de autenticação de operador (`company_staff`, `httpauth`, `ldapauth`, `radiusauth`, `samlauth`).
+
+A configuração de **Flowspec** não tem tabela própria: vive nas colunas `exa_flowspec`, `max_flowspec`, `flowspec_counters`, `exa_nexthop`, `exa_localpref`, `exa_rd`, `exa_direction` e `srtbh` da tabela `router`, junto do blackhole.
+
+---
+
 ### Acesso ao banco de dados do Zabbix e do Grafana
 
 Hosts, alertas e dashboards não vivem em arquivo de configuração — vivem no banco. Para extraí-los, os módulos leem as credenciais do próprio arquivo de configuração local (`zabbix_server.conf`, `grafana.ini`) e executam **exclusivamente comandos `SELECT`**. Três garantias de projeto:
@@ -325,6 +409,8 @@ Saídas: um `.md` legível e um `.json` estruturado, ambos em `diagnosticos/`.
 
 Valores sensíveis são mascarados por padrão. Com `--anonimizar`, IPs, MACs e hostnames são substituídos por valores fictícios **consistentes** (o mesmo IP recebe sempre o mesmo substituto), preservando a estrutura para análise sem expor a rede real. Endereços de loopback e broadcast são mantidos por serem irrelevantes para identificação.
 
+Um caso real ilustra por que a verificação por consulta importa: em dois recursivos do mesmo provedor, o primeiro tinha 86.955 zonas carregadas e respondia `127.0.0.1` ao domínio de teste; o segundo tinha o mesmo `anablock.conf` no disco, com 48.895 zonas, atualizado diariamente pelo mesmo cron — mas apenas 128 zonas carregadas e o domínio de teste resolvendo para o IP real. O arquivo existia e crescia; faltava o `include` em `named.conf`. Nenhuma inspeção de configuração isolada acusaria isso, e por isso a coleta também compara zonas carregadas com zonas em arquivo e confere o `include`.
+
 O parâmetro `--sensivel` desativa o mascaramento; use apenas em diagnóstico local, nunca em arquivo compartilhado.
 
 ---
@@ -356,7 +442,7 @@ python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver ab
 
 | Fonte | Cobertura |
 |---|---|
-| Versões de sistema | Junos, Huawei VRP, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux |
+| Versões de sistema | Junos, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux (consultados na NVD); Huawei VRP e OLTs (extraídos e listados, sem consulta — ver limitações) |
 | Versões de aplicação | BIND, OpenSSH, nginx, Apache |
 | Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação |
 
@@ -365,7 +451,11 @@ python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver ab
 A correspondência é feita **pela versão declarada**, não por verificação ativa. Consequências:
 
 - **Falsos positivos são esperados.** Fabricantes retroportam correções mantendo o mesmo número de versão; o recurso vulnerável pode não estar habilitado; pode haver mitigação externa (ACL, firewall de borda).
-- **Falsos negativos são esperados.** A cobertura de CPE na NVD é incompleta para equipamentos de rede — OLTs FiberHome e Huawei SmartAX, por exemplo, praticamente não têm CPE publicado. O netcve extrai a versão mas marca explicitamente *"Sem mapeamento CPE conhecido"* em vez de reportar "nenhuma vulnerabilidade".
+- **Falsos negativos são esperados.** A cobertura de CPE na NVD é incompleta para equipamentos de rede — OLTs FiberHome e Huawei SmartAX, por exemplo, praticamente não têm CPE publicado. O Huawei VRP não existe na NVD como produto único: os CPEs são por modelo (`s6730-h_firmware`, por exemplo), e a consulta genérica não retornava nada. Nesses casos o netcve extrai a versão mas marca explicitamente *"Sem mapeamento CPE conhecido"* em vez de reportar "nenhuma vulnerabilidade".
+- **"Não consultado" não é "zero".** No modo `--sem-rede`, ou quando a consulta falha, a coluna de CVEs mostra *não consultado*.
+- **Kernel de distribuição.** A versão do kernel é consultada pela numeração upstream (`5.4.0`); distribuições como Ubuntu e RHEL retroportam correções, então a lista tende a superestimar a exposição. Confira no boletim de segurança da distribuição.
+- **A versão é lida do próprio equipamento.** A busca começa pela seção *Inventário* e ignora *Vizinhança* e *Logs*, que descrevem outros equipamentos — em versões anteriores, a versão de um vizinho LLDP podia ser atribuída ao host.
+- **Community SNMP padrão** só é detectável em snapshots coletados com dados sensíveis incluídos; com a sanitização ativa, o valor chega mascarado.
 - A fonte autoritativa é sempre o boletim do fabricante (Juniper SIRT, Cisco PSIRT, Huawei PSIRT, MikroTik).
 
 Trate o relatório como **triagem para priorizar investigação**, não como laudo de vulnerabilidade. Os itens marcados **KEV** (catálogo CISA de exploração confirmada) são a prioridade real e merecem verificação imediata.
