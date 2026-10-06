@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>netsnap · painel</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="moldura">
+  <nav class="trilho" aria-label="Seções do painel">
+    <a class="marca" href="#/painel">
+      <span class="marca-fibras" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span>netsnap</span>
+    </a>
+    <ul id="menu">
+      <li><a href="#/painel" data-rota="painel">Visão geral</a></li>
+      <li><a href="#/coletar" data-rota="coletar">Nova coleta</a></li>
+      <li><a href="#/execucoes" data-rota="execucoes">Execuções</a></li>
+      <li><a href="#/snapshots" data-rota="snapshots">Snapshots</a></li>
+      <li><a href="#/inventario" data-rota="inventario">Inventário</a></li>
+      <li><a href="#/comparar" data-rota="comparar">Comparar coletas</a></li>
+      <li><a href="#/topologia" data-rota="topologia">Topologia</a></li>
+      <li><a href="#/vulnerabilidades" data-rota="vulnerabilidades">Vulnerabilidades</a></li>
+      <li><a href="#/diagnostico" data-rota="diagnostico">Diagnóstico</a></li>
+      <li><a href="#/agendamentos" data-rota="agendamentos">Agendamentos</a></li>
+    </ul>
+    <p class="trilho-rodape" id="rodape"></p>
+  </nav>
+  <main id="conteudo" tabindex="-1">
+    <p class="carregando">Carregando…</p>
+  </main>
+</div>
+<div id="aviso" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
