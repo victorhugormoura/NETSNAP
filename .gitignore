@@ -8,6 +8,8 @@ _cve_triagem_*.csv
 _diagnostico_*.md
 _diagnostico_*.json
 _indice_*.md
+# Log de depuração: traz trechos reais de saída dos equipamentos
+_debug_*.log
 
 # Cache local do netcve (resultados da NVD)
 .netcve_cache.json
@@ -18,6 +20,9 @@ ips.txt
 alvos*.txt
 .env
 credenciais*
+
+# Pacotes gerados localmente
+*.zip
 
 # Python
 __pycache__/

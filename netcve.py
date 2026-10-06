@@ -22,7 +22,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 import os
 import re
@@ -65,14 +65,18 @@ MAPA_VERSAO = {
         (r"(?i)JUNOS\s+(?:Software\s+Release\s+)?\[?([0-9][\w.\-]+)\]?",
          "juniper", "junos", "Junos"),
     ],
+    # A NVD não cataloga o VRP como produto único: os CPEs Huawei são por
+    # modelo (ex.: s6730-h_firmware), e "huawei:vrp" não retorna nada. Sem
+    # mapeamento modelo -> CPE, a versão é listada como não consultável em
+    # vez de aparecer como "nenhuma CVE".
     "huawei": [
-        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei", "vrp", "VRP"),
+        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", None, None, "VRP"),
         (r"(?i)VRP\s*\(R\)\s*software,?\s*Version\s*([0-9][\w.]*)",
-         "huawei", "vrp", "VRP"),
+         None, None, "VRP"),
     ],
     "huawei_ce": [
-        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei", "vrp", "VRP V8"),
-        (r"(?i)Version\s+(8\.\d+)", "huawei", "vrp", "VRP V8"),
+        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", None, None, "VRP V8"),
+        (r"(?i)Version\s+(8\.\d+)", None, None, "VRP V8"),
     ],
     "huawei_smartax": [
         (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei",
@@ -135,8 +139,7 @@ REGRAS_CONFIG = [
         "plataformas": None,
         "padrao": r"(?im)^\s*(?:set\s+system\s+services\s+telnet|"
                   r"telnet\s+server\s+enable|"
-                  r"transport\s+input\s+(?:all|telnet)|"
-                  r"/ip\s+service.*?\btelnet\b(?!.*disabled))",
+                  r"transport\s+input\s+(?:all|telnet))",
         "recomendacao": "Desabilitar Telnet e usar exclusivamente SSHv2.",
     },
     {
@@ -173,7 +176,10 @@ REGRAS_CONFIG = [
         "titulo": "Serviços legados do RouterOS expostos (api/ftp/telnet/www)",
         "severidade": "ALTA",
         "plataformas": ["mikrotik_routeros"],
-        "padrao": r"(?im)^\s*\d+\s+(?!X)\s*(telnet|ftp|www|api)\b",
+        # Saída de '/ip service print': serviço desabilitado traz a flag X
+        # entre o índice e o nome; habilitado não traz flag. O export não
+        # serve, porque serviço habilitado é o padrão e não aparece nele.
+        "padrao": r"(?im)^\s*\d+\s+(telnet|ftp|www|api)\s+\d+",
         "recomendacao": "Desabilitar serviços não utilizados em "
                         "/ip service e restringir 'available from'.",
     },
@@ -210,8 +216,10 @@ REGRAS_CONFIG = [
         "titulo": "NTP sem autenticação configurada",
         "severidade": "BAIXA",
         "plataformas": None,
-        "padrao": r"(?im)^\s*(?:ntp\s+server|set\s+system\s+ntp\s+server|"
-                  r"ntp\s+unicast-server)(?![\s\S]{0,400}?(?:key|authentication))",
+        "padrao": r"(?im)^\s*(?:ntp\s+server\s+(?!disable\b|enable\b|"
+                  r"source-interface\b)\S|set\s+system\s+ntp\s+server|"
+                  r"ntp(?:-service)?\s+unicast-server)"
+                  r"(?![\s\S]{0,400}?(?:key|authentication))",
         "recomendacao": "Habilitar autenticação NTP quando suportada.",
     },
 ]
@@ -243,8 +251,29 @@ def ler_snapshot(caminho):
     return meta, texto
 
 
+def texto_para_versao(texto):
+    """Reordena o snapshot para a busca de versão.
+
+    A seção Inventário vem primeiro; Vizinhança e Logs ficam de fora, porque
+    descrevem outros equipamentos. Num CE6860 (VRP 8.191) a primeira
+    ocorrência de "Version 5.170" no arquivo era a de um vizinho LLDP, e a
+    versão relatada era a dele."""
+    partes = re.split(r"(?m)^(?=## )", texto)
+    inventario = [p for p in partes if re.match(r"## .*Invent", p)]
+    fora = re.compile(r"## .*(Vizinhan|Logs)")
+    demais = [p for p in partes
+              if p not in inventario and not fora.match(p)]
+    return "\n".join(inventario + demais)
+
+
+def escapar_cpe(valor):
+    """Escapa caracteres especiais do formato CPE 2.3 (ex.: '9.3(8)')."""
+    return re.sub(r"([^A-Za-z0-9._\-])", r"\\\1", valor)
+
+
 def extrair_versoes(meta, texto):
     """Identifica versões de sistema e de aplicações no snapshot."""
+    texto = texto_para_versao(texto)
     achados = []
     vistos = set()
     regras = list(MAPA_VERSAO.get(meta.get("platform_key", ""), [])) + list(MAPA_APP)
@@ -281,7 +310,7 @@ def avaliar_config(meta, texto):
         m = re.search(regra["padrao"], texto)
         if not m:
             continue
-        trecho = " ".join(m.group(0).split())[:120]
+        trecho = " ".join(m.group(0).split())[:120].replace("|", "/").replace("`", "'")
         achados.append({
             "id": regra["id"],
             "titulo": regra["titulo"],
@@ -380,29 +409,43 @@ def baixar_kev():
 
 def consultar_nvd(fornecedor, produto, versao, chave_api, cache):
     """Consulta CVEs por CPE amplo (virtualMatchString)."""
-    cpe = f"cpe:2.3:*:{fornecedor}:{produto}:{versao}"
+    cpe = f"cpe:2.3:*:{fornecedor}:{produto}:{escapar_cpe(versao)}"
     if cpe in cache:
         return cache[cpe], True
 
-    params = {"virtualMatchString": cpe, "resultsPerPage": "200"}
-    url = f"{NVD_API}?{urllib.parse.urlencode(params)}"
     headers = {"User-Agent": UA}
     if chave_api:
         headers["apiKey"] = chave_api
 
-    for tentativa in range(3):
-        try:
-            dados = http_json(url, headers=headers)
+    # A API devolve no máximo 2000 itens por página, dos mais antigos para
+    # os mais novos. Sem seguir a paginação, versões com muitas CVEs (kernel
+    # Linux) ficavam só com as antigas e perdiam as do catálogo KEV.
+    itens, inicio, total = [], 0, None
+    while total is None or inicio < total:
+        params = {"virtualMatchString": cpe, "resultsPerPage": "2000",
+                  "startIndex": str(inicio)}
+        url = f"{NVD_API}?{urllib.parse.urlencode(params)}"
+        for tentativa in range(3):
+            try:
+                dados = http_json(url, headers=headers)
+                break
+            except Exception as e:
+                if tentativa == 2:
+                    raise
+                espera = 10 * (tentativa + 1)
+                print(f"    [!] Falha na consulta ({e}); nova tentativa em {espera}s")
+                time.sleep(espera)
+        pagina = dados.get("vulnerabilities", [])
+        itens.extend(pagina)
+        total = int(dados.get("totalResults", len(itens)))
+        inicio += len(pagina)
+        if not pagina:
             break
-        except Exception as e:
-            if tentativa == 2:
-                raise
-            espera = 10 * (tentativa + 1)
-            print(f"    [!] Falha na consulta ({e}); nova tentativa em {espera}s")
-            time.sleep(espera)
+        if inicio < total:
+            time.sleep(DELAY_COM_CHAVE if chave_api else DELAY_SEM_CHAVE)
 
     resultado = []
-    for item in dados.get("vulnerabilities", []):
+    for item in itens:
         cve = item.get("cve", {})
         if cve.get("vulnStatus") == "Rejected":
             continue
@@ -447,9 +490,9 @@ SEV_PT = {"CRITICAL": "CRÍTICA", "HIGH": "ALTA", "MEDIUM": "MÉDIA",
 
 def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
     agora = datetime.now()
-    total_cve = sum(len(v["cves"]) for h in hosts for v in h["versoes"])
+    total_cve = sum(len(v["cves"] or []) for h in hosts for v in h["versoes"])
     total_kev = sum(1 for h in hosts for v in h["versoes"]
-                    for c in v["cves"] if c["id"] in kev)
+                    for c in (v["cves"] or []) if c["id"] in kev)
     total_cfg = sum(len(h["config"]) for h in hosts)
 
     md = ["---",
@@ -496,7 +539,7 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
         md.append("|---|---|---|---|---|")
         for h in hosts:
             for v in h["versoes"]:
-                for c in v["cves"]:
+                for c in v["cves"] or []:
                     if c["id"] in kev:
                         md.append(f"| {h['host']} | {v['rotulo']} | "
                                   f"`{v['versao']}` | {c['id']} | "
@@ -511,7 +554,8 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
             md.append(f"| {h['host']} | {h['ip']} | {h['plataforma']} | "
                       f"_nenhuma versão reconhecida_ | — | — |")
         for v in h["versoes"]:
-            qtd = len(v["cves"]) if v["consultavel"] else "n/d"
+            qtd = ("n/d" if not v["consultavel"] else
+                   "não consultado" if v["cves"] is None else len(v["cves"]))
             md.append(f"| {h['host']} | {h['ip']} | {h['plataforma']} | "
                       f"{v['rotulo']} | `{v['versao']}` | {qtd} |")
     md.append("")
@@ -529,6 +573,10 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
                 md.append("_Sem mapeamento CPE conhecido para esta "
                           "plataforma na NVD; consulte o boletim do "
                           "fabricante manualmente._\n")
+                continue
+            if v["cves"] is None:
+                md.append("_Versão não consultada na NVD (modo sem rede ou "
+                          "falha na consulta)._\n")
                 continue
             if not v["cves"]:
                 md.append("_Nenhuma correspondência retornada pela NVD para "
@@ -567,13 +615,15 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
 def gerar_csv(hosts, kev, pasta):
     agora = datetime.now()
     caminho = os.path.join(pasta, f"_cve_triagem_{agora:%Y%m%d_%H%M%S}.csv")
-    with open(caminho, "w", newline="", encoding="utf-8") as f:
+    # utf-8-sig: sem BOM, o Excel no Windows abre o CSV como ANSI e
+    # corrompe a acentuação.
+    with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["host", "ip", "plataforma", "tipo", "software", "versao",
                     "identificador", "severidade", "cvss", "kev", "detalhe"])
         for h in hosts:
             for v in h["versoes"]:
-                for c in v["cves"]:
+                for c in v["cves"] or []:
                     w.writerow([h["host"], h["ip"], h["plataforma"], "CVE",
                                 v["rotulo"], v["versao"], c["id"],
                                 SEV_PT.get(c["severidade"], c["severidade"]),
@@ -637,7 +687,8 @@ def main():
         sys.exit(1)
 
     print("=" * 68)
-    print(f" netcve v{__version__} — triagem de vulnerabilidades (offline)")
+    print(f" netcve v{__version__} — triagem de vulnerabilidades"
+          + (" (sem rede)" if args.sem_rede else ""))
     print("=" * 68)
     print(f"[+] {len(arquivos)} snapshot(s) em {args.pasta}")
     if not args.sem_rede and not args.api_key:
@@ -677,10 +728,10 @@ def main():
             "ip": meta.get("ip"),
             "plataforma": meta.get("platform_name"),
             "arquivo": os.path.basename(caminho),
-            "versoes": [dict(v, cves=[]) for v in versoes],
+            "versoes": [dict(v, cves=None) for v in versoes],
             "config": config,
         })
-        print(f"    {meta.get('host'):22} {len(versoes)} versão(ões), "
+        print(f"    {str(meta.get('host') or '?'):22} {len(versoes)} versão(ões), "
               f"{len(config)} apontamento(s) de configuração")
         for v in versoes:
             if v["consultavel"]:
@@ -724,16 +775,16 @@ def main():
                     print(ajuda)
                     print("    Consultas à NVD interrompidas; o relatório "
                           "será gerado apenas com as heurísticas locais.\n")
-                    consultas = {k: [] for k in consultas}
+                    consultas = {k: None for k in consultas}
                     break
-                consultas[(fornecedor, produto, versao)] = []
+                consultas[(fornecedor, produto, versao)] = None
         salvar_cache(cache)
 
         for h in hosts:
             for v in h["versoes"]:
                 if v["consultavel"]:
                     v["cves"] = consultas.get(
-                        (v["cpe_fornecedor"], v["cpe_produto"], v["versao"]), [])
+                        (v["cpe_fornecedor"], v["cpe_produto"], v["versao"]))
     else:
         print("[+] Modo sem rede: apenas heurísticas locais de configuração")
 
@@ -743,7 +794,7 @@ def main():
         print(f"[+] CSV: {gerar_csv(hosts, kev, args.pasta)}")
 
     total_kev = sum(1 for h in hosts for v in h["versoes"]
-                    for c in v["cves"] if c["id"] in kev)
+                    for c in (v["cves"] or []) if c["id"] in kev)
     if total_kev:
         print(f"\n[!] {total_kev} correspondência(s) no catálogo CISA KEV "
               "(exploração confirmada) — priorizar.")

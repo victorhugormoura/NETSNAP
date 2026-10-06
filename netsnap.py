@@ -10,14 +10,15 @@ Markdown por host, estruturado para leitura por humanos e por sistemas de IA.
 Plataformas: Juniper Junos, Huawei VRP V5 (campus), Huawei VRP V8
 (CloudEngine/NE), Huawei SmartAX (OLT), FiberHome OLT, Cisco NX-OS,
 Cisco IOS/IOS-XE, Cisco IOS-XR, MikroTik RouterOS e Linux.
-Módulos de aplicação em Linux: WANGuard, Zabbix, Grafana e BIND9
+Módulos de aplicação em Linux: ISP-Stack, WANGuard, BIRD, SmokePing,
+Zabbix, Grafana e BIND9
 (este último com verificação do bloqueio por RPZ ou por zona-sinkhole).
 
 Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.10.1"
+__version__ = "1.15.0"
 
 import os
 import re
@@ -36,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from netmiko import ConnectHandler
 from netmiko.ssh_autodetect import SSHDetect
+from netmiko.terminal_server import TerminalServerTelnet
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 
 # Suprime tracebacks da thread de transporte do Paramiko no console;
@@ -53,7 +55,11 @@ PRINT_LOCK = threading.Lock()
 DEBUG = False
 ARQUIVO_DEBUG = None
 DEBUG_LOCK = threading.Lock()
-DEBUG_LIMITE_AMOSTRA = 400   # caracteres de retorno registrados por comando
+DEBUG_LIMITE_AMOSTRA = 1200  # caracteres de retorno registrados por comando
+# Valor alto de propósito: o log de depuração é a via pela qual se
+# descobre a estrutura real de um serviço (nomes de tabela, colunas,
+# sintaxe aceita). Amostras curtas demais escondem justamente o que
+# permitiria corrigir o perfil.
 
 
 def iniciar_debug(pasta):
@@ -84,8 +90,12 @@ def depurar(host, evento, detalhe=""):
 
 
 def resumir_saida(texto, limite=DEBUG_LIMITE_AMOSTRA):
-    """Compacta um retorno para registro no log, preservando o essencial."""
-    t = PADRAO_ANSI.sub("", texto or "")
+    """Compacta um retorno para registro no log, preservando o essencial.
+
+    A amostra passa sempre pelo sanitizador: o log de depuração costuma ser
+    enviado para análise de terceiros, e a opção de incluir dados sensíveis
+    vale para o snapshot, não para o diagnóstico da coleta."""
+    t = sanitizar(PADRAO_ANSI.sub("", texto or ""))
     t = " ".join(t.split())
     return t[:limite] + (" [...]" if len(t) > limite else "")
 
@@ -269,6 +279,9 @@ PERFIS = {
         # vem agregado em 'display health'.
         "nome": "Huawei VRP V8 (CloudEngine CE/NE)",
         "fabricante": "Huawei",
+        # 'huawei_ce' é chave interna do netsnap, não um device_type do
+        # Netmiko: o driver da linha V8 chama-se huawei_vrpv8.
+        "driver": "huawei_vrpv8",
         "config": ["display current-configuration"],
         "logs": ["display logbuffer"],
         "basico": [
@@ -308,6 +321,10 @@ PERFIS = {
     "huawei_smartax": {
         "nome": "Huawei SmartAX (OLT MA5800)",
         "fabricante": "Huawei",
+        # O login cai no modo usuário (">"), onde 'display
+        # current-configuration' é recusado. 'enable' apenas eleva o
+        # privilégio da sessão; não entra em modo de configuração.
+        "prep": ["enable"],
         "config": ["display current-configuration"],
         "logs": ["display log"],
         "basico": [
@@ -504,6 +521,9 @@ PERFIS = {
             "/system resource print",
             "/system health print",
             "/routing bgp session print brief without-paging",
+            # Serviços de gerência (telnet, ftp, www, api) e origens
+            # permitidas: habilitado é o padrão e não aparece no export.
+            "/ip service print without-paging",
         ],
         "optica": [
             "/interface print stats without-paging",
@@ -552,9 +572,9 @@ PERFIS = {
             "{S}ufw status verbose 2>/dev/null",
             # Serviços: habilitados no boot é o que reconstrói o servidor;
             # 'running' mostra o estado atual
-            "systemctl list-unit-files --type=service --state=enabled --no-pager",
-            "systemctl list-units --type=service --state=running --no-pager",
-            "systemctl list-timers --all --no-pager",
+            "systemctl list-unit-files --type=service --state=enabled --no-pager --no-legend",
+            "systemctl list-units --type=service --state=running --no-pager --no-legend",
+            "systemctl list-timers --all --no-pager --no-legend",
             "systemctl --failed --no-pager",
             # Agendamentos
             "{S}ls -la /etc/cron.d/ /etc/cron.daily/ /etc/cron.hourly/ 2>/dev/null",
@@ -619,7 +639,13 @@ PERFIS = {
             "lsmod 2>/dev/null | head -n 60",
             "{S}dmidecode -s system-manufacturer -s system-product-name "
             "2>/dev/null; {S}systemd-detect-virt 2>/dev/null",
-            "(dpkg -l 2>/dev/null || rpm -qa 2>/dev/null) | head -n 400",
+            # Apenas estado, nome, versão e arquitetura: a coluna de descrição
+            # responde por 40 dos 51 KB medidos e nada acrescenta ao
+            # inventário.
+            "(dpkg-query -W -f '${db:Status-Abbrev}\\t${Package}\\t"
+            "${Version}\\t${Architecture}\\n' 2>/dev/null | "
+            "grep '^ii' | cut -f2-) || (rpm -qa --qf '%{NAME}\\t"
+            "%{VERSION}-%{RELEASE}\\t%{ARCH}\\n' 2>/dev/null)",
             "{S}ls -1 /etc/apt/sources.list.d/ 2>/dev/null; "
             "apt list --upgradable 2>/dev/null | head -n 40",
             "(command -v docker >/dev/null && {S}docker ps -a --format "
@@ -631,6 +657,240 @@ PERFIS = {
         ],
     },
 }
+
+# ---------------------------------------------------------------------------
+# Telnet
+#
+# Boa parte do parque de OLTs não oferece SSH: MA5800 e AN551x costumam sair
+# de fábrica apenas com Telnet, e em muitos provedores continuam assim. A
+# coleta suporta esses equipamentos, com duas ressalvas registradas no
+# relatório: o protocolo trafega usuário e senha em texto claro, e a sessão
+# inteira é legível por quem estiver no caminho.
+#
+# O Netmiko expõe um driver distinto por protocolo; a chave do perfil não
+# muda, apenas o device_type usado na conexão.
+DRIVER_TELNET = {
+    "juniper_junos": "juniper_junos_telnet",
+    "huawei": "huawei_telnet",
+    "huawei_ce": "huawei_telnet",
+    "huawei_smartax": "huawei_olt_telnet",
+    "fiberhome": "generic_telnet",
+    "cisco_nxos": "cisco_nxos_telnet",
+    "cisco_ios": "cisco_ios_telnet",
+    "cisco_xr": "cisco_xr_telnet",
+    "mikrotik_routeros": "generic_telnet",
+    "linux": "generic_telnet",
+}
+PORTA_TELNET_PADRAO = 23
+
+# Identificação pelo prompt de login do Telnet. Sem banner SSH para ler, a
+# própria solicitação de credencial distingue as plataformas: o SmartAX pede
+# ">>User name:", o VRP de switch pede "Username:", e a maioria das OLTs
+# FiberHome apresenta "Login:".
+# O banner do equipamento antecede o pedido de credencial, portanto a âncora
+# de início precisa valer por linha (re.M): sem isso, "Login:" ao final de um
+# banner de várias linhas nunca é reconhecido e a identificação degenera em
+# tentativas sucessivas de login.
+PROMPT_TELNET = [
+    (re.compile(r"(?i)>>\s*User\s*name"), ["huawei_smartax", "huawei"], "media"),
+    (re.compile(r"(?i)MA5[68]\d\d|SmartAX"), ["huawei_smartax"], "media"),
+    (re.compile(r"(?i)AN[56]\d{3}|FiberHome|GEPON|EPON"), ["fiberhome"], "media"),
+    (re.compile(r"(?im)^\s*Username\s*:\s*$"), ["huawei", "cisco_ios"], "media"),
+    (re.compile(r"(?im)^\s*Login\s*:\s*$"), ["fiberhome", "linux"], "media"),
+    (re.compile(r"(?i)(Login|User\s*name)\s*:\s*$"), ["fiberhome", "huawei"],
+     "media"),
+]
+
+# Equipamentos que exigem uma tecla após a autenticação, antes de liberar a
+# CLI. A OLT FiberHome apresenta "--Press any key to continue Ctrl+c to
+# stop--": sem enviar a tecla, find_prompt() captura esse texto como se fosse
+# o prompt e o primeiro comando derruba a sessão.
+PADRAO_TECLA = re.compile(
+    r"(?i)press\s+any\s+key|pressione\s+qualquer|hit\s+enter|"
+    r"--\s*more\s*--|any\s+key\s+to\s+continue"
+)
+
+# Pedidos de credencial e recusa de login, avaliados sobre o final do texto
+# recebido. A âncora no fim evita confundir "Last login: ..." de um banner
+# com um pedido de usuário.
+PADRAO_PEDE_USUARIO = re.compile(r"(?i)(?:^|\n)[^\n]*(?:login|user\s*name)\s*:\s*$")
+PADRAO_PEDE_SENHA = re.compile(r"(?i)(?:^|\n)[^\n]*pass\s*word\s*:\s*$")
+PADRAO_LOGIN_RECUSADO = re.compile(
+    r"(?i)login incorrect|authentication fail|access denied|"
+    r"authentication is rejected|invalid (?:user|password|login)|"
+    r"bad password|login failed|user.*locked"
+)
+PADRAO_FIM_PROMPT = re.compile(r"[#>$\]]\s*$")
+
+
+class TelnetComLogin(TerminalServerTelnet):
+    """Telnet genérico com autenticação.
+
+    O driver 'generic_telnet' do Netmiko é o de servidor de terminal: por
+    projeto, ele não envia usuário nem senha. Foi essa a causa da falha
+    registrada na OLT FiberHome: o pedido de login ficava sem resposta, os
+    comandos preparatórios eram digitados no campo de usuário e o equipamento
+    encerrava a sessão.
+
+    Esta classe faz o login com duas proteções contra bloqueio de conta, comum
+    em OLT: as credenciais são enviadas uma única vez — um novo pedido de
+    usuário ou senha depois disso é tratado como recusa, sem nova tentativa — e
+    o aviso "--Press any key--" exibido após o login é respondido aqui mesmo.
+    A preparação de sessão não altera nada no equipamento: apenas registra o
+    prompt para que send_command reconheça o fim de cada saída."""
+
+    def telnet_login(self, *args, **kwargs) -> str:
+        recebido, janela = "", ""
+        enviou_usuario = enviou_senha = False
+        teclas = 0
+        cutucou = False
+        inicio = time.time()
+        limite_apos_senha = None
+        while time.time() - inicio < 45:
+            dados = self.read_channel()
+            if dados:
+                recebido += dados
+                janela = (janela + PADRAO_ANSI.sub("", dados))[-400:]
+            trecho = janela.rstrip("\x00")
+
+            if (enviou_usuario or enviou_senha) and \
+                    PADRAO_LOGIN_RECUSADO.search(trecho):
+                raise NetmikoAuthenticationException(
+                    f"login recusado: {self.host}")
+            if PADRAO_PEDE_USUARIO.search(trecho):
+                if enviou_senha or enviou_usuario:
+                    raise NetmikoAuthenticationException(
+                        f"credenciais recusadas: {self.host}")
+                self.write_channel(self.username + "\r")
+                enviou_usuario, janela = True, ""
+                time.sleep(1)
+                continue
+            if PADRAO_PEDE_SENHA.search(trecho):
+                if enviou_senha:
+                    raise NetmikoAuthenticationException(
+                        f"credenciais recusadas: {self.host}")
+                self.write_channel(self.password + "\r")
+                enviou_senha, janela = True, ""
+                limite_apos_senha = time.time() + 20
+                time.sleep(1.5)
+                continue
+            if enviou_senha:
+                if PADRAO_TECLA.search(trecho) and teclas < 3:
+                    self.write_channel("\r")
+                    teclas, janela = teclas + 1, ""
+                    time.sleep(1.5)
+                    continue
+                if PADRAO_FIM_PROMPT.search(trecho):
+                    return recebido
+                if time.time() > limite_apos_senha:
+                    # Sem recusa explícita: devolve e deixa o prompt ser
+                    # determinado por find_prompt().
+                    return recebido
+            elif not dados and not cutucou and time.time() - inicio > 4:
+                # Alguns equipamentos só exibem o pedido de login após
+                # receber uma tecla.
+                self.write_channel("\r")
+                cutucou = True
+            time.sleep(0.3)
+        raise NetmikoTimeoutException(
+            f"pedido de login não reconhecido em {self.host}: "
+            f"{' '.join(janela.split())[-80:]!r}")
+
+    def session_preparation(self) -> None:
+        try:
+            prompt = self.find_prompt().strip()
+            if prompt and not PADRAO_TECLA.search(prompt):
+                self.base_prompt = prompt[:-1] if PADRAO_FIM_PROMPT.search(
+                    prompt) else prompt
+        except Exception:
+            pass
+
+
+def abrir_conexao(**dispositivo):
+    """ConnectHandler, com o login Telnet genérico corrigido."""
+    if dispositivo.get("device_type") == "generic_telnet":
+        return TelnetComLogin(**dispositivo)
+    return ConnectHandler(**dispositivo)
+
+
+def ler_prompt_telnet(ip: str, porta: int, tempo: int = 6):
+    """Lê o texto inicial de uma sessão Telnet, sem autenticar.
+
+    Descarta a negociação de opções (IAC, RFC 854) e devolve apenas o texto
+    legível — normalmente o banner do equipamento e o pedido de usuário."""
+    IAC, SB, SE = 0xFF, 0xFA, 0xF0
+    WILL, WONT, DO, DONT = 0xFB, 0xFC, 0xFD, 0xFE
+    limpo = bytearray()
+    try:
+        with socket.create_connection((ip, porta), timeout=tempo) as s:
+            s.settimeout(tempo)
+            pendente = b""
+            fim = time.time() + tempo
+            while len(limpo) < 2048 and time.time() < fim:
+                try:
+                    pedaco = s.recv(512)
+                except socket.timeout:
+                    break
+                if not pedaco:
+                    break
+                dados, pendente = pendente + pedaco, b""
+                i = 0
+                while i < len(dados):
+                    b = dados[i]
+                    if b != IAC:
+                        limpo.append(b)
+                        i += 1
+                        continue
+                    if i + 1 >= len(dados):
+                        pendente = dados[i:]
+                        break
+                    cmd = dados[i + 1]
+                    if cmd in (WILL, WONT, DO, DONT):
+                        if i + 2 >= len(dados):
+                            pendente = dados[i:]
+                            break
+                        # Recusa toda opção. Vários equipamentos só exibem o
+                        # pedido de login depois que o cliente responde à
+                        # negociação; sem resposta, a leitura não traria
+                        # texto algum.
+                        if cmd == DO:
+                            s.sendall(bytes((IAC, WONT, dados[i + 2])))
+                        elif cmd == WILL:
+                            s.sendall(bytes((IAC, DONT, dados[i + 2])))
+                        i += 3
+                    elif cmd == SB:
+                        f = dados.find(bytes((IAC, SE)), i + 2)
+                        if f < 0:
+                            pendente = dados[i:]
+                            break
+                        i = f + 2
+                    elif cmd == IAC:
+                        limpo.append(IAC)
+                        i += 2
+                    else:
+                        i += 2
+                if re.search(rb"(?i)(name|login|user|password)\s*:\s*$",
+                             bytes(limpo[-40:])):
+                    break
+    except OSError:
+        return None
+
+    texto = limpo.decode("utf-8", "replace")
+    texto = PADRAO_ANSI.sub("", texto).replace("\x00", "")
+    # Conectou mas não recebeu texto: devolve vazio (e não None, que
+    # significa porta sem resposta).
+    return texto.strip()
+
+
+def plataforma_por_prompt_telnet(texto: str):
+    """Retorna (candidatos, confianca) a partir do prompt de login."""
+    if not texto:
+        return [], None
+    for padrao, candidatos, confianca in PROMPT_TELNET:
+        if padrao.search(texto):
+            return list(candidatos), confianca
+    return [], None
+
 
 ORDEM_MENU = list(PERFIS.keys())
 
@@ -646,32 +906,47 @@ ORDEM_MENU = list(PERFIS.keys())
 # local e ficam apenas em variável de ambiente do processo cliente, de modo
 # que não aparecem na linha de comando (ps) nem no relatório gerado.
 DEF_Q_WANGUARD = (
-    # Credenciais do Wanguard 9: host e senha ficam em arquivos separados,
-    # cada um contendo apenas o valor. O usuário e o banco chamam-se
-    # 'andrisoft' por padrão; o banco é confirmado com SHOW DATABASES.
-    "WH=$({S}cat /opt/andrisoft/etc/dbhost.conf 2>/dev/null | tr -d ' \\r\\n'); "
-    "WP=$({S}cat /opt/andrisoft/etc/dbpass.conf 2>/dev/null | tr -d ' \\r\\n'); "
-    "WU=andrisoft; "
-    "WD=$(MYSQL_PWD=\"$WP\" mysql -h \"${WH:-localhost}\" -u \"$WU\" -N -B "
-    "-e 'SHOW DATABASES' 2>/dev/null | grep -i -m1 -E 'andrisoft|wanguard'); "
-    "W(){ if [ -z \"$WP\" ]; then echo '(credenciais do banco inacessiveis "
-    "- requer sudo)'; elif ! command -v mysql >/dev/null 2>&1; then "
-    "echo '(cliente mysql ausente no servidor)'; "
-    "elif [ -z \"$WD\" ]; then echo '(banco do Wanguard nao localizado)'; "
-    "else MYSQL_PWD=\"$WP\" mysql -h \"${WH:-localhost}\" -u \"$WU\" "
-    "-D \"$WD\" -B -e \"$1\" 2>&1; fi; }; "
-    # WT(): despeja uma tabela excluindo colunas cujo nome indique segredo.
-    # Necessário porque a saída do mysql é tabular: um valor sob a coluna
-    # 'password' não seria detectado pelo sanitizador, que procura par
-    # chave=valor. A exclusão é feita na origem, pela lista de colunas.
-    "WT(){ C=$(W \"DESCRIBE \\`$1\\`\" 2>/dev/null | tail -n +2 | "
-    "awk '{print $1}' | grep -v -i -E "
-    "'pass|secret|_key$|^key$|token|community|credential|hash|salt|"
-    "^license$|^prev_license$' | "
-    "sed 's/^/`/;s/$/`/' | paste -sd, -); "
-    "[ -z \"$C\" ] && { echo \"(tabela $1 inacessivel)\"; return; }; "
-    "W \"SELECT $C FROM \\`$1\\` ${2:-LIMIT 50}\"; }; "
-    "echo \"banco: ${WD:-nao identificado} em ${WH:-localhost}\""
+    # Wanguard 9 guarda host e senha do banco em arquivos separados, cada um
+    # contendo apenas o valor. O usuário e o banco chamam-se "andrisoft" por
+    # padrão; o nome real é confirmado com SHOW DATABASES.
+    #
+    # W()  executa uma consulta.
+    # WT() despeja uma tabela a partir do DESCRIBE, aplicando três
+    #      transformações indispensáveis para que a saída seja analisável:
+    #        - colunas de segredo são excluídas na origem (a saída do mysql
+    #          é tabular, e um valor sob a coluna "password" não seria
+    #          detectado pelo sanitizador, que procura par chave=valor);
+    #        - colunas binárias recebem INET6_NTOA, pois o Wanguard grava
+    #          endereços como VARBINARY e o despejo cru produz bytes nulos
+    #          ilegíveis em vez do IP;
+    #        - marcas de tempo Unix recebem FROM_UNIXTIME.
+    #      O terceiro parâmetro, opcional, é uma regex de colunas a manter.
+    r"WH=$({S}cat /opt/andrisoft/etc/dbhost.conf 2>/dev/null | tr -d "
+    r"' \r\n'); "
+    r"WP=$({S}cat /opt/andrisoft/etc/dbpass.conf 2>/dev/null | tr -d "
+    r"' \r\n'); "
+    r"WU=andrisoft; "
+    r'WD=$(MYSQL_PWD="$WP" mysql -h "${WH:-localhost}" -u "$WU" -N -B '
+    r"-e 'SHOW DATABASES' 2>/dev/null | grep -i -m1 -E 'andrisoft|wanguard'); "
+    r'W(){ if [ -z "$WP" ]; then echo '
+    r"'(credenciais do banco inacessiveis - requer sudo)'; "
+    r"elif ! command -v mysql >/dev/null 2>&1; then echo "
+    r"'(cliente mysql ausente no servidor)'; "
+    r'elif [ -z "$WD" ]; then echo '
+    r"'(banco do Wanguard nao localizado)'; "
+    r'else MYSQL_PWD="$WP" mysql -h "${WH:-localhost}" -u "$WU" -D "$WD" '
+    r'-B -e "$1" 2>&1; fi; }; '
+    r'WT(){ C=$(W "DESCRIBE \`$1\`" 2>/dev/null | tail -n +2 | '
+    'awk -v F="${3:-}" \'{ n=tolower($1); t=tolower($2) } '
+    r"n ~ /pass|secret|_key$|^key$|token|community|credential|hash|salt|^license$|^prev_license$/ { next } "
+    r'F != "" && n !~ F { next } '
+    r't ~ /binary|blob/ { printf "INET6_NTOA(`%s`) AS `%s`,", $1, $1; next } '
+    r"n ~ /^(first|last|sensor_last|update_time|start_time|last_run|expire|expires)$/ && t ~ /int/ "
+    r'{ printf "FROM_UNIXTIME(`%s`) AS `%s`,", $1, $1; next } '
+    '{ printf "`%s`,", $1 }\' | sed \'s/,$//\'); '
+    r'[ -z "$C" ] && { echo "(tabela $1 sem colunas acessiveis)"; return; }; '
+    r'W "SELECT $C FROM \`$1\` ${2:-LIMIT 50}"; }; '
+    r'echo "banco: ${WD:-nao identificado} em ${WH:-localhost}"'
 )
 
 DEF_Q_ZABBIX = (
@@ -817,78 +1092,153 @@ APPS_LINUX = {
         # MariaDB, não em arquivo: o etc/ contém apenas Apache, InfluxDB e
         # as credenciais do banco. Sem esta seção, a coleta não registra
         # nada do que o WANGuard realmente monitora.
-        # A partir do Wanguard 9 a configuração operacional fica no MariaDB.
-        # As tabelas abaixo foram confirmadas em uma instalação 9.0-3; as que
-        # não existirem em outra versão são marcadas e não poluem o relatório.
-        # Tabelas de autenticação (company_staff, httpauth, ldapauth,
-        # radiusauth, samlauth) são deliberadamente omitidas por conterem
-        # credenciais de operador.
+        # A configuração operacional do Wanguard 9 fica integralmente no
+        # MariaDB: o diretório etc/ contém apenas Apache, InfluxDB e as
+        # credenciais do banco. As tabelas abaixo foram confirmadas em uma
+        # instalação 9.0-3 (143 tabelas de configuração e 2.424 de
+        # accounting diário). São deliberadamente omitidas:
+        #   - tabelas de autenticação de operador (company_staff, httpauth,
+        #     ldapauth, radiusauth, samlauth), por conterem credenciais;
+        #   - séries temporais e dados de fluxo (top_bin_*, top_live_*,
+        #     sensorstats, events, as_numbers, ipacct*, allstats), que somam
+        #     dezenas de gigabytes e alimentam gráficos;
+        #   - tabelas de integração com credencial (ldap, email, telco), que
+        #     guardam usuário de bind LDAP, login SMTP e usuário RADIUS;
+        #   - referência estática (country_code, ip_protocols, protocols) e
+        #     estado de interface (widget, dashboard, bookmark, graphs), que
+        #     são ruído para análise de configuração.
         "extra": {
-            "titulo": "Configuração operacional no banco (componentes, "
-                      "zonas de IP, respostas, ataques e licença)",
+            "titulo": "Configuração operacional no banco (componentes, zonas, "
+                      "detecção, respostas, BGP/Flowspec e anomalias)",
             "comandos": [
                 DEF_Q_WANGUARD,
-                # Identificação e licença. A coluna 'license' guarda a
-                # chave em base64 (segredo do contrato) e não é despejada:
-                # só os metadados que interessam ao inventário.
-                "WT version",
-                "W \"SELECT id, filename, update_time, "
-                "LENGTH(license) AS tamanho_chave, "
-                "CASE WHEN license IS NULL OR license='' THEN 'ausente' "
-                "ELSE 'presente' END AS chave FROM license\"",
-                # Componentes: cada linha é um sensor/filtro configurado
+                # ----- Identificação da instalação -----
+                "echo '===== version'; WT version; "
+                "echo '===== maintenance (retencao por tipo de dado)'; "
+                "WT maintenance; echo '===== defaults'; WT defaults",
+                # A coluna 'license' guarda a chave do contrato e é excluída
+                # pelo WT; aqui ficam apenas os metadados de validade.
+                "echo '===== license (metadados)'; "
+                "W \"SELECT id, filename, FROM_UNIXTIME(update_time) AS "
+                "update_time, LENGTH(license) AS tamanho_chave FROM license\"",
+                # ----- Componentes configurados -----
                 "for t in wanserver wansensor wansensor_virtual wanflow "
-                "wansniff wansnmp wanfilter wanconsole wanwatcher; do "
-                "echo \"===== $t\"; WT $t; done",
-                # Interfaces monitoradas por componente
+                "wansniff wansnmp wanfilter wanconsole wanwatcher wanbgp; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 100\"; done",
+                # Interfaces monitoradas: tipo (Upstream/Peering), velocidade
+                # contratada, fronteira e provedor de cada enlace
                 "for t in wanserver_interfaces wanflow_interfaces "
-                "wansnmp_interfaces; do echo \"===== $t\"; WT $t; done",
-                # Zonas de IP, prefixos monitorados e regras por prefixo
-                "for t in ipaddr ipaddrdesc ipaddrrules; do "
+                "wansnmp_interfaces wansniff_interfaces; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
+                # ----- Zonas de IP e prefixos monitorados -----
+                # Sem INET6_NTOA estas tabelas saem como bytes nulos: o
+                # endereço é gravado em VARBINARY.
+                "echo '===== ipaddr (zonas e prefixos)'; "
+                "WT ipaddr \"ORDER BY ipzone, id LIMIT 1000\"",
+                "for t in ipaddrdesc ipaddrrules ipzone ipgroups; do "
+                "echo \"===== $t\"; WT $t \"LIMIT 500\"; done",
+                # ----- Detecção: perfis, limiares e gatilhos -----
+                "for t in anomalies templates templatesrules; do "
                 "echo \"===== $t\"; WT $t \"LIMIT 300\"; done",
-                # Perfis de detecção de anomalia e limiares
-                "for t in anomalies templates templatesrules "
-                "profiling_templates profiling_templatesrules "
-                "profiling_ipaddrrules baseline_profiles; do "
-                "echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
-                # Respostas automáticas: o que o WANGuard faz ao detectar
-                "for t in actions actions_bgp actions_filters "
-                "actions_reconfigure actions_snmp actions_syslog "
-                "actions_notify actions_webhook actions_reports "
-                "actions_scripts actions_dumps; do echo \"===== $t\"; "
-                "WT $t \"LIMIT 100\"; done",
-                # Roteadores e BGP usados para blackhole/flowspec
-                "for t in router quagga scrubber_tunnels "
-                "scrubber_tunnel_settings; do echo \"===== $t\"; WT $t; done",
-                # Exceções, listas brancas e regras de filtragem
+                "for t in profiling_templates profiling_templatesrules "
+                "profiling_ipaddrrules profiling_profiles baseline_profiles; "
+                "do echo \"===== $t\"; WT $t \"LIMIT 300\"; done",
+                # ----- Respostas automáticas -----
+                # Cada ação é uma linha em 'actions' com as etapas
+                # distribuídas nas tabelas actions_*; todas vazias significa
+                # detecção sem mitigação automática.
+                "echo '===== actions'; WT actions \"LIMIT 200\"; "
+                "for t in actions_bgp actions_filters actions_reconfigure "
+                "actions_snmp actions_syslog actions_notify actions_emails "
+                "actions_webhook actions_reports actions_scripts "
+                "actions_dumps; do echo \"===== $t\"; WT $t \"LIMIT 200\"; "
+                "done",
+                # ----- BGP, blackhole e Flowspec -----
+                # A configuração de Flowspec não tem tabela própria: vive nas
+                # colunas exa_flowspec, max_flowspec, flowspec_counters,
+                # exa_nexthop, exa_localpref, exa_rd, exa_direction e srtbh
+                # da tabela 'router'.
+                "echo '===== router (BGP / blackhole / Flowspec)'; "
+                "WT router \"LIMIT 100\"",
+                "for t in quagga scrubber_tunnels scrubber_tunnel_settings "
+                "bgp_communities flowspec_rules; do echo \"===== $t\"; "
+                "WT $t \"LIMIT 200\"; done",
+                # ----- Filtragem, listas e exceções -----
                 "for t in whitelists exceptions blacklist_settings "
-                "blacklist_ds fr_settings fr_list fw_custom_fr; do "
-                "echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
-                # Mitigação em vigor neste instante
+                "blacklist_ds fr_settings fr_list fw_custom_fr fw_settings; "
+                "do echo \"===== $t\"; WT $t \"LIMIT 300\"; done",
+                # ----- Mitigação em vigor neste instante -----
                 "echo '===== active_fw_rules (mitigacao ativa agora)'; "
-                "WT active_fw_rules \"LIMIT 200\"",
-                # Histórico recente de ataques — o que de fato aconteceu
-                "echo '===== attacks (30 mais recentes)'; "
-                "WT attacks \"ORDER BY 1 DESC LIMIT 30\"",
-                "echo '===== attacks_logs (60 mais recentes)'; "
-                "WT attacks_logs \"ORDER BY 1 DESC LIMIT 60\"",
-                # Volume das tabelas de séries temporais, sem despejá-las
+                "WT active_fw_rules \"LIMIT 500\"",
+                "echo '===== squeue / squeue_archive (fila de filtros)'; "
+                "WT squeue \"LIMIT 100\"; "
+                "WT squeue_archive \"ORDER BY 1 DESC LIMIT 100\"",
+                # ----- Últimas anomalias detectadas -----
+                # A tabela 'attacks' chega a milhões de registros; o recorte
+                # por colunas mantém o volume compatível com leitura por
+                # modelo de linguagem sem perder o que caracteriza o evento.
+                "echo '===== attacks (1000 mais recentes)'; "
+                "WT attacks \"ORDER BY attack_id DESC LIMIT 1000\" "
+                "\"^(attack_id|attack_type|status|ip|mask|first|last|"
+                "rule_|value$|computed_value|latest_value|sum_value|"
+                "anomaly_|total_|sensor|ipgroup|prefix|comment|action|"
+                "duration|packets|bytes|direction|protocol|port)\"",
+                # Restrito aos últimos 90 dias: sem a janela, o agrupamento
+                # varre os 2,6 milhões de registros da tabela e leva 12 s.
+                "echo '===== attacks: distribuicao por tipo (90 dias)'; "
+                "W \"SELECT attack_type, COUNT(*) AS ocorrencias, "
+                "MAX(FROM_UNIXTIME(last)) AS mais_recente FROM attacks "
+                "WHERE first > UNIX_TIMESTAMP() - 7776000 "
+                "GROUP BY attack_type ORDER BY ocorrencias DESC LIMIT 40\"",
+                "W \"SELECT DATE(FROM_UNIXTIME(first)) AS dia, "
+                "COUNT(*) AS anomalias FROM attacks WHERE first > "
+                "UNIX_TIMESTAMP() - 2592000 GROUP BY dia ORDER BY dia DESC\"",
+                "echo '===== attacks_logs (100 mais recentes)'; "
+                "WT attacks_logs \"ORDER BY 1 DESC LIMIT 100\"",
+                # ----- Agendamentos e saúde -----
+                "for t in schedule_reports wanhealth_check chronos; "
+                "do echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
+                # ----- Descoberta: tabelas de configuração não previstas -----
+                # Garante que uma versão diferente do Wanguard não deixe
+                # configuração de fora por não constar das listas acima.
+                "echo '===== tabelas de configuracao ainda nao despejadas'; "
+                "W \"SELECT table_name, table_rows FROM "
+                "information_schema.tables WHERE table_schema=DATABASE() "
+                "AND table_name NOT LIKE 'acct%' AND table_name NOT LIKE "
+                "'top\\_%' AND table_name NOT LIKE '%\\_archive' AND "
+                "table_name NOT REGEXP "
+                "'^(attacks|events|sensorstats|as_numbers|squeue|ipacct|"
+                "ports|protocols|tops_|company_staff|httpauth|ldapauth|"
+                "radiusauth|samlauth|ldap|email|telco|country_code|"
+                "ip_protocols|graphs|allstats|bookmark|widget|dashboard)' "
+                "AND table_rows < 5000 "
+                "ORDER BY table_name\"",
+                "for t in $(W \"SELECT table_name FROM "
+                "information_schema.tables WHERE table_schema=DATABASE() "
+                "AND table_name NOT LIKE 'acct%' AND table_name NOT LIKE "
+                "'top\\_%' AND table_name NOT LIKE '%\\_archive' AND "
+                "table_name NOT REGEXP "
+                "'^(attacks|events|sensorstats|as_numbers|squeue|ipacct|"
+                "ports|protocols|tops_|company_staff|httpauth|ldapauth|"
+                "radiusauth|samlauth|ldap|email|telco|country_code|"
+                "ip_protocols|graphs|allstats|bookmark|baseline|"
+                "wan|ipaddr|action|profiling|template|"
+                "router|quagga|scrubber|whitelist|exception|blacklist|fr_|"
+                "fw_|active_fw|anomalies|license|version|maintenance|"
+                "defaults|schedule|widget|dashboard|ipzone|ipgroups)' "
+                "AND table_rows > 0 AND table_rows < 2000 "
+                "ORDER BY table_name\" 2>/dev/null | tail -n +2); do "
+                "echo \"===== $t\"; WT $t \"LIMIT 100\"; done",
+                # ----- Dimensionamento, sem despejar séries temporais -----
+                "echo '===== volume das tabelas (nao despejadas)'; "
                 "W \"SELECT table_name, table_rows, "
                 "ROUND(data_length/1024/1024) AS mb FROM "
                 "information_schema.tables WHERE table_schema=DATABASE() "
                 "AND table_name NOT LIKE 'acct%' ORDER BY data_length DESC "
-                "LIMIT 40\"",
-                # Contagem das tabelas de accounting diário, que são milhares
-                "W \"SELECT COUNT(*) AS tabelas_de_accounting FROM "
+                "LIMIT 30\"",
+                "W \"SELECT COUNT(*) AS tabelas_de_accounting_diario FROM "
                 "information_schema.tables WHERE table_schema=DATABASE() "
                 "AND table_name LIKE 'acct%'\"",
-                # Demais tabelas existentes, para diagnóstico de versão
-                "W \"SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema=DATABASE() AND table_name NOT LIKE 'acct%' "
-                "ORDER BY table_name\"",
-                # Agendamentos, relatórios e saúde
-                "for t in schedule_reports wanhealth_check maintenance "
-                "defaults; do echo \"===== $t\"; WT $t \"LIMIT 100\"; done",
             ],
         },
     },
@@ -929,7 +1279,8 @@ APPS_LINUX = {
         "basico": [
             "systemctl status --no-pager zabbix-server zabbix-proxy zabbix-agent "
             "zabbix-agent2 2>&1 | head -n 60",
-            "{S}ss -tulpn 2>/dev/null | grep -E ':10050|:10051|:80|:443'",
+            "{S}ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "grep -E ':10050|:10051|:80|:443' | sort -u",
             "{S}ps -eo pid,etime,pcpu,pmem,args --sort=-pcpu 2>/dev/null | "
             "grep -i zabbix | grep -v grep | head -n 20",
             "{S}du -sh /var/lib/mysql/zabbix /var/lib/pgsql/data 2>/dev/null",
@@ -1007,7 +1358,8 @@ APPS_LINUX = {
         ],
         "basico": [
             "systemctl status --no-pager grafana-server grafana 2>&1 | head -n 40",
-            "{S}ss -tulpn 2>/dev/null | grep -E ':3000|:3001'",
+            "{S}ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "grep -E ':3000|:3001' | sort -u",
             # /api/health não exige autenticação
             "curl -s -m 5 http://127.0.0.1:3000/api/health 2>&1 | head -n 20",
         ],
@@ -1042,6 +1394,273 @@ APPS_LINUX = {
                 "G \"SELECT login, CASE is_admin WHEN 1 THEN 'admin' ELSE 'usuario' END, "
                 "CASE is_disabled WHEN 1 THEN 'desabilitado' ELSE 'ativo' END "
                 "FROM user ORDER BY login\"",
+            ],
+        },
+    },
+    "bird": {
+        # Daemon de roteamento. Num provedor costuma manter as sessões BGP de
+        # trânsito, PTT e clientes, e em servidores auxiliares participa de
+        # anúncios de blackhole. A partir do BIRD 2 o binário de controle é
+        # 'birdc'; o BIRD 1 usa 'birdc' e 'birdc6' separados por família.
+        "nome": "BIRD (daemon de roteamento BGP/OSPF)",
+        "deteccao": "{ command -v bird >/dev/null 2>&1 || "
+                    "test -f /etc/bird/bird.conf || test -f /etc/bird.conf; } "
+                    "&& echo PRESENTE",
+        "config": [
+            "for f in /etc/bird/bird.conf /etc/bird.conf /etc/bird/bird6.conf; "
+            "do [ -f \"$f\" ] && { echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\"; }; done",
+            "{S}ls -la /etc/bird/ /etc/bird/conf.d/ 2>/dev/null",
+            "for f in /etc/bird/conf.d/*.conf /etc/bird/*.conf; do "
+            "[ -f \"$f\" ] && case \"$f\" in */bird.conf|*/bird6.conf) ;; *) "
+            "echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\";; esac; done",
+            "for b in birdc birdcl birdc6; do command -v $b >/dev/null 2>&1 && "
+            "{ echo \"===== $b show status\"; "
+            "timeout 15 {S}$b show status 2>&1 | head -n 15; }; done",
+        ],
+        "logs": [
+            "U=$(systemctl list-units --no-pager --plain --no-legend "
+            "2>/dev/null | awk '/bird/{printf \" -u \"$1}'); "
+            "if [ -n \"$U\" ]; then {S}journalctl $U -n 250 --no-pager 2>&1; "
+            "else echo '(nenhuma unit systemd do BIRD encontrada)'; fi",
+            "[ -f /var/log/bird.log ] && {S}tail -n 200 /var/log/bird.log",
+        ],
+        "basico": [
+            "systemctl status --no-pager bird bird6 2>&1 | head -n 40",
+            # Estado das sessões: 'show protocols all' traz, por vizinho,
+            # estado, tempo de sessão, rotas importadas/exportadas e o motivo
+            # da última queda — o que caracteriza a saúde do peering.
+            "for b in birdc birdcl; do command -v $b >/dev/null 2>&1 && "
+            "{ echo \"===== $b show protocols\"; "
+            "timeout 20 {S}$b show protocols 2>&1 | head -n 80; "
+            "echo \"===== $b show protocols all\"; "
+            "timeout 30 {S}$b show protocols all 2>&1 | head -n 400; "
+            "break; }; done",
+            "for b in birdc birdcl; do command -v $b >/dev/null 2>&1 && "
+            "{ echo \"===== memoria e contagem de rotas\"; "
+            "timeout 15 {S}$b show memory 2>&1 | head -n 15; "
+            "timeout 20 {S}$b show route count 2>&1 | head -n 10; "
+            "timeout 20 {S}$b show symbols 2>&1 | head -n 60; break; }; done",
+            "{S}ss -tnp 2>/dev/null | tr -s ' ' | grep ':179' | head -n 40",
+        ],
+        "inventario": [
+            # Somente o daemon aceita --version; birdc e birdcl respondem
+            # "invalid option -- '-'" e imprimem o uso.
+            "command -v bird >/dev/null 2>&1 && "
+            "timeout 5 bird --version 2>&1 | head -n 3",
+            "(dpkg -l 2>/dev/null | grep -i -E '^ii +bird') || "
+            "(rpm -qa 2>/dev/null | grep -i '^bird')",
+        ],
+    },
+    "smokeping": {
+        "nome": "SmokePing (medição de latência e perda)",
+        "deteccao": "{ test -d /etc/smokeping || "
+                    "command -v smokeping >/dev/null 2>&1; } && echo PRESENTE",
+        "config": [
+            "{S}ls -la /etc/smokeping/ /etc/smokeping/config.d/ 2>/dev/null",
+            # A configuração é fatiada em config.d; Targets costuma ser o
+            # maior arquivo e descreve toda a topologia medida.
+            "for f in /etc/smokeping/config.d/*; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\" | head -n 400; }; done",
+            "[ -f /etc/smokeping/config ] && { echo '===== /etc/smokeping/config'; "
+            "{S}grep -v -E '^[[:space:]]*#|^[[:space:]]*$' "
+            "/etc/smokeping/config | head -n 200; }",
+            "echo \"alvos monitorados: $({S}grep -c '^+' "
+            "/etc/smokeping/config.d/Targets 2>/dev/null)\"",
+        ],
+        "logs": [
+            "U=$(systemctl list-units --no-pager --plain --no-legend "
+            "2>/dev/null | awk '/smokeping/{printf \" -u \"$1}'); "
+            "if [ -n \"$U\" ]; then {S}journalctl $U -n 200 --no-pager 2>&1; "
+            "else echo '(nenhuma unit systemd do SmokePing)'; fi",
+        ],
+        "basico": [
+            "systemctl status --no-pager smokeping 2>&1 | head -n 30",
+            "{S}du -sh /var/lib/smokeping 2>/dev/null; "
+            "{S}find /var/lib/smokeping -name '*.rrd' 2>/dev/null | wc -l",
+        ],
+        "inventario": [
+            "command -v smokeping >/dev/null 2>&1 && "
+            "timeout 5 smokeping --version 2>&1 | head -n 3",
+            "(dpkg -l 2>/dev/null | grep -i -E '^ii +smokeping') || "
+            "(rpm -qa 2>/dev/null | grep -i '^smokeping')",
+        ],
+    },
+    "isp_stack": {
+        "nome": "ISP-Stack (suite de serviços para provedor)",
+        # O estado persistente fica em /etc/isp-stack: provider.conf com a
+        # identificação do provedor e um arquivo por módulo instalado em
+        # state/, o que torna a detecção e o inventário determinísticos.
+        "deteccao": "{ test -d /etc/isp-stack || test -f /etc/isp-stack/"
+                    "provider.conf; } && echo PRESENTE",
+        "config": [
+            # Identidade do provedor e módulos efetivamente instalados
+            "echo '===== versao e estado'; {S}cat /etc/isp-stack/VERSION "
+            "2>/dev/null; {S}ls -la /etc/isp-stack/ /etc/isp-stack/state/ "
+            "2>/dev/null",
+            "[ -f /etc/isp-stack/provider.conf ] && "
+            "{ echo '===== provider.conf'; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' /etc/isp-stack/provider.conf; }",
+            "for f in /etc/isp-stack/unattended.conf "
+            "/etc/isp-stack/secondary.conf /etc/isp-stack/jumphost; do "
+            "[ -e \"$f\" ] && { echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\" 2>/dev/null || "
+            "{S}ls -la \"$f\"; }; done",
+            # DNS recursivo (Unbound) — o módulo dns.sh usa Unbound com
+            # adblock; o BIND9 é coberto pelo módulo bind9 do netsnap.
+            "for f in /etc/unbound/unbound.conf.d/isp-stack.conf "
+            "/etc/unbound/unbound.conf.d/adblock.conf; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\" | head -n 120; }; done",
+            # NTP, SNMP e coleta
+            "for f in /etc/chrony/chrony.conf /etc/snmp/snmpd.conf; do "
+            "[ -f \"$f\" ] && { echo \"===== $f\"; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' \"$f\"; }; done",
+            # Stack de monitoramento
+            "for f in /etc/prometheus/prometheus.yml "
+            "/etc/alertmanager/alertmanager.yml "
+            "/etc/blackbox_exporter/blackbox.yml; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+            "{S}ls -la /etc/prometheus/targets/ 2>/dev/null; "
+            "for f in /etc/prometheus/targets/*.yml; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+            "{S}ls -la /etc/prometheus/rules/ /etc/prometheus/*.rules "
+            "2>/dev/null",
+            # RPKI
+            "[ -f /etc/routinator/routinator.conf ] && "
+            "{ echo '===== routinator.conf'; {S}grep -v -E "
+            "'^[[:space:]]*#|^[[:space:]]*$' /etc/routinator/routinator.conf; }",
+            # Serviços web publicados pelo stack
+            "{S}ls -la /etc/apache2/sites-enabled/ 2>/dev/null",
+            "for f in /etc/apache2/sites-available/isp-*.conf "
+            "/etc/apache2/sites-available/lookingglass.conf "
+            "/etc/apache2/sites-available/librespeed.conf "
+            "/etc/apache2/sites-available/dokuwiki.conf; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+            "{S}grep -h -E '^Listen' /etc/apache2/ports.conf 2>/dev/null",
+            # Jump host e acesso web ao terminal
+            "[ -f /etc/ssh/sshd_config.d/60-isp-jumphost.conf ] && "
+            "{ echo '===== 60-isp-jumphost.conf'; {S}cat "
+            "/etc/ssh/sshd_config.d/60-isp-jumphost.conf; }",
+            "for u in /etc/systemd/system/isp-*.service "
+            "/etc/systemd/system/isp-*.timer; do [ -f \"$u\" ] && "
+            "{ echo \"===== $u\"; {S}cat \"$u\"; }; done",
+            # Endurecimento
+            "for f in /etc/fail2ban/jail.d/isp-stack.conf "
+            "/etc/apt/apt.conf.d/51isp-unattended "
+            "/etc/audit/rules.d/isp-stack.rules; do [ -f \"$f\" ] && "
+            "{ echo \"===== $f\"; {S}cat \"$f\"; }; done",
+        ],
+        "logs": [
+            "{S}ls -la /var/log/isp-stack/ 2>/dev/null | tail -n 15",
+            "for f in $({S}ls -1t /var/log/isp-stack/install-*.log "
+            "2>/dev/null | head -n 1); do echo \"===== $f (ultimas linhas)\"; "
+            "{S}tail -n 150 \"$f\"; done",
+            "U=$(systemctl list-units --no-pager --plain --no-legend "
+            "2>/dev/null | awk '/isp-|routinator|prometheus|alertmanager|"
+            "blackbox|node_exporter|unbound|chrony/{printf \" -u \"$1}'); "
+            "if [ -n \"$U\" ]; then {S}journalctl $U -n 250 --no-pager "
+            "2>&1; else echo '(nenhuma unit do ISP-Stack encontrada)'; fi",
+        ],
+        "basico": [
+            # Estado de cada serviço do stack, sem lista fixa de nomes
+            "systemctl list-units --no-pager --all --plain 2>/dev/null | "
+            "grep -E 'isp-|routinator|prometheus|alertmanager|blackbox|"
+            "node_exporter|unbound|chrony|snmpd|grafana|apache2|named|bind9|"
+            "gvmd|ospd|fail2ban'",
+            "systemctl list-timers --all --no-pager 2>/dev/null | "
+            "grep -E 'isp-|certbot|unbound|logrotate'",
+            # Portas do stack: 3000 Grafana, 7681 ttyd, 8088/8090/8095 web,
+            # 8323 Routinator, 9090 Prometheus, 9093 Alertmanager,
+            # 9100 node_exporter, 9115 blackbox, 9392 OpenVAS
+            "{S}ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "grep -E ':(53|123|161|443|2048|3000|7681|8088|8090|8095|8323|"
+            "9090|9093|9100|9115|9392)\\b' | sort -u",
+            # Saúde dos serviços de rede do provedor
+            "command -v unbound-control >/dev/null 2>&1 && "
+            "{ {S}unbound-control status 2>&1 | head -n 12; "
+            "{S}unbound-control stats_noreset 2>/dev/null | "
+            "grep -E 'total\\.(num|requestlist)|num\\.query\\.type\\.A=|"
+            "num\\.answer\\.rcode\\.NXDOMAIN' | head -n 12; }",
+            "command -v chronyc >/dev/null 2>&1 && "
+            "{ chronyc tracking 2>&1 | head -n 12; "
+            "chronyc sources 2>&1 | head -n 15; }",
+            # Estado da validação RPKI, sem disparar validação completa
+            "curl -s -m 8 http://127.0.0.1:8323/status 2>/dev/null | "
+            "head -n 25 || echo '(Routinator nao respondeu em 127.0.0.1:8323)'",
+            "curl -s -m 8 http://127.0.0.1:8323/metrics 2>/dev/null | "
+            "grep -E '^routinator_(vrps_final|last_update|serial)' | "
+            "head -n 12",
+            # Prometheus: alvos e alertas ativos
+            "curl -s -m 8 'http://127.0.0.1:9090/api/v1/targets?state=active' "
+            "2>/dev/null | head -c 4000",
+            "curl -s -m 8 http://127.0.0.1:9090/api/v1/alerts 2>/dev/null "
+            "| head -c 3000",
+            "curl -s -m 8 http://127.0.0.1:9093/api/v2/status 2>/dev/null "
+            "| head -c 1500",
+            # Backup: última execução e volume
+            "systemctl status --no-pager isp-backup.timer isp-backup.service "
+            "2>&1 | head -n 25",
+            "{S}find /var/backups /opt/isp-backup /srv/backup -maxdepth 2 "
+            "-name '*.tar*' -o -maxdepth 2 -name '*isp*' 2>/dev/null | "
+            "head -n 15",
+            # Certificados emitidos pelo certbot
+            "command -v certbot >/dev/null 2>&1 && "
+            "{S}certbot certificates 2>&1 | head -n 40",
+        ],
+        "inventario": [
+            "{S}cat /etc/isp-stack/VERSION 2>/dev/null; "
+            "{S}ls -1 /etc/isp-stack/state/ 2>/dev/null",
+            "for b in prometheus alertmanager node_exporter blackbox_exporter "
+            "routinator unbound named chronyd snmpd grafana-server ttyd; do "
+            "command -v $b >/dev/null 2>&1 && { echo \"===== $b\"; "
+            "timeout 5 $b --version 2>&1 | head -n 2; }; done",
+            "(dpkg -l 2>/dev/null | grep -i -E 'unbound|chrony|snmpd|"
+            "prometheus|grafana|routinator|apache2|fail2ban|certbot|"
+            "dokuwiki') || (rpm -qa 2>/dev/null | grep -i -E "
+            "'unbound|chrony|prometheus|grafana|routinator')",
+            "{S}ls -la /var/www/ 2>/dev/null",
+            "command -v gvmd >/dev/null 2>&1 && "
+            "{ timeout 10 {S}gvmd --version 2>&1 | head -n 3; "
+            "timeout 10 {S}gvm-check-setup 2>&1 | tail -n 15; }",
+        ],
+        # O ISP-Stack instala módulos de forma seletiva. Sem esta seção, o
+        # relatório não distingue "módulo ausente" de "módulo com falha".
+        "extra": {
+            "titulo": "Módulos instalados e conformidade da instalação",
+            "comandos": [
+                "echo '===== modulos com estado registrado'; "
+                "for f in /etc/isp-stack/state/*; do [ -e \"$f\" ] && "
+                "echo \"  $(basename \"$f\")\"; done 2>/dev/null",
+                # O próprio stack traz verificadores. Eles são invocados
+                # exclusivamente por 'install.sh --audit' e '--verify', que
+                # são as entradas NÃO interativas: executar 'audit.sh' direto
+                # abre um menu e chega a perguntar se deve gravar o relatório
+                # em /var/log/isp-stack, o que gravaria no servidor. Pelas
+                # flags, o install.sh chama audit_executar_sem_perguntar e
+                # verify_executar, que apenas leem e imprimem.
+                "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
+                "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
+                "echo \"install.sh: ${I:-nao localizado}\"",
+                "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
+                "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
+                # A flag é conferida no próprio script antes da chamada: um
+                # install.sh antigo, sem '--audit', poderia ignorar o
+                # argumento e seguir o fluxo de instalação.
+                "[ -n \"$I\" ] && if {S}grep -q -e '--audit)' -e '\"--audit\"' "
+                "\"$I\"; then echo '===== install.sh --audit'; "
+                "timeout 180 {S}bash \"$I\" --audit </dev/null 2>&1 | "
+                "tail -n 200; else echo 'install.sh sem modo --audit: nao "
+                "executado'; fi",
+                "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
+                "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
+                "[ -n \"$I\" ] && if {S}grep -q -e '--verify)' -e '\"--verify\"' "
+                "\"$I\"; then echo '===== install.sh --verify'; "
+                "timeout 180 {S}bash \"$I\" --verify </dev/null 2>&1 | "
+                "tail -n 150; else echo 'install.sh sem modo --verify: nao "
+                "executado'; fi",
             ],
         },
     },
@@ -1187,6 +1806,18 @@ APPS_LINUX = {
                 "-maxdepth 2 -iname '*rpz*.conf' 2>/dev/null | "
                 "xargs -r {S}grep -h -c '^[[:space:]]*zone' 2>/dev/null | "
                 "paste -sd+ - | bc 2>/dev/null)\"",
+                # A lista pode estar presente e atualizada pelo cron sem
+                # estar referenciada em named.conf: nesse caso o arquivo
+                # cresce todo dia e nada é bloqueado. A verificação do
+                # include distingue "lista ausente" de "lista não carregada".
+                "for f in $({S}find /etc/bind /etc/anablock -maxdepth 2 "
+                "\\( -iname '*anablock*.conf' -o -iname '*rpz*.conf' \\) "
+                "2>/dev/null); do "
+                "if {S}grep -rqs -F \"$f\" /etc/bind/named.conf* "
+                "/etc/named.conf 2>/dev/null; then "
+                "echo \"incluido em named.conf: $f\"; else "
+                "echo \"NAO INCLUIDO em named.conf: $f "
+                "(a lista existe mas o BIND nao a carrega)\"; fi; done",
                 "{S}rndc status 2>&1 | grep -i -E 'zones|recursive|server is up'",
             ],
         },
@@ -1198,22 +1829,66 @@ APPS_LINUX = {
 # ---------------------------------------------------------------------------
 _CHAVES = (
     r"password|passwd|pwd|secret(?:[_-]?key)?|pre-shared-key|"
-    r"authentication-key|auth-key|key-string|hello-password|md5|cipher|"
+    r"authentication-key|auth-key|key-string|hello-password|cipher|"
     r"irreversible-cipher|shared-secret|wpa2?-pre-shared-key|private-key|"
-    r"community|dbpass|db_pass|api[_-]?key|access[_-]?key|auth[_-]?token|token"
+    r"privatekey|presharedkey|tcp-md5-key|bindpw|"
+    r"dbpass|db_pass|api[_-]?key|access[_-]?key|auth[_-]?token|token"
 )
+# Palavras que, entre a chave e o valor, qualificam o segredo sem sê-lo:
+# "password irreversible-cipher $1c$...", "enable secret 9 $9$...",
+# "authentication-key 1 type md5 value "$9$..."". Sem saltá-las, a
+# qualificação era mascarada e o hash seguia visível logo depois.
+_QUALIFICADOR = (
+    r"(?:(?:irreversible-cipher|cipher|simple|encrypted|plain(?:text)?|"
+    r"ascii-text|hexadecimal|hex|value|md5|sha\d*|aes(?:[ \t]*\d+)?|3?des|"
+    r"type[ \t]+\S+|level[ \t]+\d+|\d{1,2})[ \t]+)*"
+)
+# Cifras Huawei (%^%#...%^%#, $1c$...$) e hashes crypt ($6$, $9$) contêm
+# vírgula, ponto e vírgula e aspas; vão até o próximo espaço. Encontrado em
+# campo: "password irreversible-cipher $1c$...,7A%8:M$..." deixava visível
+# tudo após a vírgula.
+_VALOR = (r"(%\^%#\S*|\$\d[a-z]?\$\S*|\"[^\"\n]*\"|'[^'\n]*'|[^\s;,]+)")
 PADROES_SENSIVEIS = [
-    # chave=valor, chave: valor, chave "valor" e chave valor (mesma linha).
-    # O trecho ["']?\]?["']? cobre formatos como $DB['PASSWORD'] = '...'
-    # (frontend PHP do Zabbix) e "password": "..." (JSON/YAML).
-    re.compile(r"(?i)((?:" + _CHAVES + r")[\"']?\]?[\"']?[ \t]*[:=][ \t]*)"
-               r"([^\s;,]+)"),
-    re.compile(r"(?i)((?:" + _CHAVES + r")[ \t]+)(?![=:])([^\s;,]+)"),
+    # chave=valor e chave: valor. O trecho ["']?\]?["']? cobre formatos como
+    # $DB['PASSWORD'] = '...' (frontend PHP do Zabbix) e "password": "..."
+    # (JSON/YAML). 'community' entra apenas nesta forma: como palavra solta
+    # ela nomeia também comunidades BGP ("policy-options community X
+    # members ..."), que não são segredo e são indispensáveis para ler as
+    # políticas.
+    re.compile(r"(?i)((?:" + _CHAVES + r"|community)[\"']?\]?[\"']?[ \t]*[:=][ \t]*)"
+               + _VALOR),
+    # SNMP: a comunidade é a própria credencial.
     re.compile(r"(?i)(snmp(?:-server|-agent)?[ \t]+community[ \t]+"
-               r"(?:read[ \t]+|write[ \t]+)?)(\S+)"),
+               r"(?:(?:read|write)[ \t]+)?(?:(?:cipher|simple)[ \t]+)?)(\S+)"),
+    re.compile(r"(?im)^([ \t]*r[ow]community6?[ \t]+)(\S+)"),
+    re.compile(r"(?im)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(\S+)"),
+    # SNMPv3: "auth sha X priv aes 128 Y".
+    re.compile(r"(?i)(\b(?:auth|priv)[ \t]+(?:md5|sha\d*|aes(?:[ \t]*\d+)?|3?des)"
+               r"[ \t]+(?:encrypted[ \t]+)?)(\S+)"),
+    # "key" isolado só quando seguido de tipo numérico (Cisco: "tacacs-server
+    # key 7 X") ou de valor entre aspas/cifrado (Junos: 'key "$9$..."').
+    re.compile(r"(?i)((?<![\w-])key[ \t]+\d{1,2}[ \t]+)(\S+)"),
+    re.compile(r"(?i)((?<![\w-])key[ \t]+)(\"[^\"\n]*\"|\$\S+)"),
+    # chave valor, na mesma linha, com qualificadores opcionais.
+    # Não tomam o lugar do valor: verbos de menu do RouterOS ("/ppp secret
+    # add") e nomes de algoritmo ("ssh server cipher aes256_ctr").
+    re.compile(r"(?i)((?:" + _CHAVES + r")[ \t]+" + _QUALIFICADOR + r")(?![=:])"
+               r"(?!(?:add|set|print|remove|edit|export)\b)"
+               r"(?!(?:aes|3?des|sha|hmac|chacha|arcfour)[\w-]*(?:\s|$))"
+               + _VALOR),
     re.compile(r"(ssh-(?:rsa|ed25519|dss)[ \t]+)(\S+)"),
 ]
-PADRAO_CERT = re.compile(r"-----BEGIN[\s\S]*?-----END[^-]*-----")
+# O fim é opcional: uma saída truncada pelo limite de tamanho pode cortar o
+# bloco antes do END, e nesse caso todo o restante é suprimido.
+PADRAO_CERT = re.compile(r"-----BEGIN[^-\n]*-----[\s\S]*?(?:-----END[^-\n]*-----|\Z)")
+# MikroTik: o nome da comunidade SNMP aparece como "name=" dentro do bloco
+# "/snmp community" do export, sem palavra-chave que o denuncie.
+PADRAO_BLOCO_SNMP_MIKROTIK = re.compile(
+    r"(?m)^/snmp community\s*$(?:\n(?!/).*)*")
+
+
+def _mascarar_snmp_mikrotik(m):
+    return re.sub(r"(\bname=)(\"[^\"\n]*\"|\S+)", r"\1***REMOVIDO***", m.group(0))
 
 # Arquivos cujo conteúdo é integralmente um segredo, sem par chave=valor que
 # permita detecção por padrão (ex.: /opt/andrisoft/etc/dbpass.conf contém
@@ -1234,12 +1909,16 @@ def _suprimir_arquivo(m):
 def sanitizar(texto: str) -> str:
     texto = PADRAO_CERT.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
     texto = PADRAO_ARQUIVO_SEGREDO.sub(_suprimir_arquivo, texto)
+    texto = PADRAO_BLOCO_SNMP_MIKROTIK.sub(_mascarar_snmp_mikrotik, texto)
     for padrao in PADROES_SENSIVEIS:
         texto = padrao.sub(r"\1***REMOVIDO***", texto)
     return texto
 
 
-PADRAO_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# O systemd emprega cores de 256 níveis no formato \x1b[0;38:5:245m, com
+# dois-pontos como separador de parâmetro (ITU-T T.416). Sem ele na
+# classe, a sequência atravessa o filtro e vai parar no relatório.
+PADRAO_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
 
 
 def nome_seguro(texto: str) -> str:
@@ -1247,7 +1926,9 @@ def nome_seguro(texto: str) -> str:
     remove códigos ANSI e substitui caracteres proibidos (: ~ / \\ etc.)."""
     texto = PADRAO_ANSI.sub("", texto)
     texto = re.sub(r"[^A-Za-z0-9._-]", "_", texto)
-    texto = re.sub(r"_+", "_", texto).strip("_.")
+    # Hífen no início faria o arquivo ser lido como opção de linha de comando
+    # (grep, rm, ls) — caso real: "--Press_any_key..." virou nome de arquivo.
+    texto = re.sub(r"_+", "_", texto).strip("_.-")
     return texto
 
 
@@ -1262,7 +1943,8 @@ PADRAO_ERRO = re.compile(
 PADRAO_ERRO_LIVRE = re.compile(
     r"(?i)(command not found|not recognized as|no such file or directory|"
     r"permission denied|is not supported|unsupported command|"
-    r"does not exist|unknown parameter|bad command name)"
+    r"does not exist|unknown parameter|bad command name|"
+    r"expected end of command)"
 )
 
 
@@ -1320,6 +2002,23 @@ def sem_saida_util(saida: str) -> bool:
     return False
 
 
+# Pipeline anexado às seções de log em hosts Linux.
+#
+# Serviços com falha recorrente repetem a mesma mensagem centenas de vezes:
+# num servidor WANGuard, 285 das 300 linhas coletadas eram o mesmo erro de
+# conexão, cada uma arrastando o comando SQL inteiro — 97 KB para dizer uma
+# coisa só. O filtro trunca linhas muito longas, agrupa as que têm a mesma
+# assinatura (dígitos normalizados) e informa quantas foram omitidas, de
+# modo que a repetição continue visível sem dominar o documento.
+FILTRO_LOG = (
+    r" | cut -c1-400 | awk "
+    '\'{ k=$0; gsub(/[0-9]+/,"#",k); gsub(/#[.:,-]#/,"#",k); k=substr(k,1,110); '
+    r"if (k==p) { c++; next } "
+    r'if (c>1) printf "    [+%d linha(s) semelhante(s) omitida(s)]\n", c-1; '
+    r"c=1; p=k; print } "
+    'END { if (c>1) printf "    [+%d linha(s) semelhante(s) omitida(s)]\\n", c-1 }\''
+)
+
 # ---------------------------------------------------------------------------
 # Interação inicial
 # ---------------------------------------------------------------------------
@@ -1353,6 +2052,21 @@ def escolher_instancias() -> int:
     if op.isdigit() and 1 <= int(op) <= 10:
         return int(op)
     return 5
+
+
+def escolher_protocolo() -> str:
+    print("\nProtocolo de acesso:")
+    print("  1) SSH (padrão)")
+    print("  2) Telnet — para equipamentos sem SSH, como muitas OLTs")
+    print("     ATENÇÃO: o Telnet transmite usuário e senha em texto claro.")
+    while True:
+        op = input("Escolha [1-2, padrão 1]: ").strip()
+        if op in ("", "1"):
+            return "ssh"
+        if op == "2":
+            print("[!] Telnet selecionado: credenciais trafegarão sem "
+                  "criptografia. Use apenas em rede de gerência confiável.")
+            return "telnet"
 
 
 def escolher_debug() -> bool:
@@ -1395,9 +2109,15 @@ def ping(ip: str, timeout_s: int = 1) -> bool:
     else:
         cmd = ["ping", "-c", "1", "-W", str(timeout_s), ip]
     try:
-        r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+        r = subprocess.run(cmd, stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL, timeout=timeout_s + 2)
-        return r.returncode == 0
+        if r.returncode != 0:
+            return False
+        # No Windows, "Host de destino inacessível" vindo do gateway também
+        # retorna 0; só há resposta real quando aparece o TTL.
+        if platform.system().lower() == "windows":
+            return b"TTL=" in r.stdout.upper()
+        return True
     except Exception:
         return False
 
@@ -1494,8 +2214,16 @@ def plataforma_por_banner(banner: str):
     return [], None
 
 
-def confirmar_plataforma(ip, usuario, senha, porta, tipo) -> bool:
-    """Confirma um palpite do banner com uma única conexão e um comando."""
+def driver_para(tipo, protocolo="ssh"):
+    """device_type do Netmiko para o perfil, conforme o protocolo."""
+    if protocolo == "telnet":
+        return DRIVER_TELNET.get(tipo, "generic_telnet")
+    return PERFIS[tipo].get("driver", tipo)
+
+
+def confirmar_plataforma(ip, usuario, senha, porta, tipo,
+                         protocolo="ssh") -> bool:
+    """Confirma um palpite com uma única conexão e um comando."""
     verificacao = {
         "linux": ("uname -s", r"Linux"),
         "mikrotik_routeros": ("/system resource print", r"(?i)routeros|mikrotik"),
@@ -1504,16 +2232,24 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo) -> bool:
         "cisco_xr": ("show version", r"(?i)ios xr"),
         "huawei": ("display version", r"(?i)huawei|VRP"),
         "huawei_ce": ("display version", r"(?i)huawei|VRP"),
+        "huawei_smartax": ("display version", r"(?i)MA5[68]\d\d|SmartAX|VRP"),
+        "fiberhome": ("show version", r"(?i)fiberhome|AN[56]\d{3}|version"),
     }
     if tipo not in verificacao:
         return False
     cmd, esperado = verificacao[tipo]
-    perfil = PERFIS[tipo]
     try:
-        with ConnectHandler(device_type=perfil.get("driver", tipo), host=ip,
+        with abrir_conexao(device_type=driver_para(tipo, protocolo), host=ip,
                             username=usuario, password=senha, port=porta,
                             timeout=25, conn_timeout=12) as conn:
-            saida = conn.send_command(cmd, read_timeout=25)
+            if protocolo == "telnet":
+                liberar_cli(conn, ip, protocolo)
+                # Plataformas com prompt fora do padrão não confirmam o eco
+                # do comando; a leitura por temporização não depende disso.
+                saida = conn.send_command_timing(cmd, read_timeout=25,
+                                                 last_read=3)
+            else:
+                saida = conn.send_command(cmd, read_timeout=25)
         ok = bool(re.search(esperado, saida or ""))
         depurar(ip, "confirmacao", f"{tipo}: '{cmd}' -> "
                                    f"{'confirmado' if ok else 'nao confere'} "
@@ -1531,7 +2267,8 @@ class NaoIdentificado(Exception):
     """Host acessível cuja plataforma não foi identificada automaticamente."""
 
 
-def classificar_huawei(ip, usuario, senha, porta) -> str:
+def classificar_huawei(ip, usuario, senha, porta,
+                       protocolo="ssh") -> str:
     """Determina a família Huawei a partir de 'display version'.
 
     Três linhas com sintaxes distintas compartilham o driver 'huawei' do
@@ -1541,9 +2278,9 @@ def classificar_huawei(ip, usuario, senha, porta) -> str:
       huawei_smartax SmartAX (OLT MA5600/MA5800)
     Uma única conexão decide entre as três."""
     try:
-        with ConnectHandler(device_type="huawei", host=ip, username=usuario,
-                            password=senha, port=porta, timeout=25,
-                            conn_timeout=12) as conn:
+        with abrir_conexao(device_type=driver_para("huawei", protocolo),
+                            host=ip, username=usuario, password=senha,
+                            port=porta, timeout=25, conn_timeout=12) as conn:
             versao = conn.send_command("display version", read_timeout=25)
     except Exception as e:
         depurar(ip, "familia huawei", f"falha na sonda: {type(e).__name__}")
@@ -1561,18 +2298,71 @@ def classificar_huawei(ip, usuario, senha, porta) -> str:
     return "huawei"
 
 
-def eh_linux(ip, usuario, senha, porta) -> bool:
+def eh_linux(ip, usuario, senha, porta, protocolo="ssh") -> bool:
     try:
-        with ConnectHandler(device_type="linux", host=ip, username=usuario,
-                            password=senha, port=porta, timeout=20,
-                            conn_timeout=12) as conn:
+        with abrir_conexao(device_type=driver_para("linux", protocolo),
+                            host=ip, username=usuario, password=senha,
+                            port=porta, timeout=20, conn_timeout=12) as conn:
             saida = conn.send_command("uname -s", read_timeout=15)
         return "Linux" in saida
     except Exception:
         return False
 
 
-def detectar(ip, usuario, senha, porta):
+def detectar_telnet(ip, usuario, senha, porta):
+    """Identifica a plataforma numa sessão Telnet.
+
+    Não há banner de protocolo para ler como em SSH, então a identificação
+    usa o texto de login que o equipamento apresenta antes da autenticação;
+    quando ele não basta, o candidato é confirmado com um comando."""
+    t0 = time.perf_counter()
+    texto = ler_prompt_telnet(ip, porta)
+    if texto is None:
+        depurar(ip, "telnet", f"sem resposta TCP em {porta}")
+        raise NetmikoTimeoutException(f"sem resposta TCP na porta {porta}")
+    depurar(ip, "telnet prompt", repr(texto[-160:]))
+
+    candidatos, confianca = plataforma_por_prompt_telnet(texto)
+    if candidatos:
+        depurar(ip, "prompt->palpite", f"{candidatos} (confianca {confianca})")
+        log(ip, f"prompt indica {PERFIS[candidatos[0]]['nome']}; confirmando ...")
+        for i, cand in enumerate(candidatos[:2]):
+            if i:
+                time.sleep(3)
+            if confirmar_plataforma(ip, usuario, senha, porta, cand,
+                                    protocolo="telnet"):
+                if cand == "huawei":
+                    cand = classificar_huawei(ip, usuario, senha, porta,
+                                              protocolo="telnet")
+                log(ip, f"identificado: {PERFIS[cand]['nome']} "
+                        f"({time.perf_counter()-t0:.1f}s, via prompt telnet)")
+                depurar(ip, "identificado",
+                        f"{cand} em {time.perf_counter()-t0:.2f}s (telnet)")
+                return cand
+        depurar(ip, "prompt->palpite", "nenhum candidato confirmado")
+
+    # Sem pista no prompt resta tentar perfis, mas cada tentativa é um login
+    # completo: em OLT, sucessivas falhas costumam disparar bloqueio por
+    # tentativa e esgotar o limite de sessões simultâneas, que é baixo. Por
+    # isso o número de tentativas é reduzido, com intervalo entre elas, e o
+    # operador escolhe manualmente se nenhuma vingar.
+    log(ip, "prompt não identifica a plataforma; tentando 2 perfis "
+            "(cada tentativa é um login)")
+    for i, cand in enumerate(("fiberhome", "huawei_smartax")):
+        if i:
+            time.sleep(3)
+        if confirmar_plataforma(ip, usuario, senha, porta, cand,
+                                protocolo="telnet"):
+            log(ip, f"identificado: {PERFIS[cand]['nome']} "
+                    f"({time.perf_counter()-t0:.1f}s, por tentativa)")
+            depurar(ip, "identificado", f"{cand} (telnet, por tentativa)")
+            return cand
+
+    depurar(ip, "nao identificado", f"telnet, prompt={texto[-120:]!r}")
+    raise NaoIdentificado(ip)
+
+
+def detectar(ip, usuario, senha, porta, protocolo="ssh"):
     """Identifica a plataforma via SSH.
 
     Estratégia em três níveis, do mais barato ao mais caro:
@@ -1583,6 +2373,8 @@ def detectar(ip, usuario, senha, porta):
 
     Levanta NaoIdentificado quando o host responde mas não é reconhecido;
     levanta exceção de conexão/autenticação nos demais casos."""
+    if protocolo == "telnet":
+        return detectar_telnet(ip, usuario, senha, porta)
     t0 = time.perf_counter()
     banner = ler_banner(ip, porta)
     if banner is None:
@@ -1675,6 +2467,66 @@ def detectar(ip, usuario, senha, porta):
 # ---------------------------------------------------------------------------
 # Execução de comandos e montagem do relatório
 # ---------------------------------------------------------------------------
+def liberar_cli(conn, ip="-", protocolo="ssh") -> str:
+    """Obtém o prompt, tratando equipamentos que pedem uma tecla após o login.
+
+    Devolve o texto do prompt já utilizável. Quando o equipamento apresenta
+    "--Press any key to continue--", envia um retorno e relê; sem isso o texto
+    do aviso seria tomado por prompt e o primeiro comando derrubaria a
+    sessão."""
+    try:
+        prompt = conn.find_prompt()
+    except Exception as e:
+        depurar(ip, "find_prompt", f"{type(e).__name__}: {e}")
+        prompt = ""
+
+    for tentativa in range(3):
+        if not PADRAO_TECLA.search(prompt or ""):
+            break
+        depurar(ip, "tecla requerida",
+                f"tentativa {tentativa + 1}: {resumir_saida(prompt, 90)}")
+        log(ip, "equipamento aguarda uma tecla; enviando retorno ...")
+        try:
+            conn.write_channel(conn.RETURN)
+            time.sleep(1.5)
+            conn.read_channel()
+            prompt = conn.find_prompt()
+        except Exception as e:
+            depurar(ip, "tecla requerida", f"falhou: {type(e).__name__}: {e}")
+            break
+    depurar(ip, "prompt", repr((prompt or "")[-120:]))
+    return prompt or ""
+
+
+# Texto que denuncia um prompt mal capturado: aviso de tecla, pedido de
+# credencial ou resto de banner. Nesses casos o IP identifica melhor o
+# equipamento do que o suposto prompt.
+PADRAO_PROMPT_INVALIDO = re.compile(
+    r"(?i)press\s+any|any\s+key|password|senha|login|user\s*name|"
+    r"ctrl[\s+-]*c|welcome|copyright|--\s*more|"
+    # Prompts genéricos de nível de acesso (OLT FiberHome: "User>",
+    # "Admin#"): não identificam o equipamento.
+    r"^(?:user|admin|guest|enable)(?:\(config\))?$"
+)
+
+
+def nome_do_prompt(prompt: str, ip: str) -> str:
+    """Extrai o hostname do prompt, recusando capturas evidentemente inválidas."""
+    linha = [l for l in (prompt or "").splitlines() if l.strip()]
+    bruto = linha[-1] if linha else ""
+    bruto = bruto.strip("<>[]#>$ ").replace("/", "_").split("@")[-1]
+    if not bruto or len(bruto) > 40 or PADRAO_PROMPT_INVALIDO.search(bruto):
+        return ip
+    return nome_seguro(bruto) or ip
+
+
+def sessao_perdida(saida: str) -> bool:
+    """Identifica queda de sessão, para interromper a coleta do host."""
+    return bool(re.search(
+        r"(?i)(EOFError|connection closed|connection reset|broken pipe|"
+        r"socket is closed|not connected)", saida or ""))
+
+
 def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
     """Executa um comando de leitura e registra tempo e retorno no debug."""
     t0 = time.perf_counter()
@@ -1682,6 +2534,12 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
     try:
         if usa_timing:
             saida = conn.send_command_timing(cmd, read_timeout=180, last_read=3)
+            # A leitura por temporização devolve também o prompt final.
+            linhas = (saida or "").rstrip().splitlines()
+            if linhas and len(linhas[-1]) < 60 and \
+                    PADRAO_FIM_PROMPT.search(linhas[-1]) and \
+                    " " not in linhas[-1].strip():
+                saida = "\n".join(linhas[:-1])
         else:
             saida = conn.send_command(cmd, read_timeout=180)
         dur = time.perf_counter() - t0
@@ -1715,10 +2573,11 @@ def detectar_apps_linux(conn, prefixo_sudo):
     return encontrados
 
 
-def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel):
+def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
+            incluir_sensivel, protocolo="ssh"):
     perfil = PERFIS[tipo]
     dispositivo = {
-        "device_type": perfil.get("driver", tipo),
+        "device_type": driver_para(tipo, protocolo),
         "host": ip,
         "username": usuario,
         "password": senha,
@@ -1730,15 +2589,17 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
     blocos = []          # (titulo, [(cmd, saida)])
     apps_detectados = []
     contexto_usado = False
+    perdeu_sessao = False
 
-    log(ip, f"conectando ({perfil['nome']}) ...")
+    log(ip, f"conectando ({perfil['nome']}"
+            + (" via TELNET" if protocolo == "telnet" else "") + ") ...")
     if perfil.get("contexto"):
         log(ip, "plataforma exige contexto privilegiado; apenas comandos "
                 "de leitura serão executados")
 
-    with ConnectHandler(**dispositivo) as conn:
-        hostname = conn.find_prompt().strip("<>[]#>$ ").replace("/", "_") or ip
-        hostname = hostname.split("@")[-1]  # Junos/Linux: usuario@host -> host
+    with abrir_conexao(**dispositivo) as conn:
+        bruto = liberar_cli(conn, ip, protocolo)
+        hostname = nome_do_prompt(bruto, ip)
 
         # Comandos preparatórios: paginação e contexto. Falhas são ignoradas.
         for cmd in perfil.get("prep", []):
@@ -1746,9 +2607,12 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
                 saida = conn.send_command_timing(cmd, read_timeout=20)
                 if saida and re.search(r"(?i)password|senha", saida[-120:]):
                     saida = conn.send_command_timing(senha, read_timeout=20)
-                contexto_usado = True
-            except Exception:
-                pass
+                    depurar(ip, "prep", f"{cmd}: senha solicitada e enviada")
+                if cmd in ("enable", "config", "configure"):
+                    contexto_usado = True
+                depurar(ip, "prep", f"{cmd}: {resumir_saida(saida, 120)}")
+            except Exception as e:
+                depurar(ip, "prep", f"{cmd}: falhou ({type(e).__name__}: {e})")
 
         prefixo_sudo = ""
         if tipo == "linux":
@@ -1786,36 +2650,75 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
             if tipo == "mikrotik_routeros" and secao == "config" and not incluir_sensivel:
                 comandos = ["/export hide-sensitive"]
             limite = LIMITE_POR_SECAO.get(secao)
+            if secao == "logs" and tipo == "linux":
+                comandos = [c + FILTRO_LOG for c in comandos]
             saidas = []
             for cmd in comandos:
+                if perdeu_sessao:
+                    break
                 log(ip, f"-> {cmd[:70]}")
-                saidas.append((cmd, executar_comando(conn, cmd, usa_timing,
-                                                     ip, limite)))
-            blocos.append((TITULOS[secao], saidas))
+                saida = executar_comando(conn, cmd, usa_timing, ip, limite)
+                if cmd.startswith("/export ") and sem_saida_util(saida):
+                    # RouterOS v6 não conhece 'show-sensitive' e o v7 deixou
+                    # de aceitar 'hide-sensitive' (passou a ocultar por
+                    # padrão). O '/export' simples funciona nas duas; o
+                    # sanitizador continua aplicado se a opção pedir.
+                    depurar(ip, "fallback", f"'{cmd}' recusado; usando '/export'")
+                    cmd = "/export"
+                    saida = executar_comando(conn, cmd, usa_timing, ip, limite)
+                saidas.append((cmd, saida))
+                # Só o retorno de erro do próprio transporte indica queda. O
+                # texto do comando não serve: logs de servidor trazem
+                # "Connection closed by ..." do sshd o tempo todo.
+                if saida.startswith("[ERRO ao executar comando:") and \
+                        sessao_perdida(saida):
+                    # Insistir depois da queda produz dezenas de mensagens
+                    # idênticas e nenhum dado; a coleta deste host termina
+                    # aqui, com o motivo registrado no relatório.
+                    perdeu_sessao = True
+                    log(ip, "[ABORTADO] sessão encerrada pelo equipamento")
+                    depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
+            if saidas:
+                blocos.append((TITULOS[secao], saidas))
+            if perdeu_sessao:
+                break
 
         # Módulos de aplicação (Linux)
-        for chave in apps_detectados:
+        def rodar_app(chave, comandos, limite=None):
+            nonlocal perdeu_sessao
+            saidas = []
+            for cmd in comandos:
+                if perdeu_sessao:
+                    break
+                log(ip, f"-> [{chave}] {cmd[:70]}")
+                saida = executar_comando(conn, cmd, False, ip, limite)
+                saidas.append((cmd, saida))
+                if saida.startswith("[ERRO ao executar comando:") and \
+                        sessao_perdida(saida):
+                    perdeu_sessao = True
+                    log(ip, "[ABORTADO] sessão encerrada pelo equipamento")
+                    depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
+            return saidas
+
+        for chave in ([] if perdeu_sessao else apps_detectados):
             app = APPS_LINUX[chave]
             for secao in secoes:
                 comandos = [c.replace("{S}", prefixo_sudo)
                             for c in app.get(secao, [])]
-                if not comandos:
+                if not comandos or perdeu_sessao:
                     continue
-                limite = LIMITE_POR_SECAO.get(secao)
-                saidas = []
-                for cmd in comandos:
-                    log(ip, f"-> [{chave}] {cmd[:70]}")
-                    saidas.append((cmd, executar_comando(conn, cmd, False,
-                                                         ip, limite)))
-                blocos.append((f"{app['nome']} — {TITULOS[secao]}", saidas))
+                if secao == "logs":
+                    comandos = [c + FILTRO_LOG for c in comandos]
+                saidas = rodar_app(chave, comandos, LIMITE_POR_SECAO.get(secao))
+                if saidas:
+                    blocos.append((f"{app['nome']} — {TITULOS[secao]}", saidas))
             extra = app.get("extra")
-            if extra and set(secoes) & {"config", "basico", "inventario"}:
-                saidas = []
-                for cmd in [c.replace("{S}", prefixo_sudo)
-                            for c in extra["comandos"]]:
-                    log(ip, f"-> [{chave}] {cmd[:70]}")
-                    saidas.append((cmd, executar_comando(conn, cmd, False, ip)))
-                blocos.append((f"{app['nome']} — {extra['titulo']}", saidas))
+            if extra and set(secoes) & {"config", "basico", "inventario"} \
+                    and not perdeu_sessao:
+                saidas = rodar_app(chave, [c.replace("{S}", prefixo_sudo)
+                                           for c in extra["comandos"]])
+                if saidas:
+                    blocos.append((f"{app['nome']} — {extra['titulo']}", saidas))
 
         for cmd in perfil.get("sair", []):
             try:
@@ -1825,13 +2728,15 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo, incluir_sensivel
 
     arquivo = escrever_relatorio(
         ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
-        incluir_sensivel, apps_detectados, contexto_usado,
+        incluir_sensivel, apps_detectados, contexto_usado, protocolo,
+        perdeu_sessao,
     )
     return arquivo, hostname
 
 
 def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
-                       incluir_sensivel, apps, contexto_usado):
+                       incluir_sensivel, apps, contexto_usado,
+                       protocolo="ssh", sessao_encerrada=False):
     agora = datetime.now()
     meta = {
         "netsnap_version": __version__,
@@ -1844,6 +2749,8 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         "extraction_mode": nome_modo,
         "sections": secoes,
         "applications": [APPS_LINUX[a]["nome"] for a in apps],
+        "transport": protocolo,
+        "session_lost": sessao_encerrada,
         "sensitive_data": "included" if incluir_sensivel else "redacted",
         "read_only": True,
         "config_changes_made": 0,
@@ -1928,6 +2835,23 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
             "tratados como inexistentes** — confirme por interface ativa sem "
             "vizinho declarado.\n"
         )
+    if sessao_encerrada:
+        md.append(
+            "> **Coleta incompleta.** O equipamento encerrou a sessão durante "
+            "a execução e os comandos seguintes não chegaram a ser enviados. "
+            "As seções ausentes não indicam recurso inexistente — indicam que "
+            "a coleta foi interrompida. Causas frequentes: limite de sessões "
+            "simultâneas na plataforma, tempo de inatividade excedido ou "
+            "bloqueio após tentativas de login malsucedidas.\n"
+        )
+    if protocolo == "telnet":
+        md.append(
+            "> **Coleta por Telnet.** O equipamento foi acessado por Telnet, "
+            "protocolo que transmite credenciais e sessão em texto claro. O "
+            "conteúdo deste documento é o mesmo de uma coleta por SSH, mas a "
+            "sessão que o originou era legível por qualquer sistema no "
+            "caminho de rede. Quando a plataforma suportar SSH, prefira-o.\n"
+        )
     if contexto_usado and perfil.get("contexto"):
         md.append(
             "> **Nota de contexto:** esta plataforma exige contexto "
@@ -1955,16 +2879,36 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
                 md.append(out.rstrip())
                 md.append("```\n")
 
-    arquivo = os.path.join(
-        PASTA_SAIDA, f"{hostname}_{ip}_{agora:%Y%m%d_%H%M%S}.md"
-    )
-    with open(arquivo, "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
-    return arquivo
+    # O IP passa por nome_seguro: em IPv6 os dois-pontos criariam, no
+    # Windows, um fluxo alternativo NTFS em vez do arquivo. A abertura em
+    # modo exclusivo evita que dois hosts com o mesmo nome no mesmo segundo
+    # (mesmo IP em portas diferentes, por exemplo) se sobrescrevam.
+    rotulo = nome_seguro(ip) if hostname in (ip, nome_seguro(ip)) \
+        else f"{hostname}_{nome_seguro(ip)}"
+    base = os.path.join(PASTA_SAIDA, f"{rotulo}_{agora:%Y%m%d_%H%M%S}")
+    conteudo = "\n".join(md)
+    for n in range(1, 100):
+        arquivo = base + (f"_{n}" if n > 1 else "") + ".md"
+        try:
+            with open(arquivo, "x", encoding="utf-8") as f:
+                f.write(conteudo)
+            return arquivo
+        except FileExistsError:
+            continue
+    raise OSError(f"não foi possível criar arquivo único para {base}")
 
 
-def escrever_indice(resultados, nome_modo, inicio):
-    """Gera um índice consolidado da execução, útil para ingestão em lote."""
+def escrever_indice(resultados, nome_modo, segundos_coleta):
+    """Índice consolidado da execução, útil para ingestão em lote.
+
+    O tempo informado é o de coleta: o relógio de parede incluiria a espera
+    pelo operador no prompt, que em uma execução medida representou 982 s
+    de um total de 1007 s."""
+    def celula(valor, limite=160):
+        # Mensagens de erro do Netmiko vêm em várias linhas e podem conter
+        # '|', o que quebraria a tabela Markdown.
+        return " ".join(str(valor).split()).replace("|", "/")[:limite]
+
     agora = datetime.now()
     ok = [r for r in resultados if r[1] is True]
     if not ok:
@@ -1972,25 +2916,26 @@ def escrever_indice(resultados, nome_modo, inicio):
     md = ["---",
           f"netsnap_version: {json.dumps(__version__)}",
           f"document_type: {json.dumps('run_index')}",
+          f"collection_seconds: {segundos_coleta:.0f}",
           f"generated_at: {json.dumps(agora.isoformat(timespec='seconds'))}",
           f"extraction_mode: {json.dumps(nome_modo)}",
           f"hosts_collected: {len(ok)}",
           "---\n",
           f"# Índice da coleta — {agora:%d/%m/%Y %H:%M:%S}\n",
-          f"Modo de extração: **{nome_modo}** · duração: "
-          f"{time.time() - inicio:.0f}s · hosts coletados: **{len(ok)}**\n",
+          f"Modo de extração: **{nome_modo}** · tempo de coleta: "
+          f"{segundos_coleta:.0f}s · hosts coletados: **{len(ok)}**\n",
           "Cada arquivo listado abaixo é um snapshot independente, com "
           "metadados YAML próprios.\n",
           "| Host | IP | Arquivo |", "|---|---|---|"]
     for ip, _, arq, host in [(r[0], r[1], r[2], r[3]) for r in ok]:
-        md.append(f"| {host} | {ip} | `{os.path.basename(arq)}` |")
+        md.append(f"| {celula(host)} | {ip} | `{os.path.basename(arq)}` |")
     falhas = [r for r in resultados if r[1] is False]
     if falhas:
         md.append("\n## Hosts não coletados\n")
         md.append("| IP | Motivo |")
         md.append("|---|---|")
         for ip, _, motivo, _ in falhas:
-            md.append(f"| {ip} | {str(motivo)[:120]} |")
+            md.append(f"| {ip} | {celula(motivo)} |")
     caminho = os.path.join(PASTA_SAIDA, f"_indice_{agora:%Y%m%d_%H%M%S}.md")
     with open(caminho, "w", encoding="utf-8") as f:
         f.write("\n".join(md))
@@ -2001,29 +2946,55 @@ def escrever_indice(resultados, nome_modo, inicio):
 # Expansão de entradas: IP, IP:porta, CIDR e range
 # ---------------------------------------------------------------------------
 def ler_ips(caminho):
-    with open(caminho, "r", encoding="utf-8") as f:
-        return [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+    # utf-8-sig: o Bloco de Notas do Windows grava BOM no início do arquivo,
+    # o que invalidaria a primeira linha.
+    with open(caminho, "r", encoding="utf-8-sig") as f:
+        linhas = [l.split("#", 1)[0].strip() for l in f]
+    return [l for l in linhas if l]
+
+
+PADRAO_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 
 
 def expandir_entrada(entrada: str, porta_padrao: int):
     """Expande uma entrada em lista de (ip, porta). Formatos aceitos:
     10.0.0.5 | 10.0.0.5:2222 | 10.0.0.0/24 | 10.0.0.0/24:2222 |
-    10.0.0.1-10.0.0.100 | 10.0.0.1-100"""
-    entrada = entrada.strip()
+    10.0.0.1-10.0.0.100 | 10.0.0.1-100 | nome.dns | nome.dns:2222 |
+    2001:db8::1 | [2001:db8::1]:2222 | 2001:db8::/126"""
+    entrada = entrada.split("#", 1)[0].strip()
     porta = porta_padrao
-    if ":" in entrada and entrada.rsplit(":", 1)[1].isdigit():
-        entrada, p = entrada.rsplit(":", 1)
-        porta = int(p)
+    # Porta: [IPv6]:porta, ou ':porta' quando há um único ':' (IPv4, nome
+    # ou CIDR IPv4). IPv6 sem colchetes nunca tem porta — '2001:db8::1:22'
+    # é um endereço válido, e separar o ':22' apontaria para outro host.
+    m = re.match(r"^\[([^\]]+)\](?::(\d+))?$", entrada)
+    if m:
+        entrada = m.group(1)
+        if m.group(2):
+            porta = int(m.group(2))
+    elif entrada.count(":") == 1:
+        base, p = entrada.split(":")
+        if not p.isdigit():
+            print(f"[!] Entrada inválida ignorada: '{entrada}' (porta)")
+            return []
+        entrada, porta = base, int(p)
+    if not 1 <= porta <= 65535:
+        print(f"[!] Entrada inválida ignorada: '{entrada}' (porta {porta} "
+              "fora de 1-65535)")
+        return []
 
     alvos = []
     try:
         if "/" in entrada:
             rede = ipaddress.ip_network(entrada, strict=False)
             if rede.num_addresses <= 2:
-                alvos = [str(rede.network_address)]
+                # /31, /32, /127 e /128: todos os endereços são hosts
+                # (RFC 3021) — enlaces ponto a ponto têm os dois lados.
+                alvos = [str(h) for h in rede]
             else:
                 alvos = [str(h) for h in rede.hosts()]
-        elif "-" in entrada:
+        elif re.match(r"^[\d.]+\s*-\s*[\d.]+$", entrada):
             inicio, fim = [x.strip() for x in entrada.split("-", 1)]
             ip_ini = ipaddress.ip_address(inicio)
             if "." in fim:
@@ -2036,8 +3007,15 @@ def expandir_entrada(entrada: str, porta_padrao: int):
             alvos = [str(ipaddress.ip_address(i))
                      for i in range(int(ip_ini), int(ip_fim) + 1)]
         else:
-            ipaddress.ip_address(entrada)
-            alvos = [entrada]
+            try:
+                alvos = [str(ipaddress.ip_address(entrada))]
+            except ValueError:
+                # Nome DNS: resolvido na conexão. Um nome que não resolve
+                # aparece como falha de conexão no resumo.
+                if not PADRAO_HOSTNAME.match(entrada) or \
+                        re.match(r"^[\d.]+$", entrada):
+                    raise
+                alvos = [entrada]
     except ValueError as e:
         print(f"[!] Entrada inválida ignorada: '{entrada}' ({e})")
         return []
@@ -2067,7 +3045,8 @@ def montar_alvos(entradas, porta_padrao):
 # Processamento: fase paralela e fila de pendentes
 # ---------------------------------------------------------------------------
 def processar_lote(alvos, instancias, usuario, senha, secoes,
-                   nome_modo, incluir_sensivel, resultados):
+                   nome_modo, incluir_sensivel, resultados,
+                   protocolo="ssh"):
     """Fase paralela: detecta e coleta os hosts identificados automaticamente.
     Retorna a lista de pendentes (acessíveis, porém não identificados)."""
     pendentes = []
@@ -2075,10 +3054,10 @@ def processar_lote(alvos, instancias, usuario, senha, secoes,
 
     def trabalho(ip, porta):
         try:
-            depurar(ip, "inicio", f"porta {porta}")
-            tipo = detectar(ip, usuario, senha, porta)
+            depurar(ip, "inicio", f"porta {porta} ({protocolo})")
+            tipo = detectar(ip, usuario, senha, porta, protocolo)
             arq, host = coletar(ip, porta, tipo, usuario, senha, secoes,
-                                nome_modo, incluir_sensivel)
+                                nome_modo, incluir_sensivel, protocolo)
             log(ip, f"[OK] snapshot salvo: {os.path.basename(arq)}")
             with trava:
                 resultados.append((ip, True, arq, host))
@@ -2108,7 +3087,8 @@ def processar_lote(alvos, instancias, usuario, senha, secoes,
 
 
 def processar_pendentes(pendentes, usuario, senha, secoes,
-                        nome_modo, incluir_sensivel, resultados):
+                        nome_modo, incluir_sensivel, resultados,
+                        protocolo="ssh"):
     """Fase sequencial: consulta o operador sobre cada host não identificado."""
     if not pendentes:
         return
@@ -2120,7 +3100,7 @@ def processar_pendentes(pendentes, usuario, senha, secoes,
             continue
         try:
             arq, host = coletar(ip, porta, tipo, usuario, senha, secoes,
-                                nome_modo, incluir_sensivel)
+                                nome_modo, incluir_sensivel, protocolo)
             log(ip, f"[OK] snapshot salvo: {os.path.basename(arq)}")
             resultados.append((ip, True, arq, host))
         except Exception as e:
@@ -2134,7 +3114,7 @@ def processar_pendentes(pendentes, usuario, senha, secoes,
 def menu_fim_sessao() -> str:
     """Oferece o que fazer ao encerrar a fila de alvos da sessão atual."""
     print("\n" + "-" * 68)
-    print("  1) Nova coleta — reconfigurar tudo (inclusive usuário e senha)")
+    print("  1) Nova coleta — reconfigurar tudo (protocolo, credenciais, modo)")
     print("  2) Continuar nesta sessão — informar mais alvos")
     print("  3) Sair")
     while True:
@@ -2154,23 +3134,26 @@ def configurar_sessao():
     global DEBUG
     if not DEBUG:
         DEBUG = escolher_debug()
+    protocolo = escolher_protocolo()
     varredura = escolher_varredura()
     instancias = escolher_instancias()
 
-    usuario = input("\nUsuário SSH: ").strip()
-    senha = getpass.getpass("Senha SSH: ")
-    porta_txt = input("Porta SSH [22]: ").strip()
-    porta_padrao = int(porta_txt) if porta_txt.isdigit() else 22
+    rotulo = "Telnet" if protocolo == "telnet" else "SSH"
+    padrao = PORTA_TELNET_PADRAO if protocolo == "telnet" else 22
+    usuario = input(f"\nUsuário {rotulo}: ").strip()
+    senha = getpass.getpass(f"Senha {rotulo}: ")
+    porta_txt = input(f"Porta {rotulo} [{padrao}]: ").strip()
+    porta_padrao = int(porta_txt) if porta_txt.isdigit() else padrao
 
     return {
         "secoes": secoes, "nome_modo": nome_modo,
         "incluir_sensivel": incluir_sensivel, "varredura": varredura,
         "instancias": instancias, "usuario": usuario, "senha": senha,
-        "porta_padrao": porta_padrao,
+        "porta_padrao": porta_padrao, "protocolo": protocolo,
     }
 
 
-def imprimir_resumo(resultados, duracao, titulo="RESUMO"):
+def imprimir_resumo(resultados, duracao, titulo="RESUMO", sessao=None):
     print("\n" + "=" * 68)
     print(f" {titulo}")
     print("=" * 68)
@@ -2183,7 +3166,9 @@ def imprimir_resumo(resultados, duracao, titulo="RESUMO"):
     print(f"Sucesso: {len(ok)}/{len(resultados)}"
           + (f"  |  Pulados: {len(pulados)}" if pulados else "")
           + (f"  |  Sem ICMP: {len(icmp_mortos)}" if icmp_mortos else "")
-          + f"  |  Tempo: {duracao:.0f}s")
+          + f"  |  Coleta: {duracao:.0f}s"
+          + (f"  |  Sessão: {sessao:.0f}s" if sessao and sessao - duracao > 5
+             else ""))
     for ip, _, arq, host in ok:
         print(f"  [OK]     {ip} ({host}) -> {os.path.basename(arq)}")
     for ip, _, _, _ in pulados:
@@ -2212,7 +3197,7 @@ def main():
     print("=" * 68)
     print(f" netsnap v{__version__} — Snapshot multi-vendor (somente leitura)")
     print(" Juniper | Huawei/OLT | FiberHome | Cisco | MikroTik | Linux")
-    print(" Módulos Linux: WANGuard, Zabbix, Grafana, BIND9 (RPZ/AnaBlock)")
+    print(" Módulos Linux: ISP-Stack, WANGuard, BIRD, SmokePing, Zabbix, Grafana, BIND9")
     print("=" * 68)
 
     pasta = preparar_ambiente()
@@ -2222,7 +3207,9 @@ def main():
                     and os.path.isfile(sys.argv[1]) else None)
     todos_resultados = []
     inicio_geral = time.time()
+    coleta_total = 0.0
     sessao = 0
+    modos = []
 
     while True:
         sessao += 1
@@ -2231,19 +3218,27 @@ def main():
             print(f" NOVA COLETA (sessão {sessao})")
             print("=" * 68)
         opcoes = configurar_sessao()
+        modos.append(opcoes["nome_modo"])
         if DEBUG and not ARQUIVO_DEBUG:
             caminho = iniciar_debug(pasta)
             print(f"[+] Log de depuração: {os.path.basename(caminho)}")
         depurar("-", "sessao", f"inicio da sessao {sessao} "
                               f"(modo: {opcoes['nome_modo']}, "
+                              f"protocolo: {opcoes['protocolo']}, "
                               f"usuario: {opcoes['usuario']})")
 
         resultados = []
         inicio = time.time()
+        # Contabiliza somente o tempo de trabalho: varredura, detecção e
+        # coleta. O tempo em que o programa aguarda o operador digitar um
+        # alvo ou escolher no menu não é tempo de execução e distorceria
+        # qualquer comparação entre coletas.
+        tempo_coleta = [0.0]
 
         def executar(alvos):
             if not alvos:
                 return
+            marca = time.perf_counter()
             lista = alvos
             if opcoes["varredura"] == "fast":
                 lista, mortos = varrer_icmp(lista)
@@ -2251,17 +3246,19 @@ def main():
                     resultados.append(
                         (ip, False, "sem resposta ICMP (modo fast)", ip))
             if not lista:
+                tempo_coleta[0] += time.perf_counter() - marca
                 return
             print(f"\n[+] Coletando {len(lista)} alvo(s) com "
                   f"{opcoes['instancias']} instância(s) simultânea(s) ...\n")
             pendentes = processar_lote(
                 lista, opcoes["instancias"], opcoes["usuario"],
                 opcoes["senha"], opcoes["secoes"], opcoes["nome_modo"],
-                opcoes["incluir_sensivel"], resultados)
+                opcoes["incluir_sensivel"], resultados, opcoes["protocolo"])
             processar_pendentes(
                 pendentes, opcoes["usuario"], opcoes["senha"],
                 opcoes["secoes"], opcoes["nome_modo"],
-                opcoes["incluir_sensivel"], resultados)
+                opcoes["incluir_sensivel"], resultados, opcoes["protocolo"])
+            tempo_coleta[0] += time.perf_counter() - marca
 
         if arquivo_lote:
             entradas = ler_ips(arquivo_lote)
@@ -2284,10 +3281,11 @@ def main():
                     continue
                 executar(montar_alvos([entrada], opcoes["porta_padrao"]))
 
-        imprimir_resumo(resultados, time.time() - inicio,
+        imprimir_resumo(resultados, tempo_coleta[0],
                         f"RESUMO DA SESSÃO {sessao}" if sessao > 1
-                        else "RESUMO")
+                        else "RESUMO", time.time() - inicio)
         todos_resultados.extend(resultados)
+        coleta_total += tempo_coleta[0]
 
         if acao == "reconfigurar":
             # As credenciais da sessão anterior saem de escopo aqui.
@@ -2296,17 +3294,20 @@ def main():
         break
 
     if sessao > 1:
-        imprimir_resumo(todos_resultados, time.time() - inicio_geral,
-                        f"RESUMO GERAL ({sessao} sessões)")
+        imprimir_resumo(todos_resultados, coleta_total,
+                        f"RESUMO GERAL ({sessao} sessões)",
+                        time.time() - inicio_geral)
 
-    indice = escrever_indice(todos_resultados, "sessões combinadas"
-                             if sessao > 1 else "coleta", inicio_geral)
+    indice = escrever_indice(todos_resultados,
+                             " + ".join(dict.fromkeys(modos)), coleta_total)
     if indice:
         print(f"\nÍndice da coleta: {os.path.basename(indice)}")
     if DEBUG and ARQUIVO_DEBUG:
         depurar("-", "fim da execucao",
                 f"{sessao} sessao(oes), "
-                f"{len([r for r in todos_resultados if r[1] is True])} host(s)")
+                f"{len([r for r in todos_resultados if r[1] is True])} host(s), "
+                f"coleta {coleta_total:.0f}s de "
+                f"{time.time() - inicio_geral:.0f}s de sessao")
         print(f"Log de depuração: {os.path.basename(ARQUIVO_DEBUG)}")
     print(f"Arquivos Markdown em: {PASTA_SAIDA}")
 
