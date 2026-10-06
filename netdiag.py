@@ -23,7 +23,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 import os
 import re
@@ -32,6 +32,7 @@ import json
 import time
 import getpass
 import argparse
+import ipaddress
 import platform as plataforma_host
 from datetime import datetime
 
@@ -43,7 +44,6 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from netmiko import ConnectHandler
     from netmiko.ssh_autodetect import SSHDetect
     from netmiko.exceptions import NetmikoAuthenticationException
     import netmiko
@@ -107,13 +107,24 @@ def preparar_ambiente() -> str:
 # ---------------------------------------------------------------------------
 class Anonimizador:
     RE_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    # MAC nos três formatos usuais: 00:11:22:33:44:55, 0011.2233.4455
+    # (Cisco) e 0011-2233-4455 (Huawei).
     RE_MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"
-                        r"|\b(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}\b")
-    RE_IPV6 = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b")
+                        r"|\b(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}\b"
+                        r"|\b(?:[0-9A-Fa-f]{4}-){2}[0-9A-Fa-f]{4}\b")
+    # Candidato largo, inclusive forma comprimida ("2804:1784::1"); cada
+    # ocorrência é validada por ipaddress antes de ser trocada, o que evita
+    # tomar horários (22:41:37) ou contadores por endereço.
+    RE_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
+                         r"(?:/\d{1,3})?(?![\w:])")
+    # Número de série / ESN identificam o equipamento físico.
+    RE_SERIAL = re.compile(r"(?i)(\b(?:serial[ \t]*(?:number|no\.?)?|esn|"
+                           r"s/n|sn)\b[ \t]*[:=]?[ \t]*)([A-Za-z0-9]{6,})")
 
     def __init__(self, ativo: bool):
         self.ativo = ativo
         self._ip, self._mac, self._v6, self._host = {}, {}, {}, {}
+        self._serial = {}
 
     def _mapear(self, cache, valor, modelo):
         if valor not in cache:
@@ -125,17 +136,40 @@ class Anonimizador:
             return txt
         txt = self.RE_MAC.sub(
             lambda m: self._mapear(self._mac, m.group(0), "aa:bb:cc:00:00:{:02d}"), txt)
-        txt = self.RE_IPV6.sub(
-            lambda m: self._mapear(self._v6, m.group(0), "2001:db8::{}"), txt)
+        txt = self.RE_IPV6.sub(self._sub_ipv6, txt)
         txt = self.RE_IPV4.sub(self._sub_ipv4, txt)
+        txt = self.RE_SERIAL.sub(
+            lambda m: m.group(1) + self._mapear(self._serial, m.group(2),
+                                                "SERIAL-{}"), txt)
         for real, falso in self._host.items():
-            txt = re.sub(re.escape(real), falso, txt, flags=re.I)
+            txt = re.sub(r"(?<![\w-])" + re.escape(real) + r"(?![\w-])",
+                         falso, txt, flags=re.I)
         return txt
+
+    def _sub_ipv6(self, m):
+        bruto = m.group(0)
+        endereco, _, prefixo = bruto.partition("/")
+        try:
+            ip = ipaddress.IPv6Address(endereco)
+        except ValueError:
+            return bruto
+        if ip.is_loopback or ip.is_unspecified or ip.is_link_local:
+            return bruto
+        falso = self._mapear(self._v6, str(ip), "2001:db8::{:x}")
+        return falso + (f"/{prefixo}" if prefixo else "")
 
     def _sub_ipv4(self, m):
         ip = m.group(0)
-        # Preserva endereços que não identificam a rede do operador
-        if ip.startswith(("127.", "0.0.0.0", "255.255.255")):
+        try:
+            v = int(ipaddress.IPv4Address(ip))
+        except ValueError:
+            return ip
+        # Preserva o que não identifica a rede do operador: loopback,
+        # 0.0.0.0, broadcast e máscaras (bits 1 contíguos, inclusive as
+        # wildcards invertidas de ACL).
+        mascara = v != 0 and ((~v & 0xFFFFFFFF) + 1) & (~v & 0xFFFFFFFF) == 0
+        wildcard = (v + 1) & v == 0
+        if ip.startswith("127.") or mascara or wildcard:
             return ip
         return self._mapear(self._ip, ip, "198.51.100.{}")
 
@@ -267,6 +301,12 @@ def classificar(saida, excecao):
     return OK
 
 
+# Ajustado em main() a partir de --sensivel. A saída é sanitizada já na
+# coleta: os trechos de licença, versão e amostra derivam dela, e mascarar
+# depois de truncar deixava escapar blocos PEM cortados ao meio.
+SENSIVEL = False
+
+
 def executar(conn, cmd, usa_timing, timeout):
     t0 = time.perf_counter()
     saida, excecao = "", None
@@ -278,10 +318,13 @@ def executar(conn, cmd, usa_timing, timeout):
     except Exception as e:
         excecao = f"{type(e).__name__}: {e}"
     dur = time.perf_counter() - t0
+    bytes_brutos = len(saida or "")
+    if saida and not SENSIVEL:
+        saida = ns.sanitizar(saida)
     return {
         "comando": cmd,
         "segundos": round(dur, 2),
-        "bytes": len(saida or ""),
+        "bytes": bytes_brutos,
         "linhas": len((saida or "").splitlines()),
         "status": classificar(saida, excecao),
         "excecao": excecao,
@@ -314,8 +357,11 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
         return rel
 
     if tipo is None:
-        rel["erro_fatal"] = ("plataforma não identificada — use --plataforma "
-                             "para forçar e diagnosticar mesmo assim")
+        rel["erro_fatal"] = (
+            "sem resposta SSH na porta" if rel["deteccao"] and
+            rel["deteccao"][0]["resultado"] == "sem resposta TCP" else
+            "plataforma não identificada — use --plataforma para forçar e "
+            "diagnosticar mesmo assim")
         rel["segundos_total"] = round(time.perf_counter() - t_inicio, 2)
         return rel
 
@@ -326,15 +372,16 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
     usa_timing = perfil.get("timing", False)
 
     dispositivo = {
-        "device_type": perfil.get("driver", tipo), "host": ip,
+        "device_type": ns.driver_para(tipo), "host": ip,
         "username": usuario, "password": senha, "port": porta,
         "timeout": 45, "conn_timeout": 15,
     }
 
     try:
-        with ConnectHandler(**dispositivo) as conn:
-            hostname = conn.find_prompt().strip("<>[]#>$ ").replace("/", "_") or ip
-            hostname = hostname.split("@")[-1]
+        with ns.abrir_conexao(**dispositivo) as conn:
+            # Mesmo tratamento do netsnap: aviso "--Press any key--" e
+            # prompt mal capturado não viram hostname.
+            hostname = ns.nome_do_prompt(ns.liberar_cli(conn, ip), ip)
 
             # Comandos preparatórios (paginação/contexto)
             preps = []
@@ -345,7 +392,8 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
                     r2 = executar(conn, senha, True, 20)
                     r["comando"] = f"{cmd} (+ senha de contexto)"
                     r["_saida"] += r2["_saida"]
-                rel["contexto_usado"] = True
+                if cmd in ("enable", "config", "configure"):
+                    rel["contexto_usado"] = True
                 preps.append(r)
             if preps:
                 rel["secoes"]["prep (paginação/contexto)"] = preps
@@ -383,6 +431,13 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
                             for c in perfil.get(secao, [])]
                 if not comandos:
                     continue
+                # Mesmas substituições do netsnap, para medir exatamente os
+                # comandos que ele executa.
+                if tipo == "mikrotik_routeros" and secao == "config" \
+                        and not SENSIVEL:
+                    comandos = ["/export hide-sensitive"]
+                if tipo == "linux" and secao == "logs":
+                    comandos = [c + ns.FILTRO_LOG for c in comandos]
                 print(f"    [{secao}] {len(comandos)} comando(s) ...")
                 rel["secoes"][ns.TITULOS[secao]] = [
                     executar(conn, c, usa_timing, timeout) for c in comandos
@@ -397,6 +452,8 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
                                 for c in app.get(secao, [])]
                     if not comandos:
                         continue
+                    if secao == "logs":
+                        comandos = [c + ns.FILTRO_LOG for c in comandos]
                     print(f"    [{chave}/{secao}] {len(comandos)} comando(s) ...")
                     bloco[ns.TITULOS[secao]] = [
                         executar(conn, c, False, timeout) for c in comandos
@@ -441,7 +498,7 @@ PADRAO_VERSAO_LIVRE = re.compile(
     r"build|patch|image)\b.*$"
 )
 PADRAO_LICENCA = re.compile(
-    r"(?im)^.*(licen[cs]e|entitlement|serial\s*number|esn|udi|activation|"
+    r"(?im)^.*(licen[cs]e|entitlement|serial\s*number|\besn\b|\budi\b|activation|"
     r"subscription|expir).*$"
 )
 
@@ -555,7 +612,7 @@ def gerar_relatorio(relatorios, args, anon, pasta):
     for rel in relatorios:
         if rel["erro_fatal"] and not rel["secoes"]:
             md.append(f"| {rel['hostname'] or anon.texto(rel['ip'])} | "
-                      f"_{rel['erro_fatal'][:40]}_ | — | — | — | — | — | — | "
+                      f"_{rel['erro_fatal'][:40].replace('|', '/')}_ | — | — | — | — | — | — | "
                       f"{rel['segundos_total']}s |")
             continue
         cont, total, _, _ = resumir(rel)
@@ -577,7 +634,8 @@ def gerar_relatorio(relatorios, args, anon, pasta):
         md.append("| Etapa | Resultado | Tempo |")
         md.append("|---|---|---|")
         for e in rel["deteccao"]:
-            md.append(f"| {e['etapa']} | {anon.texto(str(e['resultado']))} | "
+            res = " ".join(anon.texto(str(e['resultado'])).split()).replace("|", "/")
+            md.append(f"| {e['etapa']} | {res[:200]} | "
                       f"{e['segundos']}s |")
         md.append("")
         if rel["plataforma"]:
@@ -663,8 +721,6 @@ def gerar_relatorio(relatorios, args, anon, pasta):
                 if r["excecao"]:
                     md.append(f"- exceção: `{anon.texto(r['excecao'])[:200]}`\n")
                 amostra = "\n".join(r["_saida"].splitlines()[:LINHAS_AMOSTRA])
-                if not args.sensivel:
-                    amostra = ns.sanitizar(amostra)
                 amostra = anon.texto(amostra).strip()
                 md.append("```text")
                 md.append(amostra if amostra else "(sem retorno)")
@@ -742,8 +798,8 @@ def gerar_json(relatorios, args, anon, pasta):
                     "linhas": r["linhas"],
                     "bytes": r["bytes"],
                     "excecao": anon.texto(r["excecao"] or "") or None,
-                    "amostra": anon.texto(ns.sanitizar(
-                        "\n".join(r["_saida"].splitlines()[:6])))
+                    "amostra": anon.texto(
+                        "\n".join(r["_saida"].splitlines()[:6]))
                     if r["status"] != OK else None,
                 })
         dados["hosts"].append(h)
@@ -780,6 +836,8 @@ def main():
                     version=f"netdiag {__version__} (netsnap {ns.__version__})")
     args = ap.parse_args()
 
+    global SENSIVEL
+    SENSIVEL = bool(args.sensivel)
     args.secoes = args.secao or list(ns.SECOES)
     args.secoes_nomes = [ns.TITULOS[s] for s in args.secoes]
 
