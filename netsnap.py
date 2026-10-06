@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import os
 import re
@@ -1944,7 +1944,10 @@ PADRAO_ERRO_LIVRE = re.compile(
     r"(?i)(command not found|not recognized as|no such file or directory|"
     r"permission denied|is not supported|unsupported command|"
     r"does not exist|unknown parameter|bad command name|"
-    r"expected end of command)"
+    r"expected end of command|"
+    # Mesmas mensagens em servidor com locale pt_BR
+    r"comando não encontrado|permissão negada|"
+    r"arquivo ou diretório (?:inexistente|não encontrado))"
 )
 
 

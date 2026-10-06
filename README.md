@@ -366,6 +366,55 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 
 ---
 
+## Painel web local (netsnap_web)
+
+Interface no navegador para tudo o que as ferramentas fazem pela linha de comando. Roda no próprio PC e só aceita conexões dele mesmo.
+
+```bash
+python3 netsnap_web.py                 # abre o navegador
+python3 netsnap_web.py --porta 9000    # outra porta (padrão 8765; se ocupada, tenta as seguintes)
+python3 netsnap_web.py --sem-navegador # só mostra o endereço
+```
+
+O terminal mostra o endereço com o token desta execução (`http://127.0.0.1:8765/#t=...`). Sem o token o painel não responde; ele muda a cada vez que o painel inicia. Ctrl+C encerra o painel e interrompe as coletas em andamento.
+
+| Tela | O que faz |
+|---|---|
+| Visão geral | Execuções da sessão, últimas coletas, agendamentos e falhas recentes |
+| Nova coleta | Mesmas opções do modo interativo; acompanha cada equipamento ao vivo |
+| Execuções | Estado por equipamento, saída completa e índice da coleta; equipamentos não identificados são resolvidos ali, escolhendo a plataforma |
+| Snapshots | Leitura por seção e comando, com busca nas saídas e download do `.md` |
+| Inventário | Snapshot mais recente de cada equipamento: plataforma, modelo, versões, CVEs da última triagem, quantidade de coletas; exporta CSV |
+| Comparar coletas | Diferença comando a comando entre duas coletas do mesmo equipamento (por padrão, só configuração e inventário) |
+| Topologia | Enlaces LLDP/CDP, vizinhos ainda não coletados (os que anunciam endereço de gerência podem ser coletados direto dali) e o JSON da topologia |
+| Vulnerabilidades | Roda o netcve sobre a pasta de snapshots e mostra o relatório |
+| Diagnóstico | Roda o netdiag e mostra o relatório |
+| Agendamentos | Coletas recorrentes (diárias num horário ou a cada N horas) enquanto o painel estiver aberto |
+
+**Segurança**
+
+- Escuta só em `127.0.0.1`. Toda chamada exige o token, o que impede que outra página aberta no mesmo navegador dispare coletas; o cabeçalho `Host` é conferido contra DNS rebinding.
+- A senha dos equipamentos vai do navegador para o processo de coleta pela entrada padrão. Não é gravada em disco, não aparece na linha de comando nem no log.
+- Agendamentos são salvos em `snapshots/_agendamentos.json` **sem a senha**. Ela fica só na memória: depois de reiniciar o painel, cada agendamento aparece como "aguardando senha" até ser informada de novo.
+- Em Linux e macOS, arquivos criados pelo painel e pelas coletas ficam legíveis só pelo dono.
+
+**Dependências:** o painel usa apenas a biblioteca padrão e não carrega nada da internet (funciona em rede de gerência isolada). Coleta e diagnóstico continuam exigindo o Netmiko; sem ele o painel abre em modo consulta, com snapshots, inventário, comparação, topologia e vulnerabilidades.
+
+**Execução:** cada coleta, diagnóstico ou triagem roda num processo separado. As execuções ficam na memória do painel e somem ao reiniciá-lo; os arquivos gerados permanecem na pasta.
+
+## Topologia (netsnap_topologia)
+
+Lê a seção *Vizinhança L2* do snapshot mais recente de cada equipamento e monta um grafo em JSON — a base do futuro desenho automático da rede.
+
+```bash
+python3 netsnap_topologia.py snapshots/            # grava snapshots/_topologia_<data>.json
+python3 netsnap_topologia.py snapshots/ --saida rede.json
+```
+
+Cada enlace traz equipamento e porta de origem, vizinho e porta(s) remota(s), se os dois lados foram coletados e se veem (`confirmado`), e de qual arquivo e comando veio. Vizinhos não coletados entram como nós com o nome e o endereço de gerência que anunciam.
+
+Limites: enlace sem LLDP/CDP não aparece; nomes de porta não são normalizados entre fabricantes (`Gi0/1` x `GigabitEthernet0/1`). Formato validado com saída real de Huawei VRP; Junos, Cisco (IOS, NX-OS, XR, CDP), MikroTik e lldpd seguem a sintaxe documentada e foram testados apenas com exemplos.
+
 ## netdiag — diagnóstico da extração (ferramenta complementar)
 
 > As três ferramentas evoluem juntas: o `netdiag` importa os perfis do `netsnap`, e o `netcve` depende do formato de saída dele. Mantenha as três na mesma versão do repositório.
