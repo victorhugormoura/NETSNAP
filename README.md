@@ -1,14 +1,14 @@
 # netsnap
 
-Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de rede e servidores em produção. Conecta via SSH, autodetecta a plataforma, coleta as informações escolhidas em paralelo e gera um arquivo **Markdown por host** — pronto para análise humana, ingestão em outra IA ou arquivamento.
+Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de rede e servidores em produção. Conecta via SSH ou Telnet, autodetecta a plataforma, coleta as informações escolhidas em paralelo e gera um arquivo **Markdown por host** — pronto para análise humana, ingestão em outra IA ou arquivamento.
 
-> **Garantia de leitura:** o netsnap executa exclusivamente comandos `show` / `display` / `print` / `export` / leitura de sistema. Nunca entra em modo de configuração e nunca escreve nada no equipamento.
+> **Garantia de leitura:** o netsnap executa exclusivamente comandos `show` / `display` / `print` / `export` / leitura de sistema e nunca altera configuração. A única exceção ao contexto de leitura é a OLT FiberHome, cuja CLI exige `enable` e `config` até para comandos `show`: o perfil entra nesse contexto, executa apenas leitura e sai ao final (ver nota abaixo da tabela).
 
 ---
 
 ## Plataformas suportadas
 
-| Plataforma | `device_type` | Exemplos |
+| Plataforma | Chave do perfil | Exemplos |
 |---|---|---|
 | Juniper Junos | `juniper_junos` | MX80, MX104, MX204 |
 | Huawei VRP V5 | `huawei` | S5700, S6720, S6730, S9700 (linha campus) |
@@ -51,7 +51,7 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
   - **FAST** — ping ICMP em todos os alvos antes de qualquer SSH; IPs sem resposta são descartados de imediato. Ideal para ranges/CIDR com buracos. Equipamentos que bloqueiam ICMP serão pulados
   - **BUSCA PROFUNDA** — tenta conexão em todos os IPs, sem filtro prévio
 - **Autodetecção individual por host** — identificou, segue direto com a extração; host acessível mas não reconhecido entra numa **fila de pendentes** consultada ao final da fase paralela (nenhuma instância fica parada aguardando o operador). A lista pode misturar fabricantes livremente. Servidores Linux são reconhecidos por sonda própria (`uname`); OLTs SmartAX são distinguidas de switches VRP automaticamente
-- **Aceita IP, nome DNS, CIDR e ranges**: `10.0.0.5`, `olt-centro.isp.net`, `10.0.0.0/24`, `10.0.0.1-10.0.0.100`, `10.0.0.1-100`, IPv6 (`2001:db8::1`, `[2001:db8::1]:2222`). Em `/31` e `/127` os dois endereços entram (enlace ponto a ponto). Além do ICMP do modo FAST, cada alvo passa por teste TCP rápido (3 s) antes do SSH
+- **Aceita IP, nome DNS, CIDR e ranges**: `10.0.0.5`, `olt-centro.isp.net`, `10.0.0.0/24`, `10.0.0.1-10.0.0.100`, `10.0.0.1-100`, IPv6 (`2001:db8::1`, `[2001:db8::1]:2222`). Em `/31` e `/127` os dois endereços entram (enlace ponto a ponto). Cada entrada aceita até 65.536 endereços (um `/16`); blocos maiores são recusados antes de qualquer expansão. Além do ICMP do modo FAST, a acessibilidade é verificada antes do login pela leitura do banner SSH (4 s) ou do prompt Telnet (6 s)
 - **Menu de extração** com seis seções independentes e dois modos combinados:
   1. **Configuração completa** — em Linux, inclui serviços (`systemctl`), portas em escuta (`ss -tulpn`), endereçamento e rotas
   2. **Logs**
@@ -74,7 +74,7 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 
 Boa parte do parque de OLTs não oferece SSH — MA5800 e AN551x costumam sair de fábrica apenas com Telnet, e em muitos provedores continuam assim. O protocolo é escolhido no menu inicial, com porta padrão 23.
 
-Como não há banner de protocolo para ler, a identificação usa o **texto de login** que o equipamento apresenta antes da autenticação: o SmartAX pede `>>User name:`, o VRP de switch pede `Username:`, as OLTs FiberHome apresentam `Login:`, e muitas trazem o modelo no banner. A negociação de opções do Telnet (bytes IAC, RFC 854) é descartada antes da análise. Sem pista no prompt, os perfis mais prováveis nesse protocolo são testados em ordem — o Netmiko não autodetecta por Telnet.
+Como não há banner de protocolo para ler, a identificação usa o **texto de login** que o equipamento apresenta antes da autenticação: o SmartAX pede `>>User name:`, o VRP de switch pede `Username:`, as OLTs FiberHome apresentam `Login:`, o Linux e o NX-OS apresentam `nome-do-host login:`, e muitas trazem o modelo no banner. A negociação de opções do Telnet (bytes IAC, RFC 854) é descartada antes da análise. Sem pista no prompt, os perfis mais prováveis nesse protocolo são testados em ordem, sem repetir um perfil já tentado — o Netmiko não autodetecta por Telnet. Em SSH ou Telnet, uma recusa de credencial interrompe a identificação na hora: tentar o próximo perfil com a mesma senha errada só somaria falhas e bloquearia a conta (o VRP bloqueia após três).
 
 | Plataforma | driver SSH | driver Telnet |
 |---|---|---|
@@ -119,6 +119,8 @@ O `netsnap_transporte.py` implementa SSH e Telnet sem dependências externas (ve
 python3 netsnap.py
 ```
 
+`python3 netsnap.py --version` (ou `-v`) mostra a versão e `--help` (ou `-h`) o uso; ambos precisam ser o primeiro argumento.
+
 Fluxo:
 
 ```
@@ -137,12 +139,13 @@ Fluxo:
 Ao pressionar ENTER sem informar alvo, aparece o menu:
 
 ```
-  1) Nova coleta — reconfigurar tudo (inclusive usuário e senha)
+  1) Nova coleta — reconfigurar tudo (protocolo, credenciais, modo)
   2) Continuar nesta sessão — informar mais alvos
   3) Sair
+Escolha [1-3, padrão 3]:
 ```
 
-A opção 1 volta à tela de configuração sem encerrar o programa, útil quando o próximo grupo de equipamentos usa credenciais diferentes. Cada sessão gera seu próprio resumo e, ao sair, é impresso um resumo geral com todas elas.
+ENTER sem escolha encerra. A opção 1 volta à tela de configuração sem encerrar o programa, útil quando o próximo grupo de equipamentos usa credenciais diferentes. Cada sessão gera seu próprio resumo e, ao sair, é impresso um resumo geral com todas elas.
 
 Ao final da fase paralela, hosts acessíveis que não foram identificados são apresentados um a um para escolha manual do tipo (com opção de pular).
 
@@ -173,7 +176,7 @@ olt-norte.isp.net
 [2001:db8::10]:2222
 ```
 
-Comentários podem ocupar a linha inteira ou vir depois da entrada. Arquivos salvos com BOM (Bloco de Notas do Windows) são aceitos. Em IPv6 a porta só é reconhecida entre colchetes: `2001:db8::1:22` é um endereço válido, e separar o `:22` apontaria para outro host.
+Comentários podem ocupar a linha inteira ou vir depois da entrada. Arquivos salvos com BOM (Bloco de Notas do Windows) e em UTF-16 (redirecionamento `>` do PowerShell 5) são aceitos. Em IPv6 a porta só é reconhecida entre colchetes: `2001:db8::1:22` é um endereço válido, e separar o `:22` apontaria para outro host.
 
 Execute:
 
@@ -181,7 +184,7 @@ Execute:
 python3 netsnap.py ips.txt
 ```
 
-Expansões acima de 256 alvos pedem confirmação antes de iniciar.
+Expansões acima de 256 alvos pedem confirmação antes de iniciar. Se o arquivo informado não existir, o netsnap encerra com erro em vez de cair no modo interativo. Ao final do lote, a opção *Continuar nesta sessão* passa a pedir alvos no modo interativo, com as mesmas credenciais.
 
 ### Saída
 
@@ -214,7 +217,7 @@ Ligado pelo menu (`Gerar log de depuração da coleta?`) ou por `python3 netsnap
 
 ```
 19:28:53.864 | 203.0.113.99      | banner                 | 'SSH-2.0-OpenSSH_8.9p1 Ubuntu' em 0.09s
-19:28:53.958 | 203.0.113.99      | banner->palpite        | linux (confianca media)
+19:28:53.958 | 203.0.113.99      | banner->palpite        | ['linux'] (confianca media)
 19:28:54.612 | 203.0.113.99      | identificado           | linux em 0.75s (via banner)
 19:28:55.104 | 203.0.113.99      | sudo                   | disponivel
 19:28:55.221 | 203.0.113.99      | envia comando          | ip route show table all
@@ -229,18 +232,18 @@ Registra a identificação passo a passo (banner recebido, palpite, confirmaçã
 
 Num BRAS com PPPoE, as sessões de assinante dominam a saída: um MX80 em produção apresentou 1.321 interfaces `pp0.N` e 54 `demux0.N` num total de 3.993 linhas de `show interfaces terse` — 282 KB de conteúdo efêmero, que muda a cada minuto e não descreve a topologia.
 
-O perfil Junos usa **filtro positivo** pelas interfaces de infraestrutura (`ge-`, `xe-`, `et-`, `ae`, `irb`, `lo0`, `si-`, `demux0`, `lc-`, `pfe`, `pfh`), reduzindo a saída em 98% sem perder nenhuma interface física. Um filtro negativo não serviria: o `terse` usa linhas de continuação para famílias adicionais (inet6), e remover só a linha do nome deixaria milhares de linhas órfãs. As sessões entram como **contagem** em comando separado, e `show subscribers summary` e `show pppoe statistics` trazem o quadro agregado.
+O perfil Junos usa **filtro positivo** pelas interfaces de infraestrutura (`ge-`, `xe-`, `et-`, `fe-`, `ae`, `irb`, `lo0`, `em0`, `fxp`, `si-`, `demux0`, `lc-`, `pfe`, `pfh`), reduzindo a saída em 98% sem perder nenhuma interface física. Um filtro negativo não serviria: o `terse` usa linhas de continuação para famílias adicionais (inet6), e remover só a linha do nome deixaria milhares de linhas órfãs. As sessões entram como **contagem** em comando separado, e `show subscribers summary` e `show pppoe statistics` trazem o quadro agregado.
 
 ---
 
 ## Famílias Huawei
 
-As três linhas Huawei compartilham o driver `huawei` do Netmiko, mas a sintaxe diverge o bastante para exigir perfis separados. O netsnap decide por `display version`, numa única conexão:
+As três linhas Huawei têm sintaxe divergente o bastante para exigir perfis separados (e drivers distintos no Netmiko: `huawei`, `huawei_vrpv8` e `huawei_smartax`/`huawei_olt_telnet`). O netsnap decide por `display version`, numa única conexão:
 
 | Família | Critério | Diferenças observadas em campo |
 |---|---|---|
-| `huawei` (VRP V5) | `Version 5.x` | aceita `display cpu-usage` e `display memory-usage`; recusa `display interface counters errors` com *"Wrong parameter"* |
-| `huawei_ce` (VRP V8) | `Version 8.x`, ou modelo `CE####`/`NE####` | recusa `cpu-usage`, `memory-usage` e `transceiver verbose` com *"Unrecognized command"*; o estado de hardware vem de `display health` |
+| `huawei` (VRP V5) | `Version 5.x` — inclusive a linha campus vendida como *CloudEngine S* (S6730-H e afins) | aceita `display cpu-usage` e `display memory-usage`; recusa `display interface counters errors` com *"Wrong parameter"* |
+| `huawei_ce` (VRP V8) | `Version 8.x`, ou, sem versão legível, modelo `CE####`/`NE####` | recusa `cpu-usage`, `memory-usage` e `transceiver verbose` com *"Unrecognized command"*; o estado de hardware vem de `display health` |
 | `huawei_smartax` | modelo `MA5###` ou `SmartAX` | OLT, comandos de placa e PON |
 
 Um CE6860 e um S6730 no mesmo anel, com o mesmo perfil, produziam 7 e 5 comandos recusados respectivamente. Com perfis próprios, cada um recebe a sintaxe que entende.
@@ -263,7 +266,7 @@ O ganho é maior justamente onde era pior: um servidor Linux antes passava pelo 
 
 | Plataforma | Módulo / DOM | Alcance no EEPROM | Erros e tráfego |
 |---|---|---|---|
-| Juniper Junos | `show interfaces diagnostics optics` (Rx/Tx, temperatura, bias, limiares) + PN via `show chassis hardware detail` | não exibido — inferir pelo PN | `show interfaces media` e `extensive` filtrado |
+| Juniper Junos | `show interfaces diagnostics optics` (Rx/Tx, temperatura, bias, limiares) + PN via `show chassis hardware detail` | não exibido — inferir pelo PN | `show interfaces media` |
 | Huawei VRP | `display transceiver verbose` (vendor, PN, wavelength, Rx/Tx) | **sim** — campo `Transfer Distance` | `display interface brief` traz InUti/OutUti e erros |
 | Huawei SmartAX | ópticas dos uplinks; sintaxe varia por placa de controle | parcial | `display port state all`, estatísticas por porta |
 | FiberHome | vários comandos candidatos (a nomenclatura varia entre AN55xx e AN6000) | parcial | `show port statistics` |
@@ -283,7 +286,7 @@ Pontos que valem entender antes de interpretar o resultado (o relatório também
 
 ## Personalizando os comandos
 
-Todos os comandos ficam no dicionário `PERFIS` no topo do `netsnap.py`, organizados por plataforma e seção (`config`, `logs`, `basico`). Campos opcionais por perfil:
+Todos os comandos ficam no dicionário `PERFIS` no topo do `netsnap.py`, organizados por plataforma e seção (`config`, `logs`, `basico`, `optica`, `vizinhanca`, `inventario`). Além de `nome` e `fabricante`, exibidos no menu e no relatório, cada perfil aceita os campos opcionais:
 
 | Campo | Função |
 |---|---|
@@ -299,17 +302,17 @@ Módulos de aplicação Linux ficam em `APPS_LINUX`, com um comando `deteccao` (
 
 ---
 
-### ISP-Stack
+## ISP-Stack
 
 O [ISP-Stack](https://github.com/victorhugormoura/ISP-Stack) instala os módulos de forma seletiva, e o netsnap reflete isso: a detecção usa `/etc/isp-stack`, e o inventário lista `state/`, onde o instalador registra um arquivo por módulo instalado. Assim o relatório distingue **módulo ausente** de **módulo com falha** — sem essa lista, as duas situações produziriam a mesma saída vazia.
 
-Os verificadores do próprio stack são chamados apenas por `install.sh --audit` e `install.sh --verify`. Executar `audit.sh` diretamente abriria o menu interativo e chegaria a perguntar se deve gravar o relatório em `/var/log/isp-stack` — escrita no servidor, o que o netsnap não faz. Pelas flags, o `install.sh` invoca `audit_executar_sem_perguntar` e `verify_executar`, que apenas leem e imprimem; o stdin é fechado (`</dev/null`) e há timeout para o caso de alguma versão futura voltar a perguntar algo.
+Os verificadores do próprio stack são chamados apenas por `install.sh --audit` e `install.sh --verify`. Executar `audit.sh` diretamente abriria o menu interativo e chegaria a perguntar se deve gravar o relatório em `/var/log/isp-stack` — escrita no servidor, o que o netsnap não faz. Pelas flags, o `install.sh` invoca `audit_executar_sem_perguntar` e `verify_executar`, que não alteram configuração; o stdin é fechado (`</dev/null`) e há timeout para o caso de alguma versão futura voltar a perguntar algo. O netsnap só os chama se o script declarar essas opções. Efeito colateral conhecido: a execução inicializa o log de instalação do próprio stack em `/var/log/isp-stack/` — é escrita de log, não de configuração, mas é escrita no servidor.
 
 As consultas HTTP são todas a `127.0.0.1` e apenas de leitura: `GET` em `/status` e `/metrics` do Routinator, `/api/v1/targets` e `/api/v1/alerts` do Prometheus, `/api/v2/status` do Alertmanager.
 
 ---
 
-### Tempo reportado
+## Tempo reportado
 
 O índice e o resumo informam o **tempo de coleta**: varredura, detecção e execução dos comandos. O tempo em que o programa fica parado esperando o operador digitar um alvo ou escolher no menu não entra na conta.
 
@@ -319,7 +322,7 @@ Quando a diferença passa de cinco segundos, o resumo mostra as duas medidas: `C
 
 ---
 
-### Logs com repetição
+## Logs com repetição
 
 Serviço em falha repete a mesma mensagem centenas de vezes. Num servidor WANGuard real, 285 das 300 linhas coletadas eram o mesmo erro de conexão com o ClickHouse, cada uma arrastando o comando SQL inteiro: 97 KB para dizer uma coisa só.
 
@@ -327,7 +330,7 @@ As seções de log em hosts Linux passam por um filtro que trunca linhas muito l
 
 ---
 
-### WANGuard: leitura do banco
+## WANGuard: leitura do banco
 
 O Wanguard grava endereços IP como `VARBINARY`. Um despejo direto produz bytes nulos ilegíveis em vez do endereço — a zona de IP inteira sai como lixo. O netsnap monta o `SELECT` a partir do `DESCRIBE` e aplica três transformações na origem:
 
@@ -335,18 +338,18 @@ O Wanguard grava endereços IP como `VARBINARY`. Um despejo direto produz bytes 
 - marcas de tempo Unix recebem `FROM_UNIXTIME`;
 - colunas cujo nome indique segredo são excluídas antes da consulta, porque a saída do mysql é tabular e um valor sob a coluna `password` não seria detectado pelo sanitizador, que procura par chave=valor.
 
-O que fica de fora, por decisão: séries temporais e dados de fluxo (`top_bin_*`, `top_live_*`, `sensorstats`, `events`, `as_numbers`, `ipacct*`), que somam dezenas de gigabytes e alimentam gráficos; as 2.424 tabelas de accounting diário, que entram apenas como contagem; e as tabelas de autenticação de operador (`company_staff`, `httpauth`, `ldapauth`, `radiusauth`, `samlauth`).
+O que fica de fora, por decisão: séries temporais e dados de fluxo (`top_bin_*`, `top_live_*`, `sensorstats`, `events`, `as_numbers`, `ipacct*`), que somam dezenas de gigabytes e alimentam gráficos; as 2.424 tabelas de accounting diário, que entram apenas como contagem; as tabelas de autenticação de operador (`company_staff`, `httpauth`, `ldapauth`, `radiusauth`, `samlauth`); e as de integração que guardam credenciais (`ldap`, `email`, `telco`), além de `allstats`.
 
 A configuração de **Flowspec** não tem tabela própria: vive nas colunas `exa_flowspec`, `max_flowspec`, `flowspec_counters`, `exa_nexthop`, `exa_localpref`, `exa_rd`, `exa_direction` e `srtbh` da tabela `router`, junto do blackhole.
 
 ---
 
-### Acesso ao banco de dados do Zabbix e do Grafana
+## Acesso ao banco de dados do Zabbix e do Grafana
 
 Hosts, alertas e dashboards não vivem em arquivo de configuração — vivem no banco. Para extraí-los, os módulos leem as credenciais do próprio arquivo de configuração local (`zabbix_server.conf`, `grafana.ini`) e executam **exclusivamente comandos `SELECT`**. Três garantias de projeto:
 
 - Nenhuma query contém `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE` ou `GRANT`; no SQLite o acesso usa `-readonly`.
-- A senha é lida em tempo de execução para uma variável de ambiente do processo cliente (`MYSQL_PWD`/`PGPASSWORD`), portanto **não aparece na linha de comando** (`ps`) nem no relatório — o comando registrado mostra apenas `$DBP`/`$GW`.
+- A senha é lida em tempo de execução para uma variável de ambiente do processo cliente (`MYSQL_PWD`/`PGPASSWORD`), portanto **não aparece na linha de comando** (`ps`) nem no relatório — o comando registrado mostra apenas `$DBP`/`$GW`. A porta (`DBPort` no Zabbix, `host = endereço:porta` no Grafana) é respeitada, e senhas com espaço, `=` ou aspas triplas são lidas como o próprio serviço as lê.
 - Nenhuma query seleciona colunas de segredo (senhas de datasource, tokens, `secure_json_data`).
 
 Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspondente instalado no servidor (`mysql`, `psql` ou `sqlite3`). Faltando qualquer um, a seção informa o motivo em vez de aparecer vazia.
@@ -355,12 +358,12 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 
 ## Avisos importantes
 
-- **O filtro de sensíveis é melhor esforço.** A remoção por regex cobre os padrões mais comuns (Junos `encrypted-password`, Huawei `irreversible-cipher`, communities SNMP, chaves e certificados), mas **revise o arquivo antes de compartilhar com terceiros ou enviar para serviços externos de IA**.
+- **O filtro de sensíveis é melhor esforço.** A remoção por regex cobre os padrões mais comuns (Junos `encrypted-password`, Huawei `irreversible-cipher` e demais cifras `%^%#`/`%@%@`/`%$%$`, communities SNMP inclusive em `snmp-server host` e `trapsink`, SNMPv3, chaves RADIUS/TACACS+/IKE, OSPF `message-digest-key`, credenciais em URL e em linha de comando — `mysql -p`, `sshpass -p`, `curl -u` —, chaves e certificados), mas **revise o arquivo antes de compartilhar com terceiros ou enviar para serviços externos de IA**.
 - Em roteadores com muitas subinterfaces (ex.: BNG com PPPoE), comandos de interface completos podem gerar arquivos grandes e demorar alguns minutos.
-- Na OLT MA5800 a coleta básica fica no nível de placa/CPU/alarmes; sinal óptico por PON exige modo de configuração, o que viola a regra de somente leitura.
+- Na OLT MA5800 a coleta básica fica no nível de placa/CPU/alarmes; sinal óptico por PON exige modo de configuração. Diferente da FiberHome, onde nenhum `show` funciona fora do `config`, aqui a coleta principal funciona sem ele, e por isso o perfil não o usa.
 - Em servidores Linux, o netsnap testa `sudo -n` (não interativo) e o utiliza apenas nos comandos de leitura dos módulos de aplicação. Sem sudo, arquivos como `wanguard.conf` e `named.conf` podem retornar permissão negada; `journalctl` completo exige o grupo `systemd-journal` ou root.
 - **Licenças aparecem em texto no relatório** quando encontradas — é o comportamento pretendido da seção *Inventário*, mas considere-as informação sensível ao compartilhar o arquivo.
-- A verificação de RPZ/AnaBlock identifica zonas pelo padrão de nome (`rpz`, `block`, `anablock`) e pelo bloco `response-policy`. Se a sua nomenclatura for diferente, ajuste os filtros em `APPS_LINUX["bind9"]`. Um `rndc zonestatus` com serial carregado é a evidência de que a zona está ativa e sendo aplicada.
+- A verificação de RPZ/AnaBlock identifica zonas pelo padrão de nome (`rpz`, `anablock`) e pelo bloco `response-policy`. Se a sua nomenclatura for diferente, ajuste os filtros em `APPS_LINUX["bind9"]`. Um `rndc zonestatus` com serial carregado é a evidência de que a zona está ativa e sendo aplicada. A verificação por consulta real existe por causa de um caso de campo: em dois recursivos do mesmo provedor, o primeiro tinha 86.955 zonas carregadas e respondia `127.0.0.1` ao domínio de teste; o segundo tinha o mesmo `anablock.conf` no disco, com 48.895 zonas, atualizado diariamente pelo mesmo cron — mas apenas 128 zonas carregadas e o domínio de teste resolvendo para o IP real. O arquivo existia e crescia; faltava o `include` em `named.conf`. Nenhuma inspeção de configuração isolada acusaria isso, e por isso a coleta também compara zonas carregadas com zonas em arquivo e confere o `include`.
 - Instâncias paralelas compartilham o mesmo usuário SSH: em equipamentos com limite baixo de sessões VTY simultâneas, reduza o número de instâncias.
 - O arquivo `ips.txt` e a pasta `snapshots/` contêm informação de infraestrutura: **nunca devem ser versionados** (já constam no `.gitignore`).
 
@@ -368,7 +371,7 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 
 ## netdiag — diagnóstico da extração (ferramenta complementar)
 
-> As três ferramentas evoluem juntas: o `netdiag` importa os perfis do `netsnap`, e o `netcve` depende do formato de saída dele. Mantenha as três na mesma versão do repositório.
+> As ferramentas evoluem juntas: o `netdiag` importa os perfis do `netsnap`, e o `netcve` depende do formato de saída dele. Mantenha todos os arquivos na mesma versão do repositório.
 
 
 O `netdiag.py` executa, um a um, **todos os comandos que o netsnap usaria** em um equipamento e mede cada resultado. Serve para descobrir onde a extração falha num firmware específico e para gerar um relatório enviável a quem mantém os perfis.
@@ -383,10 +386,12 @@ python3 netdiag.py 10.0.0.1 --plataforma fiberhome   # força o perfil
 python3 netdiag.py 10.0.0.1 --anonimizar         # seguro para compartilhar
 ```
 
+Os alvos seguem o mesmo formato do netsnap (nome DNS, `IP:porta`, IPv6, `[IPv6]:porta`, CIDR).
+
 **O que o relatório traz:**
 
 - **Ambiente de execução** — versões de netdiag, netsnap, Netmiko, Python e sistema de origem
-- **Detecção passo a passo** — teste TCP, o que o `SSHDetect` retornou de fato (antes do mapeamento de alias), sondas SmartAX e Linux, cada uma cronometrada
+- **Detecção passo a passo** — banner SSH, candidatos e confirmação, o que o `SSHDetect` retornou de fato (antes do mapeamento de alias), sonda de família Huawei e sonda Linux, cada uma cronometrada
 - **Versão e licença** identificadas; quando não há padrão conhecido para a plataforma, o relatório mostra as linhas que mencionam versão/firmware — que são exatamente o insumo para criar o padrão
 - **Resultado de cada comando** com status, tempo e número de linhas:
 
@@ -400,16 +405,14 @@ python3 netdiag.py 10.0.0.1 --anonimizar         # seguro para compartilhar
 
 - **Amostras apenas dos comandos com problema** — o retorno bruto truncado, que mostra a sintaxe que o equipamento realmente espera
 - **Comandos lentos** (acima de 30 s), candidatos a filtragem em equipamentos com muitas interfaces
-- **Cobertura** por host: quantos dos comandos do perfil funcionaram
+- **Cobertura** por host: quantos dos comandos do perfil funcionaram (os preparatórios — paginação e contexto — não entram na conta)
 - Em Linux: se há `sudo` não interativo e quais aplicações foram detectadas — a causa mais comum de seções vazias
 
-Saídas: um `.md` legível e um `.json` estruturado, ambos em `diagnosticos/`.
+Saídas: um `.md` legível e um `.json` estruturado, ambos em `diagnosticos/` (ao lado do script) ou, sem permissão de escrita ali, em `~/netdiag_diagnosticos`.
 
 ### Compartilhando o diagnóstico
 
 Valores sensíveis são mascarados por padrão. Com `--anonimizar`, IPs, MACs e hostnames são substituídos por valores fictícios **consistentes** (o mesmo IP recebe sempre o mesmo substituto), preservando a estrutura para análise sem expor a rede real. Endereços de loopback e broadcast são mantidos por serem irrelevantes para identificação.
-
-Um caso real ilustra por que a verificação por consulta importa: em dois recursivos do mesmo provedor, o primeiro tinha 86.955 zonas carregadas e respondia `127.0.0.1` ao domínio de teste; o segundo tinha o mesmo `anablock.conf` no disco, com 48.895 zonas, atualizado diariamente pelo mesmo cron — mas apenas 128 zonas carregadas e o domínio de teste resolvendo para o IP real. O arquivo existia e crescia; faltava o `include` em `named.conf`. Nenhuma inspeção de configuração isolada acusaria isso, e por isso a coleta também compara zonas carregadas com zonas em arquivo e confere o `include`.
 
 O parâmetro `--sensivel` desativa o mascaramento; use apenas em diagnóstico local, nunca em arquivo compartilhado.
 
@@ -442,7 +445,7 @@ python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver ab
 
 | Fonte | Cobertura |
 |---|---|
-| Versões de sistema | Junos, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux (consultados na NVD); Huawei VRP e OLTs (extraídos e listados, sem consulta — ver limitações) |
+| Versões de sistema | Junos, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux e Huawei SmartAX MA5800 (consultados na NVD); Huawei VRP, SmartAX MA5600 e FiberHome (extraídos e listados, sem consulta — ver limitações) |
 | Versões de aplicação | BIND, OpenSSH, nginx, Apache |
 | Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação |
 
@@ -451,11 +454,12 @@ python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver ab
 A correspondência é feita **pela versão declarada**, não por verificação ativa. Consequências:
 
 - **Falsos positivos são esperados.** Fabricantes retroportam correções mantendo o mesmo número de versão; o recurso vulnerável pode não estar habilitado; pode haver mitigação externa (ACL, firewall de borda).
-- **Falsos negativos são esperados.** A cobertura de CPE na NVD é incompleta para equipamentos de rede — OLTs FiberHome e Huawei SmartAX, por exemplo, praticamente não têm CPE publicado. O Huawei VRP não existe na NVD como produto único: os CPEs são por modelo (`s6730-h_firmware`, por exemplo), e a consulta genérica não retornava nada. Nesses casos o netcve extrai a versão mas marca explicitamente *"Sem mapeamento CPE conhecido"* em vez de reportar "nenhuma vulnerabilidade".
+- **Falsos negativos são esperados.** A cobertura de CPE na NVD é incompleta para equipamentos de rede — OLTs FiberHome praticamente não têm CPE publicado, e o SmartAX só é consultado quando o snapshot identifica um MA5800 (`huawei:ma5800_firmware`), já que o CPE é por modelo. O Huawei VRP não existe na NVD como produto único: os CPEs são por modelo (`s6730-h_firmware`, por exemplo), e a consulta genérica não retornava nada. Nesses casos o netcve extrai a versão mas marca explicitamente *"Sem mapeamento CPE conhecido"* em vez de reportar "nenhuma vulnerabilidade".
+- **A versão é convertida para o formato da NVD.** O Junos é consultado com a release no campo *version* e o restante no *update* (`21.4R3-S5.4` → `21.4` / `r3-s5`), e o IOS-XE sem os zeros à esquerda do `show version` (`17.03.04a` → `17.3.4a`). O relatório continua mostrando a versão como o equipamento a declara.
 - **"Não consultado" não é "zero".** No modo `--sem-rede`, ou quando a consulta falha, a coluna de CVEs mostra *não consultado*.
 - **Kernel de distribuição.** A versão do kernel é consultada pela numeração upstream (`5.4.0`); distribuições como Ubuntu e RHEL retroportam correções, então a lista tende a superestimar a exposição. Confira no boletim de segurança da distribuição.
 - **A versão é lida do próprio equipamento.** A busca começa pela seção *Inventário* e ignora *Vizinhança* e *Logs*, que descrevem outros equipamentos — em versões anteriores, a versão de um vizinho LLDP podia ser atribuída ao host.
-- **Community SNMP padrão** só é detectável em snapshots coletados com dados sensíveis incluídos; com a sanitização ativa, o valor chega mascarado.
+- **Community SNMP padrão** só é detectável em snapshots coletados com dados sensíveis incluídos; com a sanitização ativa, o valor chega mascarado. A regra considera apenas declarações SNMP, para não confundir com nomes de community BGP.
 - A fonte autoritativa é sempre o boletim do fabricante (Juniper SIRT, Cisco PSIRT, Huawei PSIRT, MikroTik).
 
 Trate o relatório como **triagem para priorizar investigação**, não como laudo de vulnerabilidade. Os itens marcados **KEV** (catálogo CISA de exploração confirmada) são a prioridade real e merecem verificação imediata.

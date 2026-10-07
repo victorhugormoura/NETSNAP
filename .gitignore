@@ -11,8 +11,10 @@ _indice_*.md
 # Log de depuração: traz trechos reais de saída dos equipamentos
 _debug_*.log
 
-# Cache local do netcve (resultados da NVD)
+# Cache do netcve (resultados da NVD). O padrão é ~/.netcve_cache.json, fora
+# do repositório; a linha cobre uma cópia acidental na raiz.
 .netcve_cache.json
+.netcve_cache.json.tmp
 
 # Listas de equipamentos e credenciais
 ips.txt

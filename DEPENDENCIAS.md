@@ -2,7 +2,7 @@
 
 ## O problema
 
-O netsnap dependia do Netmiko, cuja árvore é:
+O netsnap depende do Netmiko, cuja árvore é:
 
 ```
 netmiko → paramiko → cryptography → cffi        (extensão em C)
@@ -15,7 +15,7 @@ As três extensões compiladas são a origem do trabalho de instalação: em dis
 
 ## A solução adotada
 
-`netsnap_transporte.py` implementa o acesso aos equipamentos **usando apenas a biblioteca padrão**. O Netmiko passa a ser opcional.
+`netsnap_transporte.py` implementa o acesso aos equipamentos **usando apenas a biblioteca padrão**. Quando o coletor for migrado para ele (ver *Estado da integração*, no fim), o Netmiko passa a ser opcional.
 
 | Transporte | Como funciona | Dependência |
 |---|---|---|
@@ -80,7 +80,7 @@ Manter os dois tem valor prático: diante de um equipamento que se comporte de f
 
 Validado lado a lado contra o mesmo servidor: prompt idêntico, saída idêntica, exceções equivalentes.
 
-## Requisitos finais
+## Requisitos depois da integração
 
 | Item | Situação |
 |---|---|
@@ -89,7 +89,7 @@ Validado lado a lado contra o mesmo servidor: prompt idêntico, saída idêntica
 | Pacotes Python | **nenhum** (Netmiko é opcional) |
 | Compilador | **nenhum** |
 
-Instalação passa a ser copiar os arquivos `.py` e executar.
+Com a integração concluída, a instalação passa a ser copiar os arquivos `.py` e executar. Hoje o `netsnap.py` e o `netdiag.py` ainda exigem o Netmiko.
 
 ## Estado da integração
 
