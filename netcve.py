@@ -22,7 +22,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import os
 import re
@@ -33,6 +33,7 @@ import json
 import time
 import argparse
 import importlib.util
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -78,8 +79,10 @@ MAPA_VERSAO = {
         (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", None, None, "VRP V8"),
         (r"(?i)Version\s+(8\.\d+)", None, None, "VRP V8"),
     ],
+    # 'display version' traz o modelo colado à versão (MA5800V100R019C10),
+    # por isso a âncora é "não precedido de letra", e não \b.
     "huawei_smartax": [
-        (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei",
+        (r"(?i)(?<![A-Za-z])(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "huawei",
          "ma5800_firmware", "SmartAX"),
     ],
     "cisco_ios": [
@@ -119,7 +122,9 @@ MAPA_VERSAO = {
 MAPA_APP = [
     # Apenas a versão upstream: sufixos de distribuição (-0ubuntu0.22.04.1)
     # não existem na base CPE e quebrariam a correspondência.
-    (r"(?i)BIND\s+([0-9]+\.[0-9]+\.[0-9]+(?:-?P[0-9]+|-S[0-9]+)?)",
+    # A âncora evita casar 'rpcbind 1.2.6' no inventário de pacotes, que
+    # vem antes de 'named -v' e escondia a versão real do BIND.
+    (r"(?i)(?<![\w-])BIND\s+(9\.[0-9]+\.[0-9]+(?:-?P[0-9]+|-S[0-9]+)?)",
      "isc", "bind", "BIND"),
     (r"(?i)OpenSSH[_\s]([0-9]+\.[0-9]+(?:p[0-9])?)", "openbsd", "openssh",
      "OpenSSH"),
@@ -147,7 +152,12 @@ REGRAS_CONFIG = [
         "titulo": "Community SNMP padrão ou trivial (public/private)",
         "severidade": "ALTA",
         "plataformas": None,
-        "padrao": r"(?i)community\s+[\"']?(public|private|cisco|admin)[\"']?\b",
+        # Ancorado à declaração SNMP: 'community' solto casava nomes de
+        # community BGP (policy-options community private ...).
+        "padrao": r"(?im)(?:snmp-server\s+community|snmp-agent\s+community"
+                  r"(?:\s+(?:read|write))?(?:\s+cipher)?|"
+                  r"set\s+snmp\s+community|^\s*r[ow]community6?)"
+                  r"\s+[\"']?(public|private|cisco|admin)[\"']?(?![\w-])",
         "recomendacao": "Substituir a community e restringir por ACL; "
                         "migrar para SNMPv3 com autenticação e criptografia.",
     },
@@ -230,7 +240,9 @@ REGRAS_CONFIG = [
 # ---------------------------------------------------------------------------
 def ler_snapshot(caminho):
     """Retorna (metadados, texto_completo) de um snapshot netsnap."""
-    with open(caminho, "r", encoding="utf-8", errors="replace") as f:
+    # utf-8-sig: um snapshot salvo de novo pelo Bloco de Notas ganha BOM, e
+    # o cabeçalho deixaria de ser reconhecido.
+    with open(caminho, "r", encoding="utf-8-sig", errors="replace") as f:
         texto = f.read()
     meta = {}
     m = re.match(r"^---\n(.*?)\n---\n", texto, re.S)
@@ -247,7 +259,7 @@ def ler_snapshot(caminho):
     meta.setdefault("host", os.path.basename(caminho).split("_")[0])
     meta.setdefault("ip", "")
     meta.setdefault("platform_key", "")
-    meta.setdefault("platform_name", meta.get("platform_key", "desconhecida"))
+    meta.setdefault("platform_name", meta.get("platform_key") or "desconhecida")
     return meta, texto
 
 
@@ -297,7 +309,37 @@ def extrair_versoes(meta, texto):
                 "consultavel": bool(fornecedor and produto),
             })
             break  # primeira ocorrência por regra basta
+
+    # No IOS-XE o 'show version' também traz a linha "Cisco IOS Software
+    # ... Version 17.x", que casaria a regra do IOS clássico e geraria uma
+    # consulta a cisco:ios, produto que não tem versões 17.x.
+    if any(a["cpe_produto"] == "ios_xe" for a in achados):
+        achados = [a for a in achados if a["cpe_produto"] != "ios"]
+    # O CPE do SmartAX na NVD é por modelo; o MA5600 não pode ser consultado
+    # com o CPE do MA5800.
+    if not re.search(r"(?i)MA5800", texto):
+        for a in achados:
+            if a["cpe_produto"] == "ma5800_firmware":
+                a["cpe_fornecedor"] = a["cpe_produto"] = None
+                a["consultavel"] = False
     return achados
+
+
+def cpe_versao(produto, versao):
+    """Converte a versão declarada nos campos version e update do CPE.
+
+    A NVD cataloga o Junos com a release no campo version e o restante no
+    update (21.4R3-S5.4 -> 21.4 / r3-s5), e o IOS-XE sem os zeros à esquerda
+    que o 'show version' imprime (17.03.04a -> 17.3.4a). Os valores do
+    dicionário CPE são minúsculos."""
+    atualizacao = ""
+    if produto == "junos":
+        m = re.match(r"(?i)(\d+\.\d+)([RXD]\d+(?:-S\d+)?)?", versao)
+        if m:
+            versao, atualizacao = m.group(1), (m.group(2) or "")
+    elif produto == "ios_xe":
+        versao = re.sub(r"(?<!\d)0+(?=\d)", "", versao)
+    return versao.lower(), atualizacao.lower()
 
 
 def avaliar_config(meta, texto):
@@ -386,10 +428,14 @@ def carregar_cache():
 
 
 def salvar_cache(cache):
+    # Gravação atômica: uma interrupção no meio da escrita não deixa o
+    # cache corrompido.
     try:
         cache["_gerado_em"] = cache.get("_gerado_em", time.time())
-        with open(CACHE, "w", encoding="utf-8") as f:
+        temporario = CACHE + ".tmp"
+        with open(temporario, "w", encoding="utf-8") as f:
             json.dump(cache, f)
+        os.replace(temporario, CACHE)
     except Exception:
         pass
 
@@ -407,9 +453,22 @@ def baixar_kev():
         return set()
 
 
+def falha_transitoria(e) -> bool:
+    """Indica se vale repetir a consulta: limite de taxa, erro do servidor ou
+    rede. Falha de TLS e erro de requisição (4xx) se repetiriam igual."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in (403, 429) or e.code >= 500
+    if isinstance(e, urllib.error.URLError):
+        return not isinstance(e.reason, ssl.SSLError)
+    return not isinstance(e, ssl.SSLError)
+
+
 def consultar_nvd(fornecedor, produto, versao, chave_api, cache):
     """Consulta CVEs por CPE amplo (virtualMatchString)."""
+    versao, atualizacao = cpe_versao(produto, versao)
     cpe = f"cpe:2.3:*:{fornecedor}:{produto}:{escapar_cpe(versao)}"
+    if atualizacao:
+        cpe += f":{escapar_cpe(atualizacao)}"
     if cpe in cache:
         return cache[cpe], True
 
@@ -430,7 +489,7 @@ def consultar_nvd(fornecedor, produto, versao, chave_api, cache):
                 dados = http_json(url, headers=headers)
                 break
             except Exception as e:
-                if tentativa == 2:
+                if tentativa == 2 or not falha_transitoria(e):
                     raise
                 espera = 10 * (tentativa + 1)
                 print(f"    [!] Falha na consulta ({e}); nova tentativa em {espera}s")
@@ -587,7 +646,7 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve):
             for c in v["cves"][:limite_cve]:
                 marca = " **KEV**" if c["id"] in kev else ""
                 sev = SEV_PT.get(c["severidade"], c["severidade"])
-                resumo = " ".join(c["descricao"].split())[:150]
+                resumo = " ".join(c["descricao"].split())[:150].replace("|", "\\|")
                 md.append(f"| {c['id']}{marca} | {sev} | {c['nota'] or '—'} | "
                           f"{c['publicado']} | {resumo} |")
             if len(v["cves"]) > limite_cve:
@@ -766,8 +825,12 @@ def main():
                 consultas[(fornecedor, produto, versao)] = cves
                 origem = "cache" if do_cache else "NVD"
                 print(f"        {len(cves)} correspondência(s) [{origem}]")
-                if not do_cache and i < len(consultas):
-                    time.sleep(delay)
+                if not do_cache:
+                    # Salva a cada consulta: um Ctrl+C no meio de uma
+                    # varredura longa não perde o que já foi obtido.
+                    salvar_cache(cache)
+                    if i < len(consultas):
+                        time.sleep(delay)
             except Exception as e:
                 print(f"        [!] Falha: {e}")
                 ajuda = explicar_falha_tls(e)
