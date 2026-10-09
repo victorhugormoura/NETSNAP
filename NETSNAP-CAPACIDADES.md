@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.15.0**, netsnap_transporte 1.1.0, netdiag 1.1.0, netcve 0.3.0.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.15.1**, netsnap_transporte 1.1.0, netdiag 1.1.0, netcve 0.3.0, painel netsnap_web 0.1.0, netsnap_topologia 1.0.0, netsnap_md 1.0.0.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -33,6 +33,9 @@ Usos típicos:
 | `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.8+, cliente OpenSSH para SSH |
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
 | `netcve.py` | Lê os snapshots e faz triagem de vulnerabilidades (NVD + CISA KEV) e de configuração insegura | só biblioteca padrão (certifi opcional) |
+| `netsnap_web.py` + `web/` | Painel local no navegador: coleta, execuções ao vivo, snapshots, inventário, comparação, topologia, netcve, netdiag e agendamentos | só biblioteca padrão; coleta e netdiag usam o Netmiko |
+| `netsnap_topologia.py` | Topologia L2 (LLDP/CDP) dos snapshots em JSON | só biblioteca padrão |
+| `netsnap_md.py` | Leitura estruturada dos snapshots (metadados, seções, comandos, saídas) | só biblioteca padrão |
 | `zabbix-para-netsnap.md` | Instruções para uma IA converter a lista de hosts do Zabbix em arquivo de alvos | — |
 | `README.md`, `DEPENDENCIAS.md` | Documentação de uso e da estratégia de dependências | — |
 
@@ -88,14 +91,14 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação. Po
 
 ## 5. Fluxo de uma coleta
 
-1. **Varredura** (modo FAST): ping paralelo (64 simultâneos); no Windows só conta como vivo quem responde com TTL.
+1. **Varredura** (modo FAST): ping paralelo (64 simultâneos); no Windows só conta como vivo quem responde com TTL. Sem o comando `ping` no sistema, a varredura é pulada com aviso e todos os alvos seguem para identificação.
 2. **Identificação da plataforma**, por host, em paralelo:
-   - **SSH:** lê o banner SSH sem autenticar (milissegundos). `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux.
+   - **SSH:** lê o banner SSH sem autenticar (milissegundos). Sem banner, a falha é classificada: porta recusada, sem resposta TCP, ou porta aberta sem banner (típico de limite de sessões ou proteção contra força bruta). `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux.
    - **Huawei:** um `display version` decide entre VRP V5 (campus), VRP V8 (CloudEngine/NE) e SmartAX (OLT), que usam perfis diferentes.
    - **Telnet:** lê o texto de login (respondendo à negociação de opções, que alguns equipamentos exigem antes de mostrar o pedido): `>>User name:` → SmartAX; `Username:` → VRP/Cisco; `Login:` → FiberHome/Linux; modelo no banner (MA5xxx, AN5xxx). Sem pista, testa no máximo dois perfis, com intervalo, para não disparar bloqueio por tentativas.
    - Host acessível e não reconhecido vai para uma **fila de pendentes**, perguntada ao operador depois da fase paralela (nenhuma thread fica parada esperando).
-3. **Coleta:** abre a sessão, trata o aviso `--Press any key--`, extrai o hostname do prompt (recusando capturas inválidas), executa os comandos preparatórios do perfil, as seções escolhidas e, em Linux, os módulos de aplicação detectados.
-4. **Queda de sessão:** se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente.
+3. **Coleta:** abre a sessão, trata o aviso `--Press any key--`, extrai o hostname do prompt (recusando capturas inválidas), executa os comandos preparatórios do perfil, as seções escolhidas e, em Linux, os módulos de aplicação detectados. Se um comando cair num paginador que o comando de desativação não cobriu (`---- More ----`, `--More--`, `Press any key to continue`, `-- [Q quit|...]`), o netsnap avança as páginas e remove os marcadores e as sequências de apagamento da saída.
+4. **Queda de sessão:** um vigia acompanha o canal SSH durante cada comando, e o fechamento pelo equipamento é percebido na hora, sem esperar o timeout de leitura. Se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente.
 5. **Saída:** grava o snapshot, depois o índice da execução e o resumo no terminal.
 
 ---
@@ -164,7 +167,7 @@ Estrutura:
 
 ```markdown
 ---
-netsnap_version: "1.15.0"
+netsnap_version: "1.15.1"
 host: "MX204-BORDA"
 ip: "203.0.113.200"
 platform_key: "juniper_junos"
@@ -247,6 +250,22 @@ python3 netcve.py snapshots/ [--api-key K | NVD_API_KEY] [--sem-rede] [--csv] [-
 
 Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP e OLTs têm versão extraída mas não consultada (sem CPE genérico na NVD). Resultado é triagem, não laudo.
 
+### Painel web (netsnap_web)
+
+```bash
+python3 netsnap_web.py [--porta 8765] [--sem-navegador]
+```
+
+Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia, vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta.
+
+### netsnap_topologia
+
+```bash
+python3 netsnap_topologia.py snapshots/ [--saida rede.json]
+```
+
+Gera `{documento, versao, gerado_em, nos[], enlaces[], sem_vizinhanca[]}`. Nó: `id, rotulo, coletado, ip, plataforma, plataforma_nome, fabricante, coletado_em, arquivo, ips_gerencia[]`. Enlace: `a, porta_a, b, porta_b, portas_b[], confirmado, origem[]`. Prefere a saída detalhada à tabela resumida (que trunca nomes); agrupa interfaces lógicas da mesma porta física; marca `confirmado` quando os dois lados foram coletados e se veem. É a entrada prevista para o módulo de desenho da rede.
+
 ### netsnap_transporte
 
 Sessões SSH e Telnet sem pacotes externos: Telnet completo (RFC 854) sobre socket; SSH conduzindo o cliente OpenSSH do sistema por pseudoterminal (Unix) ou `SSH_ASKPASS` (Windows, OpenSSH 8.4+). Pede algoritmos legados (DH group1/14-sha1, ssh-rsa, CBC, hmac-sha1) apenas se o cliente local os conhecer (`ssh -Q`), o que evita a falha do OpenSSH 10. Interface única para os dois transportes e para o Netmiko opcional:
@@ -265,7 +284,7 @@ Exceções: `ErroAutenticacao`, `ErroConexao` (ambas subclasses de `ErroTranspor
 
 ## 12. Como integrar em outro projeto
 
-**Consumindo os arquivos (recomendado):** o snapshot é o contrato. Para processar:
+**Consumindo os arquivos (recomendado):** o snapshot é o contrato. O módulo `netsnap_md.py` já faz a leitura completa e segura (`ler_snapshot`, `ler_metadados`, `mais_recentes`), sem depender do netsnap nem do Netmiko. Se o outro projeto não puder importá-lo, o essencial é:
 
 ```python
 import json, re
@@ -313,6 +332,8 @@ A saída dos comandos não é escapada. Uma linha de saída que comece com `## `
 | BIRD e SmokePing | Uma coleta real (um servidor) |
 | Telnet em FiberHome AN551x e Huawei MA5800 | Login corrigido na 1.15.0 e testado contra servidor que reproduz o comportamento observado; **falta validação em equipamento real** |
 | FiberHome (lista de comandos), Zabbix, Grafana, ISP-Stack | Escritos a partir de documentação e do código; sem coleta real recebida até aqui |
+| Painel web | Testado ponta a ponta (navegador automatizado) contra sshd local e servidores Telnet de teste, em Linux; ainda não executado no Windows |
+| Topologia | Huawei VRP validado com saída real; Junos, Cisco, MikroTik e lldpd testados só com exemplos de formato documentado |
 | Cisco NX-OS/IOS/XR, MikroTik | Perfis por documentação e sintaxe conhecida; validação de campo limitada |
 | Transporte sem dependências | Validado isoladamente; não integrado ao netsnap.py |
 | Execução não interativa (credenciais por argumento/variável) | Não existe |
