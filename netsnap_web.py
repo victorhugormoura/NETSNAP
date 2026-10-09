@@ -257,8 +257,27 @@ def executor_netdiag(cfg):
             "json": os.path.basename(rel_js)})
 
 
+def vigiar_painel():
+    """Encerra a execução se o painel deixar de existir.
+
+    O painel mantém a entrada padrão deste processo aberta; quando ele
+    morre (fechado à força, janela do terminal fechada), o canal fecha e a
+    leitura retorna. Sem isso a coleta seguiria órfã, gravando arquivos sem
+    ninguém acompanhando."""
+    # os.read, e não sys.stdin: o leitor com buffer tem trava interna, e uma
+    # thread presa nele impede o encerramento normal do interpretador
+    # ("could not acquire lock ... at interpreter shutdown").
+    try:
+        while os.read(sys.stdin.fileno(), 1024):
+            pass
+    except OSError:
+        pass
+    os._exit(3)
+
+
 def modo_executor(tipo):
     cfg = json.loads(sys.stdin.readline())
+    threading.Thread(target=vigiar_painel, daemon=True).start()
     try:
         {"coleta": executor_coleta, "netdiag": executor_netdiag}[tipo](cfg)
     except Exception as e:
@@ -314,7 +333,8 @@ class Job:
                                        "motivo": "", "ultimo": ""})
         h["ultimo"] = msg
         if msg.startswith("[OK]"):
-            h["estado"] = "ok"
+            # Snapshot salvo depois de queda de sessão é parcial.
+            h["estado"] = "incompleto" if h.get("abortado") else "ok"
             m = re.search(r"snapshot salvo: (\S+)", msg)
             h["arquivo"] = m.group(1) if m else ""
         elif msg.startswith("[FALHA]"):
@@ -334,7 +354,8 @@ class Job:
         elif msg.startswith(("conectando", "->")):
             h["estado"] = "coletando"
         elif msg.startswith("[ABORTADO]"):
-            h["motivo"] = "sessão encerrada pelo equipamento"
+            h["abortado"] = True
+            h["motivo"] = "sessão encerrada pelo equipamento; snapshot parcial"
         elif h["estado"] == "na fila":
             h["estado"] = "identificando"
 
@@ -381,10 +402,18 @@ def iniciar_processo(job, argv, entrada=None, env_extra=None):
                 elif len(job.linhas) < LIMITE_LINHAS_JOB:
                     job.linhas.append(linha)
         codigo = job.proc.wait()
+        try:
+            job.proc.stdin.close()
+        except OSError:
+            pass
         with job.trava:
             job.terminado = datetime.now().isoformat(timespec="seconds")
             if job.cancelado:
                 job.estado = "cancelado"
+                for h in job.hosts.values():
+                    if h["estado"] in ("na fila", "identificando",
+                                       "identificado", "coletando"):
+                        h["estado"] = "cancelado"
             elif codigo == 0 and not job.erro:
                 job.estado = "concluido"
             else:
@@ -396,8 +425,12 @@ def iniciar_processo(job, argv, entrada=None, env_extra=None):
     threading.Thread(target=ler, daemon=True).start()
     try:
         if entrada is not None:
+            # A entrada fica aberta enquanto a execução durar: é por ela que o
+            # processo filho percebe se o painel morreu (ver vigiar_painel).
             job.proc.stdin.write((json.dumps(entrada) + "\n").encode("utf-8"))
-        job.proc.stdin.close()
+            job.proc.stdin.flush()
+        else:
+            job.proc.stdin.close()
     except OSError as e:
         with job.trava:
             job.erro = f"falha ao enviar a configuração ao processo: {e}"
@@ -440,6 +473,40 @@ def pos_job(job):
         AGENDA.registrar_termino(job.origem.split(":", 1)[1], job)
 
 
+LIMITE_ALVOS = 4096
+
+
+def contar_alvos(linhas):
+    """Quantidade de endereços que as entradas geram, sem expandi-las.
+
+    Expandir um /8 por engano criaria 16 milhões de alvos e travaria o
+    painel; a conta é feita antes, pelo tamanho de cada bloco."""
+    import ipaddress
+    total = 0
+    for linha in linhas:
+        e = linha.split("#", 1)[0].strip()
+        m = re.match(r"^\[?([^\]]+?)\]?(?::\d+)?$", e) if e.count(":") <= 1 \
+            else None
+        base = m.group(1) if m else e
+        try:
+            if "/" in base:
+                total += ipaddress.ip_network(base.split(":")[0] if base.count(":") == 1
+                                              else base, strict=False).num_addresses
+                continue
+            r = re.match(r"^([\d.]+)\s*-\s*([\d.]+)$", base)
+            if r:
+                ini = ipaddress.ip_address(r.group(1))
+                fim_txt = r.group(2)
+                fim = ipaddress.ip_address(fim_txt if "." in fim_txt else
+                                           r.group(1).rsplit(".", 1)[0] + "." + fim_txt)
+                total += max(0, int(fim) - int(ini) + 1)
+                continue
+        except ValueError:
+            pass
+        total += 1
+    return total
+
+
 def nova_coleta(cfg, origem="manual"):
     if not CAPACIDADES["coleta"]:
         raise ErroAPI(409, CAPACIDADES["motivo"])
@@ -463,6 +530,10 @@ def nova_coleta(cfg, origem="manual"):
         raise ErroAPI(400, "Porta inválida")
     linhas = [l for l in cfg["alvos"].splitlines()
               if l.split("#", 1)[0].strip()]
+    total = contar_alvos(linhas)
+    if total > LIMITE_ALVOS:
+        raise ErroAPI(400, f"As entradas somam {total} endereços; o limite por "
+                           f"coleta é {LIMITE_ALVOS}. Divida em blocos menores.")
     nome_modo = next(m["nome"] for m in CAPACIDADES["modos"]
                      if m["chave"] == cfg["modo"])
     titulo = (f"Coleta · {nome_modo} · " +
@@ -1231,6 +1302,14 @@ def main():
     print(" Ctrl+C encerra o painel e interrompe coletas em andamento.")
     if not args.sem_navegador:
         threading.Timer(0.8, abrir_navegador, args=(url,)).start()
+
+    def ao_terminar(*_):
+        raise KeyboardInterrupt
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, ao_terminar)
+    except (ImportError, ValueError, AttributeError):
+        pass
     try:
         servidor.serve_forever()
     except KeyboardInterrupt:
