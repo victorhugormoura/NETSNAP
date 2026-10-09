@@ -49,6 +49,7 @@ function estado(texto) {
 }
 
 function aviso(msg, erro) {
+  if (msg === "obsoleto") return;
   const a = $("#aviso");
   a.textContent = msg;
   a.className = "visivel" + (erro ? " erro" : "");
@@ -56,14 +57,20 @@ function aviso(msg, erro) {
   aviso.t = setTimeout(() => { a.className = ""; }, erro ? 6000 : 3200);
 }
 
+// localStorage: o token vale para todas as abas do painel nesta execução
+// (cada execução usa uma porta e um token próprios). Sem armazenamento
+// disponível, o painel funciona na aba aberta pelo endereço do terminal.
 function guardar(chave, valor) {
-  try { sessionStorage.setItem(chave, valor); } catch (e) { /* sem armazenamento */ }
+  try { localStorage.setItem("netsnap." + chave, valor); } catch (e) { /* sem armazenamento */ }
 }
 function ler(chave) {
-  try { return sessionStorage.getItem(chave) || ""; } catch (e) { return ""; }
+  try { return localStorage.getItem("netsnap." + chave) || ""; } catch (e) { return ""; }
 }
 
 async function api(metodo, caminho, corpo) {
+  // Resposta que chega depois de uma troca de tela é descartada: senão a
+  // tela anterior, mais lenta, sobrescreveria a atual.
+  const geracao = S.geracao;
   const opcoes = { method: metodo, headers: { "X-Netsnap-Token": S.token } };
   if (corpo !== undefined) {
     opcoes.headers["Content-Type"] = "application/json";
@@ -72,6 +79,11 @@ async function api(metodo, caminho, corpo) {
   const r = await fetch("/api/" + caminho, opcoes);
   const tipo = r.headers.get("Content-Type") || "";
   const dados = tipo.includes("json") ? await r.json() : await r.text();
+  if (geracao !== S.geracao) {
+    const obsoleto = new Error("obsoleto");
+    obsoleto.obsoleto = true;
+    throw obsoleto;
+  }
   if (!r.ok) {
     const msg = (dados && dados.erro) || `Erro ${r.status}`;
     const e = new Error(msg);
@@ -210,7 +222,8 @@ async function rotear() {
   try {
     await ROTAS[nome](...partes.slice(1));
   } catch (e) {
-    if (e.status === 401) return semToken();
+    if (e.obsoleto) return;
+    if (e.status === 401) { guardar("token", ""); return semToken(); }
     tela(`<h1>Não foi possível carregar</h1><p class="erro-campo">${esc(e.message)}</p>`);
   }
   $("#conteudo").focus({ preventScroll: true });
@@ -468,7 +481,7 @@ async function vExecucao(id) {
       <thead><tr><th>IP</th><th>Estado</th><th>Plataforma</th><th>Detalhe</th></tr></thead><tbody>
       ${d.lista_hosts.map((h) => `<tr><td class="mono">${esc(h.ip)}</td><td>${estado(h.estado)}</td>
         <td>${esc(h.plataforma || "—")}</td>
-        <td class="pequeno">${h.arquivo ? `<a href="#/snapshots/${encodeURIComponent(h.arquivo)}">${esc(h.arquivo)}</a>`
+        <td class="pequeno">${h.arquivo ? `<a href="#/snapshots/${encodeURIComponent(h.arquivo)}">${esc(h.arquivo)}</a>${h.motivo ? `<br><span class="suave">${esc(h.motivo)}</span>` : ""}`
           : esc(h.motivo || h.ultimo || "")}</td></tr>`).join("")}
       </tbody></table></div>`;
   };
@@ -584,7 +597,14 @@ async function vSnapshot(arquivo) {
     document.getElementById(a.dataset.ancora).scrollIntoView({ block: "start" });
   });
   const busca = $("#busca");
+  // Espera a digitação parar: em snapshot de vários MB cada busca custa
+  // segundos, e buscar a cada tecla travaria a página.
+  let espera = null;
   busca.addEventListener("input", () => {
+    clearTimeout(espera);
+    espera = setTimeout(filtrar, 300);
+  });
+  const filtrar = () => {
     const q = busca.value.trim().toLowerCase();
     $$("#leitor-corpo .comando").forEach((art) => {
       const pre = art.querySelector("pre");
@@ -606,7 +626,7 @@ async function vSnapshot(arquivo) {
       while (el && !el.classList.contains("secao-titulo")) { if (!el.hidden) algum = true; el = el.nextElementSibling; }
       h.hidden = !algum;
     });
-  });
+  };
 }
 
 /* ------------------------------------------------------------ inventário */
@@ -631,7 +651,7 @@ async function vInventario() {
         <td class="mono">${esc(h.ip)}</td><td>${fibra(h.plataforma, h.plataforma_nome)}</td>
         <td>${esc(h.modelo || "—")}</td><td class="pequeno">${esc(h.versoes.join(" · ") || "—")}</td>
         <td class="num">${h.cves == null ? '<span class="suave">—</span>' : h.cves}</td>
-        <td class="num">${h.coletas}</td><td class="data">${fmtData(h.coletado_em, true)}</td></tr>`).join("")}</tbody>`;
+        <td class="num">${h.coletas}</td><td class="data">${fmtData(h.coletado_em)}</td></tr>`).join("")}</tbody>`;
   };
   tela(`<div class="cabecalho-linha"><div><h1>Inventário</h1>
       <p class="lead">Snapshot mais recente de cada equipamento. ${d.triagem
@@ -994,6 +1014,7 @@ async function iniciar() {
   try {
     S.info = await api("GET", "info");
   } catch (e) {
+    if (e.status === 401) guardar("token", "");
     return e.status === 401 ? semToken() : tela(`<h1>Painel inacessível</h1><p class="erro-campo">${esc(e.message)}</p>`);
   }
   const c = S.info.capacidades;
