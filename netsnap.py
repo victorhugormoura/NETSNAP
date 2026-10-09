@@ -18,13 +18,14 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import os
 import re
 import sys
 import time
 import json
+import shutil
 import socket
 import getpass
 import logging
@@ -1944,7 +1945,10 @@ PADRAO_ERRO_LIVRE = re.compile(
     r"(?i)(command not found|not recognized as|no such file or directory|"
     r"permission denied|is not supported|unsupported command|"
     r"does not exist|unknown parameter|bad command name|"
-    r"expected end of command)"
+    r"expected end of command|"
+    # Mesmas mensagens em servidor com locale pt_BR
+    r"comando não encontrado|permissão negada|"
+    r"arquivo ou diretório (?:inexistente|não encontrado))"
 )
 
 
@@ -2125,6 +2129,12 @@ def ping(ip: str, timeout_s: int = 1) -> bool:
 def varrer_icmp(alvos, paralelo: int = 64):
     """Executa ping em todos os alvos em paralelo. Retorna (vivos, mortos)."""
     vivos, mortos = [], []
+    if not shutil.which("ping"):
+        # Sem o binário, todo ping "falharia" e todos os alvos seriam
+        # descartados como fora do ar.
+        print("\n[!] Comando 'ping' não encontrado nesta máquina: a varredura "
+              "ICMP foi pulada e todos os alvos serão tentados.")
+        return list(alvos), []
     print(f"\n[+] Varredura ICMP em {len(alvos)} alvo(s) ...")
     with ThreadPoolExecutor(max_workers=min(paralelo, max(len(alvos), 1))) as pool:
         futuros = {pool.submit(ping, ip): (ip, porta) for ip, porta in alvos}
@@ -2136,6 +2146,16 @@ def varrer_icmp(alvos, paralelo: int = 64):
     vivos.sort(key=lambda a: ordem[a])
     mortos.sort(key=lambda a: ordem[a])
     return vivos, mortos
+
+
+def porta_recusada(ip: str, porta: int, tempo: int = 3) -> bool:
+    try:
+        with socket.create_connection((ip, porta), timeout=tempo):
+            return False
+    except ConnectionRefusedError:
+        return True
+    except OSError:
+        return False
 
 
 def porta_aberta(ip: str, porta: int, tempo: int = 3) -> bool:
@@ -2187,21 +2207,52 @@ BANNER_PLATAFORMA = [
 ]
 
 
-def ler_banner(ip: str, porta: int, tempo: int = 4):
-    """Lê a linha de identificação do servidor SSH sem autenticar.
-    Retorna o banner, ou None se a porta não responder."""
+def sondar_ssh(ip: str, porta: int, tempo: int = 4):
+    """Lê a identificação do servidor SSH sem autenticar.
+
+    Devolve (situacao, banner). A situação separa casos que pedem ações
+    diferentes do operador:
+      ok          banner recebido
+      recusada    nada escuta na porta (serviço desligado ou outra porta)
+      sem_resposta  nenhuma resposta TCP (host fora, ACL, firewall)
+      sem_banner  conexão aceita, mas o servidor não se identificou —
+                  típico de limite de sessões ou proteção contra força bruta
+    """
     try:
-        with socket.create_connection((ip, porta), timeout=tempo) as s:
-            s.settimeout(tempo)
-            dados = b""
+        s = socket.create_connection((ip, porta), timeout=tempo)
+    except ConnectionRefusedError:
+        return "recusada", None
+    except OSError:
+        return "sem_resposta", None
+    with s:
+        s.settimeout(tempo)
+        dados = b""
+        try:
             while b"\n" not in dados and len(dados) < 512:
                 pedaco = s.recv(256)
                 if not pedaco:
                     break
                 dados += pedaco
-        return dados.decode("utf-8", "replace").strip() or None
-    except OSError:
-        return None
+        except OSError:
+            pass
+    banner = dados.decode("utf-8", "replace").strip()
+    return ("ok", banner) if banner else ("sem_banner", None)
+
+
+MOTIVO_SONDAGEM = {
+    "recusada": "conexão recusada na porta {porta} (serviço desligado ou "
+                "em outra porta)",
+    "sem_resposta": "sem resposta TCP na porta {porta} (host fora do ar, "
+                    "ACL ou firewall)",
+    "sem_banner": "porta {porta} aberta, mas o equipamento não enviou o "
+                  "banner SSH — provável limite de sessões simultâneas ou "
+                  "proteção contra força bruta",
+}
+
+
+def ler_banner(ip: str, porta: int, tempo: int = 4):
+    """Banner SSH, ou None quando não há banner (compatibilidade)."""
+    return sondar_ssh(ip, porta, tempo)[1]
 
 
 def plataforma_por_banner(banner: str):
@@ -2318,8 +2369,10 @@ def detectar_telnet(ip, usuario, senha, porta):
     t0 = time.perf_counter()
     texto = ler_prompt_telnet(ip, porta)
     if texto is None:
-        depurar(ip, "telnet", f"sem resposta TCP em {porta}")
-        raise NetmikoTimeoutException(f"sem resposta TCP na porta {porta}")
+        situacao = "recusada" if porta_recusada(ip, porta) else "sem_resposta"
+        motivo = MOTIVO_SONDAGEM[situacao].format(porta=porta)
+        depurar(ip, "telnet", motivo)
+        raise NetmikoTimeoutException(motivo)
     depurar(ip, "telnet prompt", repr(texto[-160:]))
 
     candidatos, confianca = plataforma_por_prompt_telnet(texto)
@@ -2376,10 +2429,11 @@ def detectar(ip, usuario, senha, porta, protocolo="ssh"):
     if protocolo == "telnet":
         return detectar_telnet(ip, usuario, senha, porta)
     t0 = time.perf_counter()
-    banner = ler_banner(ip, porta)
-    if banner is None:
-        depurar(ip, "banner", f"sem resposta TCP em {porta}")
-        raise NetmikoTimeoutException(f"sem resposta TCP na porta {porta}")
+    situacao, banner = sondar_ssh(ip, porta)
+    if situacao != "ok":
+        motivo = MOTIVO_SONDAGEM[situacao].format(porta=porta)
+        depurar(ip, "banner", motivo)
+        raise NetmikoTimeoutException(motivo)
     depurar(ip, "banner", f"{banner!r} em {time.perf_counter()-t0:.2f}s")
 
     candidatos, confianca = plataforma_por_banner(banner)
@@ -2524,13 +2578,95 @@ def sessao_perdida(saida: str) -> bool:
     """Identifica queda de sessão, para interromper a coleta do host."""
     return bool(re.search(
         r"(?i)(EOFError|connection closed|connection reset|broken pipe|"
-        r"socket is closed|not connected)", saida or ""))
+        r"socket is closed|not connected|no active channel|"
+        r"stream closed by remote)", saida or ""))
+
+
+NUCLEO_PAGINADOR = (r"(?:-{2,}\s*\(?\s*more\b[^\r\n]{0,40}?-{2,}|--more--|"
+                    r"press any key to continue|-- \[Q quit\|[^\]\r\n]*\])")
+PADRAO_PAGINADOR = re.compile(rf"(?i){NUCLEO_PAGINADOR}\s*$")
+def limpar_paginacao(texto):
+    """Remove avisos de paginação e as sequências que os apagam.
+
+    Huawei: "---- More ----" seguido, após a tecla, de ESC[nD, n espaços e
+    ESC[nD. Cisco: "--More--" apagado com backspaces. Só a sequência de
+    apagamento é removida: a indentação da linha seguinte fica intacta."""
+    # Aviso e apagamento juntos: tratados separados, o "----" final do
+    # aviso emendaria numa linha de traços da página seguinte.
+    apagar = r"(?:\x1b\[(\d+)D[ ]*\x1b\[\1D|\x08+[ ]*\x08+)"
+    texto = re.sub(rf"(?i)[ \t]*{NUCLEO_PAGINADOR}{apagar}", "", texto)
+    texto = re.sub(apagar, "", texto)
+    texto = re.sub(rf"(?i)[ \t]*{NUCLEO_PAGINADOR}[ \t]*$", "", texto)
+    return texto.replace("\r\n", "\n").replace("\r", "")
+
+
+def continuar_paginacao(conn, parcial, ip="-", limite_paginas=3000):
+    """Responde ao paginador até o prompt voltar.
+
+    Usado quando o comando de desligar a paginação não foi aceito pelo
+    equipamento: sem isso, cada comando esperaria o tempo-limite inteiro
+    parado em "---- More ----". A continuação é lida do canal sem
+    tratamento do Netmiko, para que as sequências de apagamento cheguem
+    inteiras e possam ser removidas sem tocar na indentação."""
+    canal = getattr(conn, "channel", None)
+    ler = canal.read_channel if canal is not None else conn.read_channel
+    prompt = re.escape(getattr(conn, "base_prompt", "") or "")
+    fim_prompt = re.compile(rf"{prompt}[^\r\n]{{0,40}}[>#\]$%]\s*$") if prompt \
+        else re.compile(r"[>#\]$%]\s*$")
+    bruto, paginas = "", 0
+    while paginas < limite_paginas:
+        conn.write_channel(" ")
+        paginas += 1
+        novo, parado = "", time.time()
+        while time.time() - parado < 15:
+            pedaco = ler()
+            if pedaco:
+                novo += pedaco
+                parado = time.time()
+                visivel = PADRAO_ANSI.sub("", novo)[-200:]
+                if PADRAO_PAGINADOR.search(visivel) or fim_prompt.search(visivel):
+                    break
+            else:
+                time.sleep(0.05)
+        bruto += novo
+        if not novo or fim_prompt.search(PADRAO_ANSI.sub("", novo)[-200:]):
+            break
+    depurar(ip, "paginacao", f"{paginas} página(s) respondida(s)")
+    saida = limpar_paginacao(parcial) + limpar_paginacao(bruto)
+    linhas = saida.rstrip().splitlines()
+    if linhas and fim_prompt.search(PADRAO_ANSI.sub("", linhas[-1])):
+        linhas = linhas[:-1]
+    return "\n".join(linhas)
+
+
+def vigiar_canal(conn, parar):
+    """Detecta queda da sessão SSH durante a leitura de um comando.
+
+    Quando o equipamento fecha a sessão, o canal do Paramiko apenas deixa de
+    ter dados, e o Netmiko espera o tempo-limite inteiro (180 s) antes de
+    desistir. Ao ver o canal fechado e sem dados pendentes, este vigia
+    desliga o canal do Netmiko, o que faz a leitura falhar na hora."""
+    canal_netmiko = getattr(conn, "channel", None)
+    canal = getattr(canal_netmiko, "remote_conn", None)
+    if canal is None or not hasattr(canal, "eof_received"):
+        return
+    while not parar.wait(1.0):
+        try:
+            fechado = canal.closed or canal.eof_received
+            if fechado and not canal.recv_ready():
+                canal_netmiko.remote_conn = None
+                return
+        except Exception:
+            return
 
 
 def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
     """Executa um comando de leitura e registra tempo e retorno no debug."""
     t0 = time.perf_counter()
     depurar(ip, "envia comando", cmd)
+    parar = threading.Event()
+    threading.Thread(target=vigiar_canal, args=(conn, parar),
+                     daemon=True).start()
     try:
         if usa_timing:
             saida = conn.send_command_timing(cmd, read_timeout=180, last_read=3)
@@ -2540,8 +2676,21 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
                     PADRAO_FIM_PROMPT.search(linhas[-1]) and \
                     " " not in linhas[-1].strip():
                 saida = "\n".join(linhas[:-1])
+            if PADRAO_PAGINADOR.search(PADRAO_ANSI.sub("", saida or "")[-200:]):
+                saida = continuar_paginacao(conn, saida, ip)
         else:
-            saida = conn.send_command(cmd, read_timeout=180)
+            # O fim da leitura é o prompt ou um paginador; no segundo caso o
+            # equipamento recusou desligar a paginação e as páginas são
+            # respondidas aqui.
+            base = re.escape(getattr(conn, "base_prompt", "") or "")
+            esperado = rf"(?:{base}|(?i:{NUCLEO_PAGINADOR}))" if base else None
+            if esperado:
+                saida = conn.send_command(cmd, read_timeout=180,
+                                          expect_string=esperado)
+            else:
+                saida = conn.send_command(cmd, read_timeout=180)
+            if PADRAO_PAGINADOR.search(PADRAO_ANSI.sub("", saida or "")[-200:]):
+                saida = continuar_paginacao(conn, saida, ip)
         dur = time.perf_counter() - t0
         bruto = len(saida or "")
         saida = normalizar_saida(saida, limite)
@@ -2557,6 +2706,8 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
         depurar(ip, "ERRO no comando",
                 f"{dur:.2f}s | {type(e).__name__}: {e} | cmd: {cmd[:120]}")
         return f"[ERRO ao executar comando: {e}]"
+    finally:
+        parar.set()
 
 
 def detectar_apps_linux(conn, prefixo_sudo):
