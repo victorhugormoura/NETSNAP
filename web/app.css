@@ -201,7 +201,7 @@ td.data, td.nome { white-space: nowrap; }
 .estado.ok, .estado.concluido, .estado.ativo, .estado.igual, .estado.dois-lados { background: var(--ok-fundo); color: var(--ok); }
 .estado.falha, .estado.falhou, .estado.alterado { background: var(--falha-fundo); color: var(--falha); }
 .estado.pendente, .estado.cancelado, .estado.aguardando-senha, .estado.sem-icmp,
-.estado.incompleta, .estado.telnet, .estado.com-segredos, .estado.pausado { background: var(--alerta-fundo); color: var(--alerta); }
+.estado.incompleta, .estado.incompleto, .estado.telnet, .estado.com-segredos, .estado.pausado { background: var(--alerta-fundo); color: var(--alerta); }
 .estado.executando, .estado.coletando, .estado.identificando, .estado.identificado { background: var(--acao-suave); color: var(--acao); }
 .estado.executando::before, .estado.coletando::before {
   content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
