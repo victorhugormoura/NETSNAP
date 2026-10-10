@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.15.1"
+__version__ = "1.16.0"
 
 import os
 import re
@@ -41,9 +41,17 @@ from netmiko.ssh_autodetect import SSHDetect
 from netmiko.terminal_server import TerminalServerTelnet
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 
+try:
+    # Diagnóstico da vizinhança (sem vizinhos, LLDP desligado, como ativar).
+    # O módulo acompanha o netsnap; sem ele, a coleta segue sem o aviso.
+    import netsnap_topologia as topologia
+except ImportError:
+    topologia = None
+
 # Suprime tracebacks da thread de transporte do Paramiko no console;
 # falhas de conexão são reportadas pelo próprio netsnap de forma resumida.
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+import paramiko  # noqa: E402  (dependência do Netmiko)
 
 PASTA_SAIDA = "snapshots"
 PRINT_LOCK = threading.Lock()
@@ -139,7 +147,7 @@ def preparar_ambiente() -> str:
     ]
     for pasta in candidatos:
         try:
-            os.makedirs(pasta, exist_ok=True)
+            os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
             with open(teste, "w") as f:
                 f.write("ok")
@@ -213,6 +221,10 @@ PERFIS = {
         ],
         "vizinhanca": [
             "show lldp neighbors",
+            # Forma detalhada (19.1R2+): nome completo do vizinho, Port ID e
+            # descrição da porta remota, endereço de gerência. Em releases
+            # anteriores o comando é recusado e vale a tabela acima.
+            "show lldp neighbors detail",
             # Distingue "sem vizinho" de "LLDP desabilitado": retorno vazio
             # em 'show lldp neighbors' não diz qual dos dois é o caso.
             "show lldp",
@@ -539,6 +551,9 @@ PERFIS = {
         ],
         "vizinhanca": [
             "/ip neighbor print detail without-paging",
+            # Interfaces e protocolos em que a descoberta está ativa: separa
+            # "sem vizinho" de "descoberta desligada".
+            "/ip neighbor discovery-settings print",
         ],
         "inventario": [
             "/system resource print",
@@ -807,11 +822,110 @@ class TelnetComLogin(TerminalServerTelnet):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Chave do servidor SSH: aprendida no primeiro acesso, conferida nos demais
+# ---------------------------------------------------------------------------
+# Sem isso o Netmiko aceita qualquer chave, e um equipamento no meio do
+# caminho (ARP spoofing na VLAN de gerência, roteador comprometido) recebe a
+# senha — em geral uma credencial TACACS/RADIUS válida no parque inteiro.
+# Equipamento já conhecido entra em modo estrito: chave diferente recusa a
+# conexão antes da autenticação. Equipamento novo tem a chave registrada
+# depois do primeiro acesso bem-sucedido. O arquivo só recebe acréscimos,
+# sob trava, para que coletas paralelas não percam registros.
+ARQUIVO_CHAVES_SSH = os.path.join(os.path.expanduser("~"),
+                                  ".netsnap_known_hosts")
+_TRAVA_CHAVES = threading.Lock()
+
+
+def _nome_chave(host, porta):
+    return host if int(porta or 22) == 22 else f"[{host}]:{porta}"
+
+
+def _chaves_conhecidas():
+    try:
+        if os.path.exists(ARQUIVO_CHAVES_SSH):
+            return paramiko.HostKeys(ARQUIVO_CHAVES_SSH)
+    except (OSError, paramiko.SSHException) as e:
+        depurar("-", "chaves ssh", f"arquivo ilegível: {type(e).__name__}")
+    return paramiko.HostKeys()
+
+
+def opcoes_chave_ssh(host, porta):
+    """Parâmetros do Netmiko para conferir a chave do servidor."""
+    if _chaves_conhecidas().lookup(_nome_chave(host, porta)):
+        return {"ssh_strict": True, "system_host_keys": False,
+                "alt_host_keys": True, "alt_key_file": ARQUIVO_CHAVES_SSH}
+    return {"ssh_strict": False, "system_host_keys": False,
+            "alt_host_keys": False}
+
+
+def registrar_chave_ssh(conn, host, porta):
+    """Grava a chave do servidor depois do primeiro acesso bem-sucedido."""
+    try:
+        chave = conn.remote_conn_pre.get_transport().get_remote_server_key()
+    except Exception:
+        return
+    nome = _nome_chave(host, porta)
+    with _TRAVA_CHAVES:
+        if _chaves_conhecidas().lookup(nome):
+            return
+        try:
+            novo = not os.path.exists(ARQUIVO_CHAVES_SSH)
+            with open(ARQUIVO_CHAVES_SSH, "a", encoding="ascii") as f:
+                f.write(f"{nome} {chave.get_name()} {chave.get_base64()}\n")
+            if novo and os.name == "posix":
+                os.chmod(ARQUIVO_CHAVES_SSH, 0o600)
+            depurar(host, "chave ssh", f"registrada ({chave.get_name()})")
+        except OSError as e:
+            depurar(host, "chave ssh", f"não registrada: {e}")
+
+
+class ChaveSSHDivergente(Exception):
+    """Chave do servidor diferente da registrada: a senha não foi enviada."""
+
+    def __init__(self, host):
+        super().__init__(
+            "a chave SSH do equipamento é diferente da registrada no "
+            "primeiro acesso — possível interceptação; a senha não foi "
+            "enviada. Se o equipamento foi trocado ou teve a chave refeita, "
+            f"apague a linha de {host} em {ARQUIVO_CHAVES_SSH} e colete de "
+            "novo")
+
+
+def _chave_divergente(e):
+    """O Netmiko embrulha a BadHostKeyException do paramiko numa
+    NetmikoTimeoutException; a original fica no contexto."""
+    while e is not None:
+        if isinstance(e, paramiko.BadHostKeyException):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def conectar_ssh(fabrica, host, porta, **parametros):
+    """Abre a conexão (ConnectHandler ou SSHDetect) com a chave conferida e,
+    no primeiro acesso, registrada."""
+    try:
+        objeto = fabrica(host=host, port=porta, **parametros,
+                         **opcoes_chave_ssh(host, porta))
+    except Exception as e:
+        if _chave_divergente(e):
+            raise ChaveSSHDivergente(host) from None
+        raise
+    registrar_chave_ssh(getattr(objeto, "connection", objeto), host, porta)
+    return objeto
+
+
 def abrir_conexao(**dispositivo):
-    """ConnectHandler, com o login Telnet genérico corrigido."""
+    """ConnectHandler, com o login Telnet genérico corrigido e a chave do
+    servidor SSH conferida."""
     if dispositivo.get("device_type") == "generic_telnet":
         return TelnetComLogin(**dispositivo)
-    return ConnectHandler(**dispositivo)
+    if dispositivo.get("device_type", "").endswith("_telnet"):
+        return ConnectHandler(**dispositivo)
+    host = dispositivo.pop("host")
+    porta = dispositivo.pop("port", 22)
+    return conectar_ssh(ConnectHandler, host, porta, **dispositivo)
 
 
 def ler_prompt_telnet(ip: str, porta: int, tempo: int = 6):
@@ -1828,60 +1942,220 @@ APPS_LINUX = {
 # ---------------------------------------------------------------------------
 # Remoção de dados sensíveis
 # ---------------------------------------------------------------------------
+# Os padrões abaixo, salvo os de PADROES_CAIXA, são escritos em minúsculas e
+# casados sobre uma cópia do texto em minúsculas (sanitizar() mantém as duas
+# versões alinhadas). O resultado é o mesmo de re.IGNORECASE, mas o mecanismo
+# de regex do Python só aproveita o prefixo literal de um padrão — e salta as
+# posições que não podem iniciar uma ocorrência — sem IGNORECASE: em uma
+# configuração de 12 MB a diferença é de vários segundos.
 _CHAVES = (
-    r"password|passwd|pwd|secret(?:[_-]?key)?|pre-shared-key|"
+    r"password|passwd|pwd(?!=/)|secret(?:[_-]?key)?|pre-shared-key|"
     r"authentication-key|auth-key|key-string|hello-password|cipher|"
     r"irreversible-cipher|shared-secret|wpa2?-pre-shared-key|private-key|"
-    r"privatekey|presharedkey|tcp-md5-key|bindpw|"
+    r"privatekey|presharedkey|preshared-key|shared-key|server-key|"
+    r"message-digest-key|privacy-key|community-name|password-value|"
+    r"password-auth|checkcode-auth|auth_pass|tcp-md5-key|bindpw|"
     r"dbpass|db_pass|api[_-]?key|access[_-]?key|auth[_-]?token|token"
+)
+# Só na forma chave=valor / chave: valor. Como palavra solta, nomeiam outras
+# coisas: 'community' também é comunidade BGP ("policy-options community X
+# members ..."), que não é segredo e é indispensável para ler as políticas;
+# 'pass' isolado seria ruído. Cobre YAML do Alertmanager/Prometheus/Grafana,
+# arquivos .env/provider.conf (ADMIN_PASS=) e o Wi-Fi do RouterOS 7
+# (passphrase=). 'pass' não vale no meio de palavra (bypass=).
+_CHAVES_ATRIBUICAO = (
+    r"community|credentials|service_key|routing_key|integration_?key|"
+    r"webhook_url|httpheadervalue\d*|senha|mailpass|"
+    r"pass(?<![a-z]pass)(?:phrase)?"
 )
 # Palavras que, entre a chave e o valor, qualificam o segredo sem sê-lo:
 # "password irreversible-cipher $1c$...", "enable secret 9 $9$...",
 # "authentication-key 1 type md5 value "$9$..."". Sem saltá-las, a
 # qualificação era mascarada e o hash seguia visível logo depois.
 _QUALIFICADOR = (
-    r"(?:(?:irreversible-cipher|cipher|simple|encrypted|plain(?:text)?|"
+    r"(?:(?:irreversible-cipher|cipher|simple|encrypted|plain(?:text)?|clear|"
     r"ascii-text|hexadecimal|hex|value|md5|sha\d*|aes(?:[ \t]*\d+)?|3?des|"
     r"type[ \t]+\S+|level[ \t]+\d+|\d{1,2})[ \t]+)*"
 )
-# Cifras Huawei (%^%#...%^%#, $1c$...$) e hashes crypt ($6$, $9$) contêm
-# vírgula, ponto e vírgula e aspas; vão até o próximo espaço. Encontrado em
-# campo: "password irreversible-cipher $1c$...,7A%8:M$..." deixava visível
-# tudo após a vírgula.
-_VALOR = (r"(%\^%#\S*|\$\d[a-z]?\$\S*|\"[^\"\n]*\"|'[^'\n]*'|[^\s;,]+)")
+# Cifras Huawei (%^%#...%^%#, %@%@, %$%$, %#%#, %+%#, $1c$...$) e hashes crypt
+# ($6$, $9$) contêm vírgula, ponto e vírgula e aspas; vão até o próximo
+# espaço. Encontrado em campo: "password irreversible-cipher $1c$...,7A%8:M$..."
+# deixava visível tudo após a vírgula. Aspas triplas: senha do grafana.ini
+# que contém '#' ou ';'.
+_VALOR = (r"(%[\^@$#+]%[#@$]\S*|\$\d[a-z]?\$\S*|\"\"\"[^\n]*?\"\"\"|"
+          r"\"[^\"\n]*\"|'[^'\n]*'|[^\s;,]+)")
+# Palavras que seguem 'password', 'secret', 'token' etc. sem serem o valor:
+# logs ("Failed password for", "token not found"), ajustes de política de
+# senha (Junos "password minimum-length", Huawei "password expire 90",
+# "user-password complexity-check", NX-OS "password strength-check") e os
+# destinos do keyring Cisco ("pre-shared-key address ...").
+_NAO_VALOR = (
+    r"(?:for|from|to|of|is|was|has|not|and|or|change|changed|change-type|"
+    r"expire|expired|expires|expiry|expiration|required|incorrect|invalid|"
+    r"mismatch|reset|policy|history|alert|complexity|complexity-check|"
+    r"strength-check|encryption|format|record|lifetime|prompt|recovery|"
+    r"authentication|(?:min|max)(?:imum)?-\S+|address|hostname|local|remote|"
+    r"foi|n[aã]o|para|de|do|da|em)"
+)
+_ARQUITETURAS = (r"(?:amd64|arm64|armhf|armel|i386|all|x86_64|noarch|"
+                 r"aarch64|i686|ppc64le|s390x)")
 PADROES_SENSIVEIS = [
-    # chave=valor e chave: valor. O trecho ["']?\]?["']? cobre formatos como
-    # $DB['PASSWORD'] = '...' (frontend PHP do Zabbix) e "password": "..."
-    # (JSON/YAML). 'community' entra apenas nesta forma: como palavra solta
-    # ela nomeia também comunidades BGP ("policy-options community X
-    # members ..."), que não são segredo e são indispensáveis para ler as
-    # políticas.
-    re.compile(r"(?i)((?:" + _CHAVES + r"|community)[\"']?\]?[\"']?[ \t]*[:=][ \t]*)"
-               + _VALOR),
+    # chave=valor, chave: valor e chave := valor (FreeRADIUS). O trecho
+    # ["']?\]?["']? cobre formatos como $DB['PASSWORD'] = '...' (frontend PHP
+    # do Zabbix) e "password": "..." (JSON/YAML). O esquema de um cabeçalho
+    # HTTP ("httpHeaderValue1: Basic X") é saltado. Não são valor: o
+    # "(using password: YES)" do MySQL e o rótulo PAM "passwd:chauthtok".
+    re.compile(r"((?:" + _CHAVES + r"|" + _CHAVES_ATRIBUICAO
+               + r")[\"']?\]?[\"']?[ \t]*(?::=|==|[:=])[ \t]*"
+               r"(?!(?:yes|no)\)|chauthtok\))"
+               r"(?:(?:basic|bearer|token)[ \t]+)?)" + _VALOR),
     # SNMP: a comunidade é a própria credencial.
-    re.compile(r"(?i)(snmp(?:-server|-agent)?[ \t]+community[ \t]+"
-               r"(?:(?:read|write)[ \t]+)?(?:(?:cipher|simple)[ \t]+)?)(\S+)"),
-    re.compile(r"(?im)^([ \t]*r[ow]community6?[ \t]+)(\S+)"),
-    re.compile(r"(?im)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(\S+)"),
-    # SNMPv3: "auth sha X priv aes 128 Y".
-    re.compile(r"(?i)(\b(?:auth|priv)[ \t]+(?:md5|sha\d*|aes(?:[ \t]*\d+)?|3?des)"
-               r"[ \t]+(?:encrypted[ \t]+)?)(\S+)"),
+    re.compile(r"(snmp(?:-server|-agent)?[ \t]+community[ \t]+"
+               r"(?:(?:read|write)[ \t]+)?(?:(?:cipher|simple)[ \t]+)?)"
+               r"(\"[^\"\n]*\"|\S+)"),
+    re.compile(r"(?m)^([ \t]*r[ow]community6?[ \t]+)(\S+)"),
+    re.compile(r"(?m)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(\S+)"),
+    # SNMPv3: "auth sha X priv aes 128 Y" (NX-OS: "priv aes-128 Y").
+    re.compile(r"((?:auth|priv)(?<!\w....)[ \t]+(?:md5|sha\d*|aes(?:[ \t-]*\d+)?|"
+               r"3?des)[ \t]+(?:encrypted[ \t]+)?)(\S+)"),
     # "key" isolado só quando seguido de tipo numérico (Cisco: "tacacs-server
     # key 7 X") ou de valor entre aspas/cifrado (Junos: 'key "$9$..."').
-    re.compile(r"(?i)((?<![\w-])key[ \t]+\d{1,2}[ \t]+)(\S+)"),
-    re.compile(r"(?i)((?<![\w-])key[ \t]+)(\"[^\"\n]*\"|\$\S+)"),
+    # Junos "key 0 secret ..." deixa o valor para o padrão de 'secret'; no
+    # BIND, 'key "nome" {' e 'key "nome";' nomeiam a chave TSIG, não a contêm.
+    re.compile(r"(key(?<![\w-]key)[ \t]+\d{1,2}[ \t]+)"
+               r"(?!(?:secret|key-string|algorithm|start-time)\b)(\S+)"),
+    re.compile(r"(key(?<![\w-]key)[ \t]+)(\"[^\"\n]*\"|\$\S+)(?![ \t]*[{;])"),
     # chave valor, na mesma linha, com qualificadores opcionais.
     # Não tomam o lugar do valor: verbos de menu do RouterOS ("/ppp secret
-    # add") e nomes de algoritmo ("ssh server cipher aes256_ctr").
-    re.compile(r"(?i)((?:" + _CHAVES + r")[ \t]+" + _QUALIFICADOR + r")(?![=:])"
+    # add"), nomes de algoritmo ("ssh server cipher aes256_ctr"), as palavras
+    # de _NAO_VALOR, outro atributo do RouterOS ("pre-shared-key peer=X"),
+    # o nome entre <> do log do RouterOS ("ppp secret <cliente> changed"), uma
+    # opção de linha de comando ("-w /etc/passwd -p wa"), o fecho de lista
+    # (Junos "authentication-order [ radius password ]") e a versão de uma
+    # linha do dpkg/rpm ("passwd<TAB>1:4.13<TAB>amd64").
+    re.compile(r"((?:" + _CHAVES + r")[ \t]+" + _QUALIFICADOR + r")(?![=:])"
                r"(?!(?:add|set|print|remove|edit|export)\b)"
                r"(?!(?:aes|3?des|sha|hmac|chacha|arcfour)[\w-]*(?:\s|$))"
+               r"(?!" + _NAO_VALOR + r"(?![\w-]))"
+               r"(?![a-z][\w.-]*=[^\s=])(?![<\])]|-\w(?:\s|$))"
+               r"(?!\S+[ \t]+" + _ARQUITETURAS + r"(?:\s|$))"
                + _VALOR),
     re.compile(r"(ssh-(?:rsa|ed25519|dss)[ \t]+)(\S+)"),
 ]
-# O fim é opcional: uma saída truncada pelo limite de tamanho pode cortar o
-# bloco antes do END, e nesse caso todo o restante é suprimido.
-PADRAO_CERT = re.compile(r"-----BEGIN[^-\n]*-----[\s\S]*?(?:-----END[^-\n]*-----|\Z)")
+# Padrões específicos de plataforma ou de formato. Cada um traz palavras de
+# guarda: sem nenhuma delas no texto, o padrão nem é executado.
+PADROES_ESPECIFICOS = [
+    # Credencial embutida em URL: mysql://usuario:senha@host, redis://:senha@h.
+    (("://",), re.compile(r"(://[^\s:/@'\"]*:)([^\s@/'\"]+)(?=@)")),
+    # Cisco: comunidade v1/v2c do destino de trap (v3 traz o usuário).
+    (("snmp-server",), re.compile(
+        r"(snmp-server[ \t]+host[ \t]+\S+(?:[ \t]+(?:traps|informs|"
+        r"version[ \t]+(?:1|2c)|vrf[ \t]+\S+|encrypted|clear))*[ \t]+)"
+        r"(?!(?:traps|informs|version|vrf|use-vrf|source-interface|"
+        r"filter-vrf|udp-port|encrypted|clear)\b)(\S+)")),
+    # Huawei: no v1/v2c o securityname do target-host é a comunidade (no v3
+    # é o usuário, que fica).
+    (("target-host",), re.compile(
+        r"(snmp-agent[ \t]+target-host\b[^\n]{0,300}?\bsecurityname[ \t]+"
+        r"(?:cipher[ \t]+)?)" + _VALOR + r"(?=[ \t]+v(?:1|2c)\b|[ \t]*(?:\n|$))")),
+    # net-snmp: após o protocolo de autenticação tudo é senha; destinos de
+    # trap e comunidades do snmptrapd.
+    (("createuser",), re.compile(
+        r"(?m)^([ \t]*createuser[ \t]+(?:-e[ \t]+\S+[ \t]+)?\S+[ \t]+\S+[ \t]+)(.+)$")),
+    (("sink", "community"), re.compile(
+        r"(?m)^([ \t]*(?:trap2?sink|informsink)[ \t]+\S+[ \t]+|"
+        r"[ \t]*trapcommunity[ \t]+|[ \t]*authcommunity[ \t]+\S+[ \t]+)(\S+)")),
+    # SNMPv3 'priv' sem algoritmo (NX-OS "priv 0x... localizedkey"). Restrito
+    # à linha do usuário: em "snmp-server group G v3 priv read V" a palavra
+    # seguinte é a view.
+    (("priv",), re.compile(
+        r"((?:snmp-server[ \t]+user|usm-user)\b[^\n]{0,300}?"
+        r"\bpriv[ \t]+(?:(?:aes(?:[ \t-]*\d+)?|3?des)[ \t]+)?"
+        r"(?:encrypted[ \t]+)?)(\S+)")),
+    # Chave em claro de RADIUS, TACACS+ e IKE, inclusive no log de comandos
+    # ("logged command:crypto isakmp key X address ...").
+    (("isakmp", "radius-server", "tacacs-server"), re.compile(
+        r"((?:crypto[ \t]+isakmp|tacacs-server|radius-server)[ \t]"
+        r"[^\n]{0,200}?(?<![\w-])key[ \t]+(?:[0-9][ \t]+)?)"
+        r"(?!(?:address|hostname)\b)(\S+)")),
+    # IOS-XE: linha 'key X' dentro de "tacacs server"/"radius server". Só
+    # dígitos é o identificador de "key chain" (" key 1"), que fica.
+    (("key",), re.compile(
+        r"(?m)^([ \t]+key[ \t]+)(?!\d+[ \t]*$)(?![=:{\"$])(\S+)[ \t]*$")),
+    # Cisco: keyring ("pre-shared-key address A key X") e IKEv2
+    # ("pre-shared-key local X").
+    (("pre-shared-key",), re.compile(
+        r"(pre-shared-key[ \t]+(?:(?:address|hostname)[ \t]+\S+"
+        r"(?:[ \t]+\d+\.\d+\.\d+\.\d+)?[ \t]+key|local|remote)[ \t]+"
+        r"(?:[0-9][ \t]+)?)(\S+)")),
+    # Huawei: "authentication-mode md5 1 plain X", "simple plain X" e a senha
+    # SNMPv3 em claro do VRP V5 ("authentication-mode md5 X").
+    (("-mode",), re.compile(
+        r"(authentication-mode[ \t]+(?:\S+[ \t]+){0,3}?(?:plain|cipher)"
+        r"[ \t]+)" + _VALOR)),
+    (("-mode",), re.compile(
+        r"((?:authentication|privacy)-mode[ \t]+"
+        r"(?:md5|sha\S*|des\S*|aes\S*|3des\S*)[ \t]+)"
+        r"(?!(?:cipher|plain|simple|usual|nonstandard)\b|\d{1,3}(?:\s|$))(\S+)")),
+    # HSRP e Wi-Fi em texto claro (Cisco).
+    (("standby",), re.compile(
+        r"(?m)^([ \t]*standby[ \t]+(?:\d+[ \t]+)?authentication[ \t]+"
+        r"(?:text[ \t]+)?)(?!md5\b)(\S+)")),
+    (("wpa-psk",), re.compile(r"(wpa-psk[ \t]+(?:ascii|hex)[ \t]+\d[ \t]+)(\S+)")),
+    # Cabeçalho HTTP de autenticação (Apache, nginx, curl -H, /tool fetch).
+    (("authorization",), re.compile(
+        r"(authorization(?<!\wauthorization)[\"']?(?:[ \t]*[:=][ \t]*[\"']?"
+        r"(?:(?:basic|bearer|token|digest)[ \t]+)?|"
+        r"[ \t]+[\"']?(?:basic|bearer|token|digest)[ \t]+))"
+        r"(?![{\[])([^\s\"',;\\]+)")),
+    (("bearer",), re.compile(
+        r"(bearer(?<!\wbearer)[ \t]+)(?=[\w.~+/=-]*\d)([\w.~+/-]{16,}=*)")),
+    (("hooks.slack.com", "discord"), re.compile(
+        r"(hooks\.slack\.com/services/|discord(?:app)?\.com/api/webhooks/)([\w/-]+)")),
+    # Hash crypt solto (/etc/shadow, htpasswd, valor $9$ fora de palavra-chave
+    # conhecida). O prefixo, que indica o algoritmo, fica visível.
+    (("$",), re.compile(
+        r"(\$(?<![\w$]\$)(?:1|2[abxy]?|5|6|7|8|9|y|gy|apr1)\$)"
+        r"(?=[./0-9$=-]*[a-z])([./a-z0-9$=-]{8,})")),
+    # Frases de log e de instalação: "Senha do Grafana: X",
+    # "Generated password for admin: X".
+    (("password", "senha"), re.compile(
+        r"((?:password|senha)(?:[ \t]+(?:gerada|inicial|padr[aã]o|"
+        r"provis[oó]ria|generated|initial|default|temporary))?"
+        r"(?:[ \t]+(?:for|of|do|da|de|para|to)[ \t]+[\w.@-]+)?[ \t]*:(?!=)[ \t]*)"
+        r"(?!(?:yes|no)\))" + _VALOR)),
+]
+# Padrões que dependem da caixa e por isso casam sobre o texto original:
+# '-p' é a senha do mysql e '-P' a porta; '-c' é a credencial do ttyd e
+# '-C' o certificado; tokens de formato conhecido (Telegram "<id>:<35
+# caracteres>", com o id preservado; JWT; AWS; GitHub/GitLab; Slack).
+PADROES_CAIXA = [
+    (("mysql",), re.compile(
+        r"(mysql(?<!\wmysql)(?:dump|admin)?\b[^\n]{0,300}?[ \t]-p)(\S+)")),
+    (("sshpass",), re.compile(r"(sshpass(?<!\wsshpass)[^\n]{0,300}?[ \t]-p[ \t]*)(\S+)")),
+    (("curl",), re.compile(
+        r"(curl(?<!\wcurl)[^\n]{0,300}?[ \t](?:-u|--user)[ \t=]*[^\s:]+:)(\S+)")),
+    (("ttyd",), re.compile(
+        r"(ttyd(?<!\wttyd)[^\n]{0,200}?[ \t](?:-c|--credential)[ \t=]+[^\s:]+:)(\S+)")),
+    (("lftp", "smbclient"), re.compile(
+        r"(lftp(?<!\wlftp)[^\n]{0,200}?[ \t]-u[ \t]+[^\s,]+,|"
+        r"smbclient[^\n]{0,200}?[ \t](?:-U|--user)[ \t=]*[^\s%]+%)(\S+)")),
+    ((":",), re.compile(
+        r"(\d{6,12}:)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])([\w-]{30,40})(?![\w-])")),
+    (("eyJ",), re.compile(r"(eyJ)(?<![\w-]eyJ)[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}")),
+    (("AKIA", "ASIA"), re.compile(r"(AKIA|ASIA)(?<!\w....)[0-9A-Z]{16}\b")),
+    (("gh", "glpat-", "xox"), re.compile(
+        r"(gh[pousr]_|github_pat_|glpat-|xox[abposr]-)(?=[\w-]{20})[\w-]+")),
+]
+_MARCA = "***REMOVIDO***"
+# Blocos PEM completos. Sem o END (saída truncada pelo limite de tamanho, ou
+# um BEGIN citado num log), uma chave privada leva consigo todo o restante da
+# saída; nos demais blocos (certificados), só o cabeçalho e as linhas em
+# base64 que o seguem — antes, um BEGIN solto apagava a saída inteira.
+PADRAO_CERT = re.compile(r"-----BEGIN[^-\n]*-----(?:[^-]|-(?!----(?:BEGIN|END)))*"
+                         r"-----END[^-\n]*-----")
+PADRAO_CHAVE_ABERTA = re.compile(r"-----BEGIN[^-\n]*PRIVATE KEY[^-\n]*-----[\s\S]*\Z")
+PADRAO_CERT_ABERTO = re.compile(r"-----BEGIN[^-\n]*-----(?:\r?\n[A-Za-z0-9+/=]{16,}\r?)*")
 # MikroTik: o nome da comunidade SNMP aparece como "name=" dentro do bloco
 # "/snmp community" do export, sem palavra-chave que o denuncie.
 PADRAO_BLOCO_SNMP_MIKROTIK = re.compile(
@@ -1907,19 +2181,47 @@ def _suprimir_arquivo(m):
     return f"{m.group(1)}\n***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***"
 
 
+def _mascarar(padrao, texto, minusculo):
+    """Equivale a padrao.sub(r"\\1***REMOVIDO***", texto), com o padrão casado
+    sobre 'minusculo' (mesmo comprimento de 'texto'). Devolve as duas versões
+    atualizadas, que seguem alinhadas para o padrão seguinte."""
+    pecas, pecas_min, inicio = [], [], 0
+    for m in padrao.finditer(minusculo):
+        corte = m.end(1)
+        pecas += [texto[inicio:corte], _MARCA]
+        pecas_min += [minusculo[inicio:corte], _MARCA.lower()]
+        inicio = m.end()
+    if not pecas:
+        return texto, minusculo
+    pecas.append(texto[inicio:])
+    pecas_min.append(minusculo[inicio:])
+    return "".join(pecas), "".join(pecas_min)
+
+
 def sanitizar(texto: str) -> str:
     texto = PADRAO_CERT.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
+    texto = PADRAO_CHAVE_ABERTA.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
+    texto = PADRAO_CERT_ABERTO.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
     texto = PADRAO_ARQUIVO_SEGREDO.sub(_suprimir_arquivo, texto)
     texto = PADRAO_BLOCO_SNMP_MIKROTIK.sub(_mascarar_snmp_mikrotik, texto)
+    for guardas, padrao in PADROES_CAIXA:
+        if any(g in texto for g in guardas):
+            texto = padrao.sub(r"\1" + _MARCA, texto)
+    # U+0130 (İ) é o único caractere cujo lower() tem dois caracteres; a
+    # troca prévia mantém o alinhamento posicional entre as duas versões.
+    minusculo = texto.replace("\u0130", "i").lower()
+    for guardas, padrao in PADROES_ESPECIFICOS:
+        if any(g in minusculo for g in guardas):
+            texto, minusculo = _mascarar(padrao, texto, minusculo)
     for padrao in PADROES_SENSIVEIS:
-        texto = padrao.sub(r"\1***REMOVIDO***", texto)
+        texto, minusculo = _mascarar(padrao, texto, minusculo)
     return texto
 
 
 # O systemd emprega cores de 256 níveis no formato \x1b[0;38:5:245m, com
 # dois-pontos como separador de parâmetro (ITU-T T.416). Sem ele na
 # classe, a sequência atravessa o filtro e vai parar no relatório.
-PADRAO_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+PADRAO_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 def nome_seguro(texto: str) -> str:
@@ -2212,11 +2514,15 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
 
     Devolve (situacao, banner). A situação separa casos que pedem ações
     diferentes do operador:
-      ok          banner recebido
-      recusada    nada escuta na porta (serviço desligado ou outra porta)
+      ok            banner recebido
+      recusada      nada escuta na porta (serviço desligado ou outra porta)
       sem_resposta  nenhuma resposta TCP (host fora, ACL, firewall)
-      sem_banner  conexão aceita, mas o servidor não se identificou —
-                  típico de limite de sessões ou proteção contra força bruta
+      fechada       conexão aceita e encerrada pelo servidor sem banner —
+                    restrição de origem no serviço (lista de endereços
+                    permitidos, TCP wrappers) ou excesso de conexões
+                    (MaxStartups e equivalentes)
+      sem_banner    conexão aceita, servidor em silêncio até o fim do prazo —
+                    típico de limite de sessões ou proteção contra força bruta
     """
     try:
         s = socket.create_connection((ip, porta), timeout=tempo)
@@ -2224,6 +2530,7 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
         return "recusada", None
     except OSError:
         return "sem_resposta", None
+    encerrada = False
     with s:
         s.settimeout(tempo)
         dados = b""
@@ -2231,12 +2538,17 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
             while b"\n" not in dados and len(dados) < 512:
                 pedaco = s.recv(256)
                 if not pedaco:
+                    encerrada = True
                     break
                 dados += pedaco
-        except OSError:
+        except socket.timeout:
             pass
+        except OSError:
+            encerrada = True
     banner = dados.decode("utf-8", "replace").strip()
-    return ("ok", banner) if banner else ("sem_banner", None)
+    if banner:
+        return "ok", banner
+    return ("fechada" if encerrada else "sem_banner"), None
 
 
 MOTIVO_SONDAGEM = {
@@ -2244,10 +2556,18 @@ MOTIVO_SONDAGEM = {
                 "em outra porta)",
     "sem_resposta": "sem resposta TCP na porta {porta} (host fora do ar, "
                     "ACL ou firewall)",
+    "fechada": "a porta {porta} aceitou a conexão e a encerrou sem enviar o "
+               "banner SSH, também na segunda tentativa — provável restrição "
+               "de origem no serviço SSH (endereços permitidos, TCP wrappers) "
+               "ou limite de conexões simultâneas",
     "sem_banner": "porta {porta} aberta, mas o equipamento não enviou o "
-                  "banner SSH — provável limite de sessões simultâneas ou "
-                  "proteção contra força bruta",
+                  "banner SSH, também na segunda tentativa — provável limite "
+                  "de sessões simultâneas ou proteção contra força bruta",
 }
+
+# Situações transitórias da sondagem: valem uma segunda tentativa.
+SONDAGEM_TRANSITORIA = ("fechada", "sem_banner")
+ESPERA_NOVA_SONDAGEM = 10
 
 
 def ler_banner(ip: str, porta: int, tempo: int = 4):
@@ -2306,6 +2626,19 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo,
                                    f"{'confirmado' if ok else 'nao confere'} "
                                    f"({resumir_saida(saida, 120)})")
         return ok
+    except ChaveSSHDivergente:
+        depurar(ip, "confirmacao", f"{tipo}: chave SSH diferente da registrada")
+        raise
+    except NetmikoAuthenticationException as e:
+        depurar(ip, "confirmacao", f"{tipo}: falhou ({type(e).__name__}: {e})")
+        # No SSH a autenticação acontece antes de qualquer comando e não
+        # depende da plataforma: repetir com outro candidato só gasta
+        # tentativas de login e pode bloquear o usuário (retry-options do
+        # Junos, fail2ban). No Telnet o login é conduzido pelo driver, e uma
+        # recusa pode vir de um driver que não reconheceu o pedido de senha.
+        if protocolo == "ssh":
+            raise
+        return False
     except Exception as e:
         depurar(ip, "confirmacao", f"{tipo}: falhou ({type(e).__name__}: {e})")
         return False
@@ -2356,6 +2689,10 @@ def eh_linux(ip, usuario, senha, porta, protocolo="ssh") -> bool:
                             port=porta, timeout=20, conn_timeout=12) as conn:
             saida = conn.send_command("uname -s", read_timeout=15)
         return "Linux" in saida
+    except NetmikoAuthenticationException:
+        if protocolo == "ssh":
+            raise
+        return False
     except Exception:
         return False
 
@@ -2430,6 +2767,13 @@ def detectar(ip, usuario, senha, porta, protocolo="ssh"):
         return detectar_telnet(ip, usuario, senha, porta)
     t0 = time.perf_counter()
     situacao, banner = sondar_ssh(ip, porta)
+    if situacao in SONDAGEM_TRANSITORIA:
+        depurar(ip, "banner", f"{situacao}; nova tentativa em "
+                              f"{ESPERA_NOVA_SONDAGEM}s")
+        log(ip, f"banner SSH não recebido; nova tentativa em "
+                f"{ESPERA_NOVA_SONDAGEM}s ...")
+        time.sleep(ESPERA_NOVA_SONDAGEM)
+        situacao, banner = sondar_ssh(ip, porta)
     if situacao != "ok":
         motivo = MOTIVO_SONDAGEM[situacao].format(porta=porta)
         depurar(ip, "banner", motivo)
@@ -2463,9 +2807,9 @@ def detectar(ip, usuario, senha, porta, protocolo="ssh"):
     for tentativa in range(2):
         try:
             t1 = time.perf_counter()
-            guesser = SSHDetect(device_type="autodetect", host=ip,
-                                username=usuario, password=senha, port=porta,
-                                timeout=20, conn_timeout=15)
+            guesser = conectar_ssh(SSHDetect, ip, porta,
+                                   device_type="autodetect", username=usuario,
+                                   password=senha, timeout=20, conn_timeout=15)
             detectado = guesser.autodetect()
             depurar(ip, "SSHDetect",
                     f"retornou {detectado!r} em {time.perf_counter()-t1:.2f}s")
@@ -2473,6 +2817,9 @@ def detectar(ip, usuario, senha, porta, protocolo="ssh"):
             break
         except NetmikoAuthenticationException:
             depurar(ip, "SSHDetect", "falha de autenticacao")
+            raise
+        except ChaveSSHDivergente:
+            depurar(ip, "SSHDetect", "chave SSH diferente da registrada")
             raise
         except Exception as e:
             ultimo_erro = e
@@ -2582,7 +2929,9 @@ def sessao_perdida(saida: str) -> bool:
         r"stream closed by remote)", saida or ""))
 
 
-NUCLEO_PAGINADOR = (r"(?:-{2,}\s*\(?\s*more\b[^\r\n]{0,40}?-{2,}|--more--|"
+# O "(?<!-)" e o "[ \t]*" evitam custo quadrático numa linha longa de traços:
+# sem eles, cada traço era ponto de partida de uma nova tentativa.
+NUCLEO_PAGINADOR = (r"(?:(?<!-)-{2,}[ \t]*(?:\([ \t]*)?more\b[^\r\n]{0,40}?-{2,}|--more--|"
                     r"press any key to continue|-- \[Q quit\|[^\]\r\n]*\])")
 PADRAO_PAGINADOR = re.compile(rf"(?i){NUCLEO_PAGINADOR}\s*$")
 def limpar_paginacao(texto):
@@ -2594,9 +2943,9 @@ def limpar_paginacao(texto):
     # Aviso e apagamento juntos: tratados separados, o "----" final do
     # aviso emendaria numa linha de traços da página seguinte.
     apagar = r"(?:\x1b\[(\d+)D[ ]*\x1b\[\1D|\x08+[ ]*\x08+)"
-    texto = re.sub(rf"(?i)[ \t]*{NUCLEO_PAGINADOR}{apagar}", "", texto)
+    texto = re.sub(rf"(?i)(?<![ \t])[ \t]*{NUCLEO_PAGINADOR}{apagar}", "", texto)
     texto = re.sub(apagar, "", texto)
-    texto = re.sub(rf"(?i)[ \t]*{NUCLEO_PAGINADOR}[ \t]*$", "", texto)
+    texto = re.sub(rf"(?i)(?<![ \t])[ \t]*{NUCLEO_PAGINADOR}[ \t]*$", "", texto)
     return texto.replace("\r\n", "\n").replace("\r", "")
 
 
@@ -2681,9 +3030,19 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
         else:
             # O fim da leitura é o prompt ou um paginador; no segundo caso o
             # equipamento recusou desligar a paginação e as páginas são
-            # respondidas aqui.
-            base = re.escape(getattr(conn, "base_prompt", "") or "")
-            esperado = rf"(?:{base}|(?i:{NUCLEO_PAGINADOR}))" if base else None
+            # respondidas aqui. O prompt é o completo, como no padrão do
+            # Netmiko: o nome base sozinho aparece na própria saída (sysname
+            # na configuração, hostname nos logs) e encerraria a leitura no
+            # primeiro trecho recebido. O paginador só conta no fim do que
+            # já chegou (seguido, no máximo, de espaços e códigos de terminal),
+            # quando o equipamento parou à espera de uma tecla.
+            try:
+                prompt = (conn.find_prompt() or "").strip()
+            except Exception:
+                prompt = ""
+            esperado = (rf"(?:{re.escape(prompt)}|"
+                        rf"(?i:{NUCLEO_PAGINADOR})"
+                        rf"(?:\x1b\[[0-9;?]*[A-Za-z]|\s)*$)") if prompt else None
             if esperado:
                 saida = conn.send_command(cmd, read_timeout=180,
                                           expect_string=esperado)
@@ -2737,6 +3096,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
         "conn_timeout": 15,
     }
     usa_timing = perfil.get("timing", False)
+    diag_vizinhanca = None
     blocos = []          # (titulo, [(cmd, saida)])
     apps_detectados = []
     contexto_usado = False
@@ -2756,8 +3116,14 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
         for cmd in perfil.get("prep", []):
             try:
                 saida = conn.send_command_timing(cmd, read_timeout=20)
-                if saida and re.search(r"(?i)password|senha", saida[-120:]):
-                    saida = conn.send_command_timing(senha, read_timeout=20)
+                # Só um pedido de senha no fim da saída recebe a senha. Antes
+                # bastava a palavra aparecer ("% Bad password", por exemplo), e
+                # a senha era digitada como comando no prompt — e o eco ia
+                # para o log de depuração. O retorno não é registrado.
+                if saida and re.search(r"(?i)(?:password|senha)\s*:\s*$",
+                                       saida):
+                    conn.send_command_timing(senha, read_timeout=20)
+                    saida = "[senha enviada; retorno não registrado]"
                     depurar(ip, "prep", f"{cmd}: senha solicitada e enviada")
                 if cmd in ("enable", "config", "configure"):
                     contexto_usado = True
@@ -2831,6 +3197,8 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                     depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
             if saidas:
                 blocos.append((TITULOS[secao], saidas))
+            if secao == "vizinhanca" and saidas and not perdeu_sessao:
+                diag_vizinhanca = avaliar_vizinhanca(ip, tipo, saidas)
             if perdeu_sessao:
                 break
 
@@ -2880,14 +3248,50 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
     arquivo = escrever_relatorio(
         ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         incluir_sensivel, apps_detectados, contexto_usado, protocolo,
-        perdeu_sessao,
+        perdeu_sessao, diag_vizinhanca,
     )
     return arquivo, hostname
 
 
+def avaliar_vizinhanca(ip, tipo, saidas):
+    """Informa no log quantos vizinhos LLDP/CDP o equipamento tem e, quando
+    não há nenhum, o motivo provável e como ativar o protocolo na
+    plataforma. Devolve o diagnóstico, ou None sem o módulo de topologia."""
+    if topologia is None:
+        return None
+    try:
+        diag = topologia.diagnosticar_vizinhanca(tipo, saidas)
+    except Exception as e:
+        depurar(ip, "vizinhanca", f"diagnostico falhou: {type(e).__name__}: {e}")
+        return None
+    depurar(ip, "vizinhanca", f"{diag['estado']} ({diag['vizinhos']} vizinhos)")
+    if diag["vizinhos"]:
+        log(ip, f"vizinhança: {diag['vizinhos']} vizinho(s) LLDP/CDP")
+        return diag
+    log(ip, f"[AVISO] vizinhança: {diag['motivo']}")
+    ativar = diag["como_ativar"]
+    if ativar["comandos"]:
+        log(ip, "  para ativar: "
+                + " ; ".join(c.strip() for c in ativar["comandos"]))
+    if ativar["nota"]:
+        log(ip, "  " + ativar["nota"])
+    return diag
+
+
+def cerca_markdown(texto):
+    """Delimitador do bloco de código: três crases, ou uma a mais que a
+    maior sequência de crases da saída. A saída do equipamento não é
+    escapada, e uma linha com três crases (num banner, num arquivo de um
+    servidor) fecharia o bloco e faria o resto ser lido como estrutura do
+    snapshot — seções e comandos forjados."""
+    maior = max((len(s) for s in re.findall(r"`+", texto or "")), default=0)
+    return "`" * max(3, maior + 1)
+
+
 def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
                        incluir_sensivel, apps, contexto_usado,
-                       protocolo="ssh", sessao_encerrada=False):
+                       protocolo="ssh", sessao_encerrada=False,
+                       vizinhanca=None):
     agora = datetime.now()
     meta = {
         "netsnap_version": __version__,
@@ -3003,6 +3407,14 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
             "sessão que o originou era legível por qualquer sistema no "
             "caminho de rede. Quando a plataforma suportar SSH, prefira-o.\n"
         )
+    if vizinhanca and not vizinhanca["vizinhos"]:
+        ativar = vizinhanca["como_ativar"]
+        comandos = "; ".join(f"`{c.strip()}`" for c in ativar["comandos"])
+        md.append(
+            f"> **Vizinhança:** {vizinhanca['motivo']}."
+            + (f" Para ativar: {comandos}." if comandos else "")
+            + (f" {ativar['nota']}" if ativar["nota"] else "") + "\n"
+        )
     if contexto_usado and perfil.get("contexto"):
         md.append(
             "> **Nota de contexto:** esta plataforma exige contexto "
@@ -3026,9 +3438,10 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
                 resumo = " ".join((out or "").split())[:180]
                 md.append(f"_(sem saída útil — retorno: `{resumo or 'vazio'}`)_\n")
             else:
-                md.append("```text")
+                cerca = cerca_markdown(out)
+                md.append(cerca + "text")
                 md.append(out.rstrip())
-                md.append("```\n")
+                md.append(cerca + "\n")
 
     # O IP passa por nome_seguro: em IPv6 os dois-pontos criariam, no
     # Windows, um fluxo alternativo NTFS em vez do arquivo. A abertura em
@@ -3333,6 +3746,10 @@ def imprimir_resumo(resultados, duracao, titulo="RESUMO", sessao=None):
 
 
 def main():
+    # Snapshots, relatórios e logs descrevem a rede: legíveis só pelo dono
+    # (em Linux e macOS; no Windows valem as permissões da pasta).
+    if os.name == "posix":
+        os.umask(0o077)
     global DEBUG
     if "--debug" in sys.argv:
         DEBUG = True

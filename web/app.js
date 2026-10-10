@@ -145,9 +145,12 @@ function markdown(texto) {
   for (; i < linhas.length; i++) {
     const l = linhas[i];
     if (l.startsWith("```")) {
+      // Fecha só com o mesmo delimitador que abriu (o netsnap usa mais
+      // crases que qualquer sequência presente na saída do equipamento).
       fecharPar();
+      const cerca = l.match(/^`+/)[0];
       const buf = [];
-      for (i++; i < linhas.length && linhas[i] !== "```"; i++) buf.push(linhas[i]);
+      for (i++; i < linhas.length && linhas[i].replace(/\r$/, "") !== cerca; i++) buf.push(linhas[i]);
       out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
       continue;
     }
@@ -744,6 +747,58 @@ async function vComparar(arquivoInicial) {
 }
 
 /* ------------------------------------------------------------ topologia */
+const TIPO_ENLACE = { lldp: "LLDP/CDP", l3: "L3" };
+
+async function svgDaTopologia(todos) {
+  const r = await fetch(`/api/topologia/desenho?formato=svg&todos=${todos ? 1 : 0}`,
+    { headers: { "X-Netsnap-Token": S.token } });
+  if (!r.ok) throw new Error((await r.json()).erro || `Erro ${r.status}`);
+  return r.text();
+}
+
+// O PNG sai do mesmo SVG do servidor, desenhado num canvas com o dobro da
+// resolução (limitado ao tamanho que os navegadores aceitam).
+function pngDoSvg(svg) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const img = new Image();
+    img.onload = () => {
+      const escala = Math.min(2, 16000 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * escala);
+      c.height = Math.round(img.height * escala);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error("Falha ao gerar o PNG"))), "image/png");
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Falha ao ler o desenho")); };
+    img.src = url;
+  });
+}
+
+function baixarBlob(nome, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = nome; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+}
+
+function carimbo() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function comoAtivar(s) {
+  const a = s.como_ativar || { comandos: [], nota: "" };
+  if (!a.comandos.length && !a.nota) return "";
+  return `${a.comandos.length ? `<pre class="comandos">${esc(a.comandos.join("\n"))}</pre>` : ""}
+    ${a.nota ? `<p class="suave pequeno">${esc(a.nota)}</p>` : ""}`;
+}
+
 async function vTopologia() {
   const g = await api("GET", "topologia");
   const nos = {};
@@ -755,30 +810,85 @@ async function vTopologia() {
   };
   const naoColetados = g.nos.filter((n) => !n.coletado);
   const comIp = naoColetados.filter((n) => n.ips_gerencia.some((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip)));
+  const confirmados = g.enlaces.filter((e) => e.confirmado);
   tela(`<div class="cabecalho-linha"><div><h1>Topologia</h1>
-      <p class="lead">Enlaces lidos do LLDP/CDP do snapshot mais recente de cada equipamento. É a base do desenho automático da rede, que virá num módulo próprio.</p></div>
+      <p class="lead">Enlaces lidos do LLDP/CDP e do endereçamento ponto a ponto das configurações, no snapshot mais recente de cada equipamento.</p></div>
       <div class="acoes"><button type="button" id="topo-salvar">Salvar JSON</button></div></div>
     <div class="faixa">
       <div><strong>${g.nos.filter((n) => n.coletado).length}</strong><span>coletados</span></div>
       <div><strong>${naoColetados.length}</strong><span>vizinhos ainda não coletados</span></div>
       <div><strong>${g.enlaces.length}</strong><span>enlaces</span></div>
-      <div><strong>${g.enlaces.filter((e) => e.confirmado).length}</strong><span>confirmados pelos dois lados</span></div>
+      <div><strong>${confirmados.length}</strong><span>confirmados</span></div>
     </div>
-    <p class="suave pequeno">Enlace sem LLDP/CDP habilitado não aparece. Ausência aqui não significa ausência de cabo.</p>
+    <h2>Desenho</h2>
+    <div class="desenho-barra">
+      <label class="marcar"><input type="checkbox" id="topo-todos"> Incluir enlaces vistos por um lado só</label>
+      <div class="acoes"><button type="button" id="topo-png">Baixar PNG</button>
+        <button type="button" id="topo-pdf">Baixar PDF</button></div>
+    </div>
+    <div class="desenho" id="topo-desenho"><p class="carregando">Desenhando…</p></div>
+    <p class="suave pequeno">Confirmado: LLDP/CDP visto pelos dois lados, ou sub-rede ponto a ponto (/29 a /31, /112 a /127) presente na configuração dos dois equipamentos. Enlace sem LLDP e sem endereçamento entre equipamentos coletados não aparece; ausência no desenho não significa ausência de cabo. A topologia junta todos os snapshots da pasta do painel: para redes de clientes diferentes, use uma cópia do netsnap para cada uma, senão endereços privados repetidos e hostnames iguais se misturam.</p>
+    ${g.sem_vizinhanca.length ? `<h2>Sem vizinhança LLDP/CDP</h2>
+      <div class="sem-vizinhanca">${g.sem_vizinhanca.map((s) => `<div class="item-vizinhanca">
+        <p>${nos[s.id] ? nome(s.id) : `<strong>${esc(s.host)}</strong>`} — <span class="suave">${esc(s.motivo)}</span></p>
+        ${comoAtivar(s)}</div>`).join("")}</div>` : ""}
     <h2>Enlaces</h2>
-    ${g.enlaces.length ? `<div class="tabela-rolagem"><table><thead><tr><th>Equipamento</th><th>Porta</th><th>Vizinho</th><th>Porta do vizinho</th><th>Confirmação</th></tr></thead><tbody>
+    ${g.enlaces.length ? `<div class="tabela-rolagem"><table><thead><tr><th>Equipamento</th><th>Porta</th><th>Vizinho</th><th>Porta do vizinho</th><th>Tipo</th><th>Confirmação</th></tr></thead><tbody>
       ${g.enlaces.map((e) => `<tr><td class="nome">${nome(e.a)}</td><td class="mono">${esc(e.porta_a)}</td><td>${nome(e.b)}</td>
-        <td class="mono">${esc(e.portas_b.join(", ") || e.porta_b || "—")}</td>
-        <td title="${esc(e.origem.join("\n"))}">${e.confirmado ? estado("dois lados") : '<span class="suave pequeno">um lado</span>'}</td></tr>`).join("")}
-      </tbody></table></div>` : `<p class="vazio">Nenhum enlace encontrado. Colete a seção Vizinhança L2 (modo 5, 7 ou 8) com LLDP/CDP habilitado nos equipamentos.</p>`}
+        <td class="mono">${esc(e.confirmado ? e.porta_b : (e.portas_b.join(", ") || e.porta_b || "—"))}</td>
+        <td>${esc(TIPO_ENLACE[e.tipo] || e.tipo)}${e.rede ? ` <span class="mono suave pequeno">${esc(e.rede)}</span>` : ""}</td>
+        <td title="${esc(e.origem.join("\n"))}">${e.confirmado ? estado(e.tipo === "l3" ? "duas configurações" : "dois lados") : '<span class="suave pequeno">um lado</span>'}</td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="vazio">Nenhum enlace encontrado. Colete a seção Vizinhança L2 (modo 5, 7 ou 8) com LLDP/CDP habilitado, ou a Configuração (modo 1, 7 ou 8) para os enlaces L3.</p>`}
     ${naoColetados.length ? `<h2>Vizinhos ainda não coletados</h2>
       <p class="suave">Aparecem na vizinhança de equipamentos coletados. ${comIp.length ? "Os que anunciam endereço de gerência podem ser coletados direto daqui." : ""}</p>
       <div class="tabela-rolagem"><table><thead><tr><th>Nome anunciado</th><th>Endereço de gerência</th></tr></thead><tbody>
       ${naoColetados.map((n) => `<tr><td>${esc(n.rotulo)}</td><td class="mono">${esc(n.ips_gerencia.join(", ") || "—")}</td></tr>`).join("")}
       </tbody></table></div>
-      ${comIp.length && S.info.capacidades.coleta ? `<div class="acoes"><button class="principal" type="button" id="topo-coletar">Coletar os ${comIp.length} com endereço</button></div>` : ""}` : ""}
-    ${g.sem_vizinhanca.length ? `<h2>Sem vizinhança</h2><ul>${g.sem_vizinhanca.map((s) =>
-      `<li><strong>${esc(s.host)}</strong> — <span class="suave">${esc(s.motivo)}</span></li>`).join("")}</ul>` : ""}`);
+      ${comIp.length && S.info.capacidades.coleta ? `<div class="acoes"><button class="principal" type="button" id="topo-coletar">Coletar os ${comIp.length} com endereço</button></div>` : ""}` : ""}`);
+
+  const geracao = S.geracao;
+  let svgAtual = "", pedido = 0;
+  const caixa = $("#topo-desenho");
+  const marcarTodos = $("#topo-todos");
+  // Cada troca da opção pede um desenho novo; só a resposta do último pedido
+  // entra na tela (a do anterior pode chegar depois).
+  async function desenhar() {
+    const meu = ++pedido;
+    svgAtual = "";
+    caixa.innerHTML = '<p class="carregando">Desenhando…</p>';
+    try {
+      const svg = await svgDaTopologia(marcarTodos.checked);
+      if (meu !== pedido || geracao !== S.geracao) return;
+      svgAtual = svg;
+      if (S.urlDesenho) URL.revokeObjectURL(S.urlDesenho);
+      S.urlDesenho = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+      caixa.innerHTML = "";
+      const img = document.createElement("img");
+      img.alt = "Desenho da topologia";
+      img.onerror = () => { caixa.innerHTML = '<p class="vazio">O navegador não conseguiu exibir o desenho. O PDF continua disponível.</p>'; };
+      img.src = S.urlDesenho;
+      caixa.appendChild(img);
+    } catch (e) {
+      if (meu === pedido && geracao === S.geracao) caixa.innerHTML = `<p class="vazio">${esc(e.message)}</p>`;
+    }
+  }
+  marcarTodos.addEventListener("change", desenhar);
+  desenhar();
+
+  $("#topo-png").addEventListener("click", async () => {
+    try {
+      const svg = svgAtual || await svgDaTopologia(marcarTodos.checked);
+      baixarBlob(`topologia_${carimbo()}.png`, await pngDoSvg(svg));
+    } catch (e) { aviso(e.message, true); }
+  });
+  $("#topo-pdf").addEventListener("click", async () => {
+    try {
+      const r = await fetch(`/api/topologia/desenho?formato=pdf&todos=${marcarTodos.checked ? 1 : 0}`,
+        { headers: { "X-Netsnap-Token": S.token } });
+      if (!r.ok) throw new Error((await r.json()).erro || `Erro ${r.status}`);
+      baixarBlob(`topologia_${carimbo()}.pdf`, await r.blob());
+    } catch (e) { aviso(e.message, true); }
+  });
   $("#topo-salvar").addEventListener("click", async () => {
     try { const r = await api("POST", "topologia/salvar"); aviso("Salvo em " + r.arquivo); baixar("topologia", r.arquivo); }
     catch (e) { aviso(e.message, true); }

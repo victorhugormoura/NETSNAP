@@ -23,7 +23,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import os
 import re
@@ -86,7 +86,7 @@ def preparar_ambiente() -> str:
     ]
     for pasta in candidatos:
         try:
-            os.makedirs(pasta, exist_ok=True)
+            os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
             with open(teste, "w") as f:
                 f.write("ok")
@@ -112,7 +112,7 @@ class Anonimizador:
     RE_MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"
                         r"|\b(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}\b"
                         r"|\b(?:[0-9A-Fa-f]{4}-){2}[0-9A-Fa-f]{4}\b")
-    # Candidato largo, inclusive forma comprimida ("2804:1784::1"); cada
+    # Candidato largo, inclusive forma comprimida ("2001:db8::1"); cada
     # ocorrência é validada por ipaddress antes de ser trocada, o que evita
     # tomar horários (22:41:37) ou contadores por endereço.
     RE_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
@@ -235,9 +235,9 @@ def detectar_detalhado(ip, usuario, senha, porta, forcado=None):
     bruto, erro = None, None
     t0 = time.perf_counter()
     try:
-        guesser = SSHDetect(device_type="autodetect", host=ip, username=usuario,
-                            password=senha, port=porta, timeout=20,
-                            conn_timeout=15)
+        guesser = ns.conectar_ssh(SSHDetect, ip, porta,
+                                  device_type="autodetect", username=usuario,
+                                  password=senha, timeout=20, conn_timeout=15)
         bruto = guesser.autodetect()
     except NetmikoAuthenticationException:
         etapas.append({"etapa": "SSHDetect", "resultado": "falha de autenticação",
@@ -485,12 +485,12 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
 # Extração de versão e licença a partir do que foi coletado
 # ---------------------------------------------------------------------------
 PADRAO_VERSAO = [
-    (r"(?im)^\s*Junos:\s*([0-9][\w.\-]+)", "Junos"),
+    (r"(?im)^[ \t]*Junos:\s*([0-9][\w.\-]+)", "Junos"),
     (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "Huawei VRP/SmartAX"),
     (r"(?i)Cisco IOS XE Software,? Version\s*([0-9][\w.()\-]*)", "IOS-XE"),
     (r"(?i)Cisco IOS XR Software,?.*?Version\s*([0-9][\w.\-]*)", "IOS-XR"),
-    (r"(?im)^\s*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)", "NX-OS"),
-    (r"(?im)^\s*version:\s*([0-9][\w.\-]*)", "RouterOS"),
+    (r"(?im)^[ \t]*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)", "NX-OS"),
+    (r"(?im)^[ \t]*version:\s*([0-9][\w.\-]*)", "RouterOS"),
     (r"(?i)Linux\s+\S+\s+([0-9]+\.[0-9]+\.[0-9]+)", "Kernel Linux"),
 ]
 PADRAO_VERSAO_LIVRE = re.compile(
@@ -675,20 +675,22 @@ def gerar_relatorio(relatorios, args, anon, pasta):
                       "As linhas abaixo foram capturadas da coleta e são o "
                       "insumo para acrescentar o padrão desta plataforma.\n")
             if candidatos:
-                md.append("```text")
-                for l in candidatos[:12]:
-                    md.append(anon.texto(l))
-                md.append("```\n")
+                linhas = [anon.texto(l) for l in candidatos[:12]]
+                cerca = ns.cerca_markdown("\n".join(linhas))
+                md.append(cerca + "text")
+                md.extend(linhas)
+                md.append(cerca + "\n")
             else:
                 md.append("_Nenhuma linha mencionando versão/firmware foi "
                           "coletada — verifique a seção Inventário acima._\n")
         if licencas:
             md.append("Linhas relacionadas a licença/identificação "
                       f"({len(licencas)} encontradas, amostra):\n")
-            md.append("```text")
-            for l in licencas[:12]:
-                md.append(anon.texto(l))
-            md.append("```\n")
+            linhas = [anon.texto(l) for l in licencas[:12]]
+            cerca = ns.cerca_markdown("\n".join(linhas))
+            md.append(cerca + "text")
+            md.extend(linhas)
+            md.append(cerca + "\n")
         else:
             md.append("_Nenhuma menção a licença encontrada na coleta._\n")
 
@@ -722,9 +724,10 @@ def gerar_relatorio(relatorios, args, anon, pasta):
                     md.append(f"- exceção: `{anon.texto(r['excecao'])[:200]}`\n")
                 amostra = "\n".join(r["_saida"].splitlines()[:LINHAS_AMOSTRA])
                 amostra = anon.texto(amostra).strip()
-                md.append("```text")
+                cerca = ns.cerca_markdown(amostra)
+                md.append(cerca + "text")
                 md.append(amostra if amostra else "(sem retorno)")
-                md.append("```\n")
+                md.append(cerca + "\n")
 
         if lentos:
             md.append("### Comandos lentos\n")
@@ -813,6 +816,10 @@ def gerar_json(relatorios, args, anon, pasta):
 # Ponto de entrada
 # ---------------------------------------------------------------------------
 def main():
+    # Snapshots, relatórios e logs descrevem a rede: legíveis só pelo dono
+    # (em Linux e macOS; no Windows valem as permissões da pasta).
+    if os.name == "posix":
+        os.umask(0o077)
     ap = argparse.ArgumentParser(
         description="Diagnóstico da extração do netsnap (somente leitura).")
     ap.add_argument("alvos", nargs="+",
