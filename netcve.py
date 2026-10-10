@@ -22,7 +22,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import os
 import re
@@ -56,11 +56,11 @@ DELAY_COM_CHAVE = 0.8
 # ---------------------------------------------------------------------------
 MAPA_VERSAO = {
     "juniper_junos": [
-        (r"(?im)^\s*Junos:\s*([0-9][\w.\-]+)", "juniper", "junos", "Junos"),
+        (r"(?im)^[ \t]*Junos:\s*([0-9][\w.\-]+)", "juniper", "junos", "Junos"),
         # A configuração em 'display set' declara a release; permite triagem
         # mesmo em snapshot coletado apenas no modo Configuração.
         (r"(?im)^set version\s+([0-9][\w.\-]+)", "juniper", "junos", "Junos"),
-        (r"(?im)^\s*version\s+([0-9]+\.[0-9]+[A-Z][\w.\-]*)",
+        (r"(?im)^[ \t]*version\s+([0-9]+\.[0-9]+[A-Z][\w.\-]*)",
          "juniper", "junos", "Junos"),
         (r"(?i)JUNOS\s+(?:Software\s+Release\s+)?\[?([0-9][\w.\-]+)\]?",
          "juniper", "junos", "Junos"),
@@ -89,7 +89,7 @@ MAPA_VERSAO = {
          "cisco", "ios", "IOS"),
     ],
     "cisco_nxos": [
-        (r"(?im)^\s*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)",
+        (r"(?im)^[ \t]*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)",
          "cisco", "nx-os", "NX-OS"),
         (r"(?im)^version\s+([0-9]+\.[0-9]+\([0-9][\w.)]*)",
          "cisco", "nx-os", "NX-OS"),
@@ -99,7 +99,7 @@ MAPA_VERSAO = {
          "cisco", "ios_xr", "IOS-XR"),
     ],
     "mikrotik_routeros": [
-        (r"(?im)^\s*version:\s*([0-9][\w.\-]*)", "mikrotik", "routeros",
+        (r"(?im)^[ \t]*version:\s*([0-9][\w.\-]*)", "mikrotik", "routeros",
          "RouterOS"),
         (r"(?i)RouterOS\s+v?([0-9]+\.[0-9][\w.\-]*)", "mikrotik", "routeros",
          "RouterOS"),
@@ -137,7 +137,7 @@ REGRAS_CONFIG = [
         "titulo": "Telnet habilitado (credenciais em texto claro)",
         "severidade": "ALTA",
         "plataformas": None,
-        "padrao": r"(?im)^\s*(?:set\s+system\s+services\s+telnet|"
+        "padrao": r"(?im)^[ \t]*(?:set\s+system\s+services\s+telnet|"
                   r"telnet\s+server\s+enable|"
                   r"transport\s+input\s+(?:all|telnet))",
         "recomendacao": "Desabilitar Telnet e usar exclusivamente SSHv2.",
@@ -165,7 +165,7 @@ REGRAS_CONFIG = [
         "titulo": "Servidor HTTP de gerência sem TLS habilitado",
         "severidade": "MEDIA",
         "plataformas": None,
-        "padrao": r"(?im)^\s*(?:ip\s+http\s+server|"
+        "padrao": r"(?im)^[ \t]*(?:ip\s+http\s+server|"
                   r"set\s+system\s+services\s+web-management\s+http\b|"
                   r"http\s+server\s+enable)",
         "recomendacao": "Desabilitar HTTP ou usar somente HTTPS com "
@@ -179,7 +179,7 @@ REGRAS_CONFIG = [
         # Saída de '/ip service print': serviço desabilitado traz a flag X
         # entre o índice e o nome; habilitado não traz flag. O export não
         # serve, porque serviço habilitado é o padrão e não aparece nele.
-        "padrao": r"(?im)^\s*\d+\s+(telnet|ftp|www|api)\s+\d+",
+        "padrao": r"(?im)^[ \t]*\d+\s+(telnet|ftp|www|api)\s+\d+",
         "recomendacao": "Desabilitar serviços não utilizados em "
                         "/ip service e restringir 'available from'.",
     },
@@ -188,7 +188,7 @@ REGRAS_CONFIG = [
         "titulo": "Login SSH direto como root permitido",
         "severidade": "ALTA",
         "plataformas": ["linux"],
-        "padrao": r"(?im)^\s*PermitRootLogin\s+yes",
+        "padrao": r"(?im)^[ \t]*PermitRootLogin\s+yes",
         "recomendacao": "Definir PermitRootLogin no (ou prohibit-password) "
                         "e usar chaves com sudo.",
     },
@@ -206,7 +206,7 @@ REGRAS_CONFIG = [
         "titulo": "Versão do BIND exposta em consultas version.bind",
         "severidade": "BAIXA",
         "plataformas": ["linux"],
-        "padrao": r"(?im)^\s*(?!.*version\s+\"?none)"
+        "padrao": r"(?im)^[ \t]*(?!.*version\s+\"?none)"
                   r"\s*options\s*\{(?![\s\S]{0,2000}?version\s)",
         "recomendacao": "Definir version \"none\"; em options{} para não "
                         "revelar a release em uso.",
@@ -216,7 +216,7 @@ REGRAS_CONFIG = [
         "titulo": "NTP sem autenticação configurada",
         "severidade": "BAIXA",
         "plataformas": None,
-        "padrao": r"(?im)^\s*(?:ntp\s+server\s+(?!disable\b|enable\b|"
+        "padrao": r"(?im)^[ \t]*(?:ntp\s+server\s+(?!disable\b|enable\b|"
                   r"source-interface\b)\S|set\s+system\s+ntp\s+server|"
                   r"ntp(?:-service)?\s+unicast-server)"
                   r"(?![\s\S]{0,400}?(?:key|authentication))",
@@ -251,6 +251,26 @@ def ler_snapshot(caminho):
     return meta, texto
 
 
+def secoes_do_snapshot(texto):
+    """Divide o snapshot nas seções "## ", ignorando cabeçalhos dentro dos
+    blocos de código: a saída dos equipamentos não é escapada, e uma linha
+    "## Inventário" vinda de um banner não pode virar seção."""
+    partes, atual, cerca = [], [], None
+    for linha in texto.split("\n"):
+        if cerca:
+            if linha.rstrip("\r") == cerca:
+                cerca = None
+        elif linha.startswith("```"):
+            cerca = re.match(r"`+", linha).group(0)
+        elif linha.startswith("## ") and atual:
+            partes.append("\n".join(atual))
+            atual = []
+        atual.append(linha)
+    if atual:
+        partes.append("\n".join(atual))
+    return partes
+
+
 def texto_para_versao(texto):
     """Reordena o snapshot para a busca de versão.
 
@@ -258,7 +278,7 @@ def texto_para_versao(texto):
     descrevem outros equipamentos. Num CE6860 (VRP 8.191) a primeira
     ocorrência de "Version 5.170" no arquivo era a de um vizinho LLDP, e a
     versão relatada era a dele."""
-    partes = re.split(r"(?m)^(?=## )", texto)
+    partes = secoes_do_snapshot(texto)
     inventario = [p for p in partes if re.match(r"## .*Invent", p)]
     fora = re.compile(r"## .*(Vizinhan|Logs)")
     demais = [p for p in partes
@@ -343,11 +363,38 @@ def contexto_ssl():
     return ssl.create_default_context()
 
 
+LIMITE_RESPOSTA = 64 * 1024 * 1024
+
+
+class _Redirecionamento(urllib.request.HTTPRedirectHandler):
+    """Redirecionamento para outro host, ou para fora do HTTPS, não leva a
+    chave da API (o urllib repassa todos os cabeçalhos por padrão)."""
+
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        novo = super().redirect_request(req, fp, code, msg, hdrs, newurl)
+        origem = urllib.parse.urlsplit(req.full_url)
+        destino = urllib.parse.urlsplit(newurl)
+        if novo is not None and (destino.hostname != origem.hostname
+                                 or destino.scheme != "https"):
+            for nome in list(novo.headers):
+                if nome.lower() == "apikey":
+                    del novo.headers[nome]
+        return novo
+
+
 def http_json(url, timeout=45, headers=None):
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout,
-                                context=contexto_ssl()) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+    headers = dict(headers or {"User-Agent": UA})
+    if not VERIFICAR_TLS:
+        # Sem validação de certificado, quem estiver no caminho leria a chave.
+        headers = {k: v for k, v in headers.items() if k.lower() != "apikey"}
+    abridor = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=contexto_ssl()), _Redirecionamento)
+    req = urllib.request.Request(url, headers=headers)
+    with abridor.open(req, timeout=timeout) as r:
+        dados = r.read(LIMITE_RESPOSTA + 1)
+    if len(dados) > LIMITE_RESPOSTA:
+        raise ValueError("resposta da API maior que o limite de 64 MB")
+    return json.loads(dados.decode("utf-8", "replace"))
 
 
 def explicar_falha_tls(e) -> str:
@@ -640,6 +687,10 @@ def gerar_csv(hosts, kev, pasta):
 # Ponto de entrada
 # ---------------------------------------------------------------------------
 def main():
+    # Snapshots, relatórios e logs descrevem a rede: legíveis só pelo dono
+    # (em Linux e macOS; no Windows valem as permissões da pasta).
+    if os.name == "posix":
+        os.umask(0o077)
     ap = argparse.ArgumentParser(
         description="Triagem de vulnerabilidades a partir de snapshots netsnap.")
     ap.add_argument("pasta", nargs="?", default="snapshots",
