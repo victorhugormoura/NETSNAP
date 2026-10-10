@@ -27,9 +27,10 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
+import atexit
 import difflib
 import hmac
 import json
@@ -53,6 +54,7 @@ sys.path.insert(0, AQUI)
 
 import netsnap_md as md            # noqa: E402
 import netsnap_topologia as topo   # noqa: E402
+import netsnap_desenho as desenho  # noqa: E402
 
 PASTA_WEB = os.path.join(AQUI, "web")
 TOKEN = secrets.token_urlsafe(24)
@@ -67,7 +69,7 @@ def pasta_gravavel(nome_local, nome_home):
     for pasta in (os.path.join(AQUI, nome_local),
                   os.path.join(os.path.expanduser("~"), nome_home)):
         try:
-            os.makedirs(pasta, exist_ok=True)
+            os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
             with open(teste, "w") as f:
                 f.write("ok")
@@ -276,6 +278,13 @@ def vigiar_painel():
 
 
 def modo_executor(tipo):
+    if os.name == "posix":
+        # O processo de coleta guarda a senha em memória: sem core dump.
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except (ImportError, ValueError, OSError):
+            pass
     cfg = json.loads(sys.stdin.readline())
     threading.Thread(target=vigiar_painel, daemon=True).start()
     try:
@@ -771,9 +780,9 @@ MODELO = [
     (r"(?m)^Model:\s*(\S+)", None),
     (r"HUAWEI\s+([A-Z]{1,3}\d{3,5}[\w-]*)\s+(?:Routing Switch\s+)?uptime", None),
     (r"\b(MA5[68]\d\d[\w-]*)", None),
-    (r"(?m)^\s*cisco\s+(Nexus\s*\S+.*?)\s+[Cc]hassis", None),
+    (r"(?m)^[ \t]*cisco\s+(Nexus\s*\S+.*?)\s+[Cc]hassis", None),
     (r"(?m)^[Cc]isco\s+(\S+)\s+\(.*\)\s+processor", None),
-    (r"(?m)^\s*(?:board-name|model):\s*(.+)$", None),
+    (r"(?m)^[ \t]*(?:board-name|model):\s*(.+)$", None),
     (r"\b(AN\d{4}[\w-]*)", None),
     (r'PRETTY_NAME="([^"]+)"', None),
 ]
@@ -945,6 +954,34 @@ def comparar(nome_a, nome_b, so_estaveis=False):
             "itens": resultado}
 
 
+# O layout de uma rede grande leva segundos; SVG, PDF e PNG da mesma
+# topologia reaproveitam a cena enquanto os snapshots não mudarem.
+_CENAS = {}
+_TRAVA_CENAS = threading.Lock()
+
+
+def cena_da_topologia(incluir_um_lado):
+    try:
+        assinatura = tuple(
+            (os.path.basename(c), os.path.getmtime(c), os.path.getsize(c))
+            for c in md.listar_snapshots(PASTA_SNAPSHOTS))
+    except OSError:
+        # Arquivo removido durante a leitura (coleta em andamento): sem cache.
+        return desenho.montar_cena(topo.construir(PASTA_SNAPSHOTS),
+                                   incluir_um_lado=incluir_um_lado)
+    chave = (assinatura, incluir_um_lado)
+    with _TRAVA_CENAS:
+        if chave in _CENAS:
+            return _CENAS[chave]
+    cena = desenho.montar_cena(topo.construir(PASTA_SNAPSHOTS),
+                               incluir_um_lado=incluir_um_lado)
+    with _TRAVA_CENAS:
+        if len(_CENAS) >= 4:
+            _CENAS.clear()
+        _CENAS[chave] = cena
+    return cena
+
+
 TIPOS_RELATORIO = {
     "indice": (lambda: PASTA_SNAPSHOTS, "_indice_", ".md"),
     "triagem": (lambda: PASTA_SNAPSHOTS, "_cve_triagem_", ".md"),
@@ -1011,13 +1048,17 @@ ESTATICOS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
 }
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
-       "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+       "img-src 'self' data: blob:; connect-src 'self'; "
+       "frame-ancestors 'none'; "
        "base-uri 'none'; form-action 'none'")
 
 
 class Manipulador(BaseHTTPRequestHandler):
     server_version = "netsnap-web"
     sys_version = ""
+    # Conexão parada (cliente lento ou que nunca termina o pedido) é
+    # encerrada: sem isso, cada uma prende uma thread indefinidamente.
+    timeout = 30
 
     def log_message(self, formato, *args):
         pass
@@ -1065,9 +1106,23 @@ class Manipulador(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(corpo)
 
+    def _bytes(self, corpo, tipo, nome=None):
+        self.send_response(200)
+        self.send_header("Content-Type", tipo)
+        self.send_header("Content-Length", str(len(corpo)))
+        if nome:
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{nome}"')
+        self._cabecalhos_comuns()
+        self.end_headers()
+        self.wfile.write(corpo)
+
     def _corpo(self):
-        tamanho = int(self.headers.get("Content-Length") or 0)
-        if tamanho > LIMITE_CORPO:
+        try:
+            tamanho = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ErroAPI(400, "Content-Length inválido")
+        if tamanho < 0 or tamanho > LIMITE_CORPO:
             raise ErroAPI(413, "Requisição grande demais")
         if not (self.headers.get("Content-Type") or "").startswith(
                 "application/json"):
@@ -1182,8 +1237,22 @@ class Manipulador(BaseHTTPRequestHandler):
         if rota == ("GET", "comparar"):
             return comparar(q.get("a", ""), q.get("b", ""),
                             q.get("estaveis") == "1")
-        if rota == ("GET", "topologia"):
+        if rota == ("GET", "topologia") and n == 1:
             return topo.construir(PASTA_SNAPSHOTS)
+        if rota == ("GET", "topologia") and n == 2 and p[1] == "desenho":
+            # Desenho da topologia: SVG para a tela (e o PNG, convertido no
+            # navegador) e PDF vetorial. Nada é gravado em disco.
+            formato = q.get("formato", "svg")
+            if formato not in ("svg", "pdf"):
+                raise ErroAPI(400, "Formato inválido")
+            cena = cena_da_topologia(q.get("todos") == "1")
+            nome = f"topologia_{datetime.now():%Y%m%d_%H%M%S}.{formato}"
+            if formato == "pdf":
+                self._bytes(desenho.para_pdf(cena), "application/pdf", nome)
+            else:
+                self._bytes(desenho.para_svg(cena).encode("utf-8"),
+                            "image/svg+xml; charset=utf-8")
+            return None
         if rota == ("POST", "topologia") and n == 2 and p[1] == "salvar":
             grafo = topo.construir(PASTA_SNAPSHOTS)
             return {"arquivo": os.path.basename(
@@ -1252,8 +1321,17 @@ def abrir_navegador(url):
                     f'<meta http-equiv="refresh" content="0;url={url}">'
                     f'<title>netsnap</title><a href="{url}">Abrir o painel</a>')
         webbrowser.open(pathlib.Path(caminho).as_uri())
-        threading.Timer(60, lambda: os.path.exists(caminho) and
-                        os.remove(caminho)).start()
+        def apagar_arquivo():
+            try:
+                os.remove(caminho)
+            except OSError:
+                pass
+        # Daemon: o painel não espera o timer para encerrar; se encerrar
+        # antes do minuto, o arquivo sai na saída do processo.
+        apagar = threading.Timer(60, apagar_arquivo)
+        apagar.daemon = True
+        apagar.start()
+        atexit.register(apagar_arquivo)
     except OSError:
         webbrowser.open(url)
 

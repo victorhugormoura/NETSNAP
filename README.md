@@ -355,6 +355,7 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 
 ## Avisos importantes
 
+- **Chave SSH dos equipamentos.** No primeiro acesso a chave do servidor SSH fica registrada em `~/.netsnap_known_hosts` (no Windows, `%USERPROFILE%\.netsnap_known_hosts`). Se ela mudar, a coleta daquele equipamento é recusada antes de enviar a senha — pode ser interceptação. Se o equipamento foi trocado ou teve a chave refeita, apague a linha dele nesse arquivo.
 - **O filtro de sensíveis é melhor esforço.** A remoção por regex cobre os padrões mais comuns (Junos `encrypted-password`, Huawei `irreversible-cipher`, communities SNMP, chaves e certificados), mas **revise o arquivo antes de compartilhar com terceiros ou enviar para serviços externos de IA**.
 - Em roteadores com muitas subinterfaces (ex.: BNG com PPPoE), comandos de interface completos podem gerar arquivos grandes e demorar alguns minutos.
 - Na OLT MA5800 a coleta básica fica no nível de placa/CPU/alarmes; sinal óptico por PON exige modo de configuração, o que viola a regra de somente leitura.
@@ -386,7 +387,7 @@ O terminal mostra o endereço com o token desta execução (`http://127.0.0.1:87
 | Snapshots | Leitura por seção e comando, com busca nas saídas e download do `.md` |
 | Inventário | Snapshot mais recente de cada equipamento: plataforma, modelo, versões, CVEs da última triagem, quantidade de coletas; exporta CSV |
 | Comparar coletas | Diferença comando a comando entre duas coletas do mesmo equipamento (por padrão, só configuração e inventário) |
-| Topologia | Enlaces LLDP/CDP, vizinhos ainda não coletados (os que anunciam endereço de gerência podem ser coletados direto dali) e o JSON da topologia |
+| Topologia | Desenho da rede confirmada (baixa em PNG e PDF), equipamentos sem vizinhança com o comando para ativar o LLDP na plataforma, enlaces LLDP/CDP e L3, vizinhos ainda não coletados (os que anunciam endereço de gerência podem ser coletados direto dali) e o JSON da topologia |
 | Vulnerabilidades | Roda o netcve sobre a pasta de snapshots e mostra o relatório |
 | Diagnóstico | Roda o netdiag e mostra o relatório |
 | Agendamentos | Coletas recorrentes (diárias num horário ou a cada N horas) enquanto o painel estiver aberto |
@@ -402,18 +403,31 @@ O terminal mostra o endereço com o token desta execução (`http://127.0.0.1:87
 
 **Execução:** cada coleta, diagnóstico ou triagem roda num processo separado. As execuções ficam na memória do painel e somem ao reiniciá-lo; os arquivos gerados permanecem na pasta.
 
-## Topologia (netsnap_topologia)
+## Topologia (netsnap_topologia e netsnap_desenho)
 
-Lê a seção *Vizinhança L2* do snapshot mais recente de cada equipamento e monta um grafo em JSON — a base do futuro desenho automático da rede.
+Monta o grafo da rede a partir do snapshot mais recente de cada equipamento, com duas fontes:
+
+- **LLDP/CDP** (seção *Vizinhança L2*): quem cada equipamento vê em cada porta.
+- **L3** (seção *Configuração*): dois equipamentos coletados com endereço na mesma sub-rede ponto a ponto (/29 a /31 em IPv4, /112 a /127 em IPv6) estão ligados naquela interface. Cobre roteadores sem LLDP — caso comum em bordas Juniper. Endereços lidos da configuração Junos, Huawei VRP, Cisco e MikroTik.
 
 ```bash
-python3 netsnap_topologia.py snapshots/            # grava snapshots/_topologia_<data>.json
+python3 netsnap_topologia.py snapshots/                       # grava snapshots/_topologia_<data>.json
 python3 netsnap_topologia.py snapshots/ --saida rede.json
+python3 netsnap_topologia.py snapshots/ --desenho rede.pdf    # desenho dos enlaces confirmados (ou .svg)
+python3 netsnap_topologia.py snapshots/ --desenho rede.pdf --todos   # inclui os vistos por um lado só
 ```
 
-Cada enlace traz equipamento e porta de origem, vizinho e porta(s) remota(s), se os dois lados foram coletados e se veem (`confirmado`), e de qual arquivo e comando veio. Vizinhos não coletados entram como nós com o nome e o endereço de gerência que anunciam.
+**Confirmação.** Um enlace LLDP/CDP é confirmado quando os dois lados foram coletados e se veem. A porta anunciada pelo vizinho é comparada já normalizada (`XGE0/0/3` = `XGigabitEthernet0/0/3`, `Gi0/1` = `GigabitEthernet0/1`, `xe-0/0/0.0` = `xe-0/0/0`); quando o vizinho Junos anuncia o índice SNMP em vez do nome, vale a descrição da porta, resolvida pelo `show interfaces descriptions` do próprio vizinho. Enlace L3 é sempre confirmado: vem das duas configurações.
 
-Limites: enlace sem LLDP/CDP não aparece; nomes de porta não são normalizados entre fabricantes (`Gi0/1` x `GigabitEthernet0/1`). Formato validado com saída real de Huawei VRP; Junos, Cisco (IOS, NX-OS, XR, CDP), MikroTik e lldpd seguem a sintaxe documentada e foram testados apenas com exemplos.
+**Mesmo equipamento, vários endereços.** Um roteador coletado pelo IP de cada interface vira um nó só (mesmo hostname e plataforma), com os endereços listados. Nomes de fábrica (`MikroTik`, `HUAWEI`) continuam separados por endereço.
+
+**Sem vizinhança.** Equipamento sem nenhum vizinho LLDP/CDP aparece com o motivo provável (LLDP desligado, sem vizinhos, seção não coletada) e o comando para ativar o protocolo na plataforma. O mesmo aviso sai no log da coleta e no cabeçalho do snapshot.
+
+**Desenho.** O painel mostra o desenho dos enlaces confirmados e baixa em PNG e PDF; a opção *Incluir enlaces vistos por um lado só* acrescenta, em pontilhado, os demais. O PDF é vetorial e gerado sem dependências; o PNG sai do mesmo desenho, convertido no navegador. Linha cheia: LLDP/CDP; tracejada: L3 ponto a ponto. Vários enlaces entre o mesmo par (membros de LAG) viram uma linha, com as portas nas pontas. A mesma rede gera sempre o mesmo desenho.
+
+**Uma rede por pasta.** A topologia junta todos os snapshots da pasta. Snapshots de clientes diferentes na mesma pasta misturam endereços privados repetidos (uma /30 em 10.x nos dois clientes vira enlace) e hostnames iguais (dois `BRAS` viram um nó). Para várias redes, use uma cópia do netsnap para cada uma, ou passe ao `netsnap_topologia.py` a pasta de cada cliente.
+
+Limites: enlace sem LLDP/CDP e sem endereçamento ponto a ponto entre equipamentos coletados não aparece — ausência no desenho não significa ausência de cabo. Formatos validados com saída real: Huawei VRP (LLDP) e configuração Junos (L3). LLDP de Junos, Cisco (IOS, NX-OS, XR, CDP), MikroTik e lldpd seguem a sintaxe documentada e foram testados com exemplos.
 
 ## netdiag — diagnóstico da extração (ferramenta complementar)
 
