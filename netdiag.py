@@ -23,7 +23,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import os
 import re
@@ -178,6 +178,14 @@ class Anonimizador:
             return nome
         return self._mapear(self._host, nome, "EQUIPAMENTO-{}")
 
+    def endereco(self, alvo: str) -> str:
+        """Alvo informado pelo operador: IP ou nome DNS."""
+        try:
+            ipaddress.ip_address(alvo)
+        except ValueError:
+            return self.host(alvo)
+        return self.texto(alvo)
+
 
 # ---------------------------------------------------------------------------
 # Detecção instrumentada
@@ -301,6 +309,8 @@ def classificar(saida, excecao):
     return OK
 
 
+PREP = "prep (paginação/contexto)"
+
 # Ajustado em main() a partir de --sensivel. A saída é sanitizada já na
 # coleta: os trechos de licença, versão e amostra derivam dela, e mascarar
 # depois de truncar deixava escapar blocos PEM cortados ao meio.
@@ -313,6 +323,13 @@ def executar(conn, cmd, usa_timing, timeout):
     try:
         if usa_timing:
             saida = conn.send_command_timing(cmd, read_timeout=timeout, last_read=3)
+            # Mesmo descarte do netsnap: sem ele, um comando sem retorno
+            # devolveria só o prompt e seria contado como OK.
+            linhas = (saida or "").rstrip().splitlines()
+            if linhas and len(linhas[-1]) < 60 and \
+                    ns.PADRAO_FIM_PROMPT.search(linhas[-1]) and \
+                    " " not in linhas[-1].strip():
+                saida = "\n".join(linhas[:-1])
         else:
             saida = conn.send_command(cmd, read_timeout=timeout)
     except Exception as e:
@@ -396,7 +413,7 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
                     rel["contexto_usado"] = True
                 preps.append(r)
             if preps:
-                rel["secoes"]["prep (paginação/contexto)"] = preps
+                rel["secoes"][PREP] = preps
 
             prefixo_sudo = ""
             if tipo == "linux":
@@ -439,9 +456,17 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
                 if tipo == "linux" and secao == "logs":
                     comandos = [c + ns.FILTRO_LOG for c in comandos]
                 print(f"    [{secao}] {len(comandos)} comando(s) ...")
-                rel["secoes"][ns.TITULOS[secao]] = [
-                    executar(conn, c, usa_timing, timeout) for c in comandos
-                ]
+                resultados = []
+                for c in comandos:
+                    r = executar(conn, c, usa_timing, timeout)
+                    # Mesmo recuo do netsnap: o RouterOS v7 recusa
+                    # 'hide-sensitive', e o '/export' simples funciona.
+                    if c.startswith("/export ") and \
+                            r["status"] in (NAO_SUPORTADO, VAZIO):
+                        resultados.append(r)
+                        r = executar(conn, "/export", usa_timing, timeout)
+                    resultados.append(r)
+                rel["secoes"][ns.TITULOS[secao]] = resultados
 
             # Módulos de aplicação (Linux)
             for chave in rel["aplicacoes"]:
@@ -484,14 +509,22 @@ def diagnosticar_host(ip, porta, usuario, senha, secoes, forcado, timeout, anon)
 # ---------------------------------------------------------------------------
 # Extração de versão e licença a partir do que foi coletado
 # ---------------------------------------------------------------------------
+# Cada padrão vale só para as plataformas indicadas: aplicados a todas, um
+# 'version: 3.8' de docker-compose num Linux virava "RouterOS 3.8".
 PADRAO_VERSAO = [
-    (r"(?im)^[ \t]*Junos:\s*([0-9][\w.\-]+)", "Junos"),
-    (r"(?i)\b(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "Huawei VRP/SmartAX"),
-    (r"(?i)Cisco IOS XE Software,? Version\s*([0-9][\w.()\-]*)", "IOS-XE"),
-    (r"(?i)Cisco IOS XR Software,?.*?Version\s*([0-9][\w.\-]*)", "IOS-XR"),
-    (r"(?im)^[ \t]*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)", "NX-OS"),
-    (r"(?im)^[ \t]*version:\s*([0-9][\w.\-]*)", "RouterOS"),
-    (r"(?i)Linux\s+\S+\s+([0-9]+\.[0-9]+\.[0-9]+)", "Kernel Linux"),
+    (r"(?im)^[ \t]*Junos:\s*([0-9][\w.\-]+)", "Junos", ("juniper_junos",)),
+    (r"(?i)(?<![A-Za-z])(V\d{3}R\d{3}C\d{2}(?:SPC\d+)?)", "Huawei VRP/SmartAX",
+     ("huawei", "huawei_ce", "huawei_smartax")),
+    (r"(?i)Cisco IOS XE Software,? Version\s*([0-9][\w.()\-]*)", "IOS-XE",
+     ("cisco_ios",)),
+    (r"(?i)Cisco IOS XR Software,?.*?Version\s*([0-9][\w.\-]*)", "IOS-XR",
+     ("cisco_xr",)),
+    (r"(?im)^[ \t]*(?:system|NXOS):\s*version\s*([0-9][\w.()\-]*)", "NX-OS",
+     ("cisco_nxos",)),
+    (r"(?im)^[ \t]*version:\s*([0-9][\w.\-]*)", "RouterOS",
+     ("mikrotik_routeros",)),
+    (r"(?i)Linux\s+\S+\s+([0-9]+\.[0-9]+\.[0-9]+)", "Kernel Linux",
+     ("linux",)),
 ]
 PADRAO_VERSAO_LIVRE = re.compile(
     r"(?im)^.*\b(version|versao|versão|firmware|release|software|"
@@ -516,7 +549,9 @@ def extrair_indicadores(rel):
     tudo = "\n".join(texto)
 
     versoes = []
-    for padrao, rotulo in PADRAO_VERSAO:
+    for padrao, rotulo, plataformas in PADRAO_VERSAO:
+        if rel["plataforma"] and rel["plataforma"] not in plataformas:
+            continue
         m = re.search(padrao, tudo)
         if m:
             versoes.append({"rotulo": rotulo, "versao": m.group(1)})
@@ -556,6 +591,10 @@ def resumir(rel):
     for mod, secs in rel["modulos"].items():
         blocos += [(f"{mod} — {t}", b) for t, b in secs.items()]
     for titulo, bloco in blocos:
+        # Paginação e contexto não são coleta: costumam voltar vazios e
+        # distorceriam a cobertura.
+        if titulo == PREP:
+            continue
         for r in bloco:
             cont[r["status"]] = cont.get(r["status"], 0) + 1
             total += 1
@@ -611,8 +650,9 @@ def gerar_relatorio(relatorios, args, anon, pasta):
     md.append("|---|---|---|---|---|---|---|---|---|")
     for rel in relatorios:
         if rel["erro_fatal"] and not rel["secoes"]:
-            md.append(f"| {rel['hostname'] or anon.texto(rel['ip'])} | "
-                      f"_{rel['erro_fatal'][:40].replace('|', '/')}_ | — | — | — | — | — | — | "
+            erro = anon.texto(" ".join(rel["erro_fatal"].split()))[:40]
+            md.append(f"| {rel['hostname'] or anon.endereco(rel['ip'])} | "
+                      f"_{erro.replace('|', '/')}_ | — | — | — | — | — | — | "
                       f"{rel['segundos_total']}s |")
             continue
         cont, total, _, _ = resumir(rel)
@@ -627,8 +667,8 @@ def gerar_relatorio(relatorios, args, anon, pasta):
 
     # Detalhe por host
     for rel in relatorios:
-        alvo = rel["hostname"] or anon.texto(rel["ip"])
-        md.append(f"\n---\n\n## {alvo} ({anon.texto(rel['ip'])}:{rel['porta']})\n")
+        alvo = rel["hostname"] or anon.endereco(rel["ip"])
+        md.append(f"\n---\n\n## {alvo} ({anon.endereco(rel['ip'])}:{rel['porta']})\n")
 
         md.append("### Detecção de plataforma\n")
         md.append("| Etapa | Resultado | Tempo |")
@@ -656,8 +696,9 @@ def gerar_relatorio(relatorios, args, anon, pasta):
                                   for a in rel["aplicacoes"])
                 md.append(f"- aplicações detectadas: {nomes}\n")
             else:
+                conhecidas = ", ".join(a["nome"] for a in ns.APPS_LINUX.values())
                 md.append("- nenhuma aplicação conhecida detectada "
-                          "(WANGuard, Zabbix, Grafana, BIND9)\n")
+                          f"({conhecidas})\n")
         if rel["contexto_usado"]:
             md.append("- contexto privilegiado acessado para leitura "
                       "(plataforma exige)\n")
@@ -737,8 +778,9 @@ def gerar_relatorio(relatorios, args, anon, pasta):
             md.append("| Tempo | Linhas | Comando | Seção |")
             md.append("|---|---|---|---|")
             for titulo, r in sorted(lentos, key=lambda x: -x[1]["segundos"]):
+                cmd = r["comando"][:70].replace("|", "\\|")
                 md.append(f"| {r['segundos']}s | {r['linhas']} | "
-                          f"`{r['comando'][:70]}` | {titulo} |")
+                          f"`{cmd}` | {titulo} |")
             md.append("")
 
     md.append("\n---\n\n## Como usar este diagnóstico\n")
@@ -777,7 +819,7 @@ def gerar_json(relatorios, args, anon, pasta):
         cont, total, lentos, blocos = resumir(rel)
         h = {
             "host": rel["hostname"],
-            "ip": anon.texto(rel["ip"]),
+            "ip": anon.endereco(rel["ip"]),
             "porta": rel["porta"],
             "plataforma": rel["plataforma"],
             "plataforma_nome": rel["plataforma_nome"],
@@ -864,11 +906,10 @@ def main():
 
     anon = Anonimizador(args.anonimizar)
     relatorios = []
-    for alvo in args.alvos:
-        ip, porta = alvo, args.porta
-        if ":" in alvo and alvo.rsplit(":", 1)[1].isdigit():
-            ip, p = alvo.rsplit(":", 1)
-            porta = int(p)
+    # Mesmo interpretador de alvos do netsnap: IPv6 sem colchetes não tem
+    # porta, e separar pelo último ':' apontaria para outro endereço.
+    alvos = [a for e in args.alvos for a in ns.expandir_entrada(e, args.porta)]
+    for ip, porta in alvos:
         print(f"\n[+] Diagnosticando {ip}:{porta} ...")
         rel = diagnosticar_host(ip, porta, usuario, senha, args.secoes,
                                 args.plataforma, args.timeout, anon)

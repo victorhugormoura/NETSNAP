@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.0**, netsnap_transporte 1.1.0, netdiag 1.1.1, netcve 0.3.1, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.1**, netsnap_transporte 1.1.2, netdiag 1.1.2, netcve 0.3.2, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -19,7 +19,7 @@ Usos típicos:
 
 ### Garantias
 
-- **Nenhum comando de escrita.** Os perfis contêm apenas `show`, `display`, `print`, leitura de arquivo e consultas SQL `SELECT`/`SHOW`/`DESCRIBE`. Cada snapshot declara `read_only: true` e `config_changes_made: 0`.
+- **Nenhum comando de escrita.** Os perfis contêm comandos de leitura (`show`, `display`, `print`, `/export`, leitura de arquivo e de estado de serviço — `systemctl`, `rndc`, `chronyc`, `unbound-control`, `certbot certificates`, `dig`, `curl` GET em `127.0.0.1` —, verificadores `install.sh --audit/--verify` do ISP-Stack), consultas SQL `SELECT`/`SHOW`/`DESCRIBE` e comandos de sessão (desligar paginação, `enable`/`config` onde a CLI exige, `quit`/`exit`). Cada snapshot declara `read_only: true` e `config_changes_made: 0`.
 - Exceções de contexto, documentadas no próprio snapshot: a OLT FiberHome exige `enable` e `config` até para `show`; o SmartAX exige `enable` para ler a configuração. Esses comandos apenas mudam o modo da sessão; nada é gravado.
 - **Chave SSH conferida.** No primeiro acesso a um equipamento, a chave do servidor SSH é registrada em `~/.netsnap_known_hosts` (`%USERPROFILE%\.netsnap_known_hosts` no Windows); nos acessos seguintes, chave diferente recusa a conexão **antes** do envio da senha, com mensagem explicando a possível interceptação e como liberar um equipamento trocado (apagar a linha dele). Vale para netsnap, netdiag e o painel; Telnet não tem esse recurso.
 - **Arquivos privados.** Em Linux e macOS, snapshots, relatórios, logs e as pastas criadas pelas ferramentas ficam legíveis só pelo dono (umask 077, pastas 0700). No Windows valem as permissões da pasta onde o netsnap está.
@@ -88,17 +88,17 @@ olt-centro.isp.net       nome DNS (resolvido na conexão)
 10.0.0.5   # BRAS        comentário após a entrada
 ```
 
-Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação. Portas fora de 1–65535 e entradas inválidas são ignoradas com aviso. Arquivo com BOM (Bloco de Notas) é aceito.
+Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; uma entrada com mais de 65.536 endereços é recusada antes de ser expandida. Portas fora de 1–65535 e entradas inválidas são ignoradas com aviso. Arquivo com BOM (Bloco de Notas) ou em UTF-16 (PowerShell 5) é aceito; arquivo inexistente encerra com erro.
 
 ---
 
 ## 5. Fluxo de uma coleta
 
-1. **Varredura** (modo FAST): ping paralelo (64 simultâneos); no Windows só conta como vivo quem responde com TTL. Sem o comando `ping` no sistema, a varredura é pulada com aviso e todos os alvos seguem para identificação.
+1. **Varredura** (modo FAST): ping paralelo (64 simultâneos); no Windows só conta como vivo quem responde com TTL ou, em IPv6, com tempo de resposta; no macOS e no FreeBSD o tempo de espera é passado em milissegundos, como esses sistemas exigem. Sem o comando `ping` no sistema, a varredura é pulada com aviso e todos os alvos seguem para identificação.
 2. **Identificação da plataforma**, por host, em paralelo:
-   - **SSH:** lê o banner SSH sem autenticar (milissegundos). Sem banner, a falha é classificada: porta recusada; sem resposta TCP; conexão aceita e encerrada sem banner (restrição de origem no serviço SSH ou excesso de conexões); ou conexão aceita e servidor em silêncio (limite de sessões ou proteção contra força bruta). Os dois últimos casos ganham uma segunda tentativa após 10 s. `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Em SSH, uma recusa de usuário/senha encerra a identificação na hora: a autenticação não depende da plataforma, e insistir com outro candidato só consumiria tentativas de login (retry-options do Junos, fail2ban). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux.
-   - **Huawei:** um `display version` decide entre VRP V5 (campus), VRP V8 (CloudEngine/NE) e SmartAX (OLT), que usam perfis diferentes.
-   - **Telnet:** lê o texto de login (respondendo à negociação de opções, que alguns equipamentos exigem antes de mostrar o pedido): `>>User name:` → SmartAX; `Username:` → VRP/Cisco; `Login:` → FiberHome/Linux; modelo no banner (MA5xxx, AN5xxx). Sem pista, testa no máximo dois perfis, com intervalo, para não disparar bloqueio por tentativas.
+   - **SSH:** lê o banner SSH sem autenticar (milissegundos). Sem banner, a falha é classificada: porta recusada; sem resposta TCP; conexão aceita e encerrada sem banner (restrição de origem no serviço SSH ou excesso de conexões); ou conexão aceita e servidor em silêncio (limite de sessões ou proteção contra força bruta). Os dois últimos casos ganham uma segunda tentativa após 10 s. `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux. Credencial recusada em qualquer etapa (SSH ou Telnet) encerra a identificação do host na hora, sem tentar o próximo candidato com a mesma senha (retry-options do Junos, fail2ban, limite de VTY da OLT).
+   - **Huawei:** um `display version` decide entre VRP V5 (campus, inclusive a linha *CloudEngine S*), VRP V8 (CloudEngine/NE) e SmartAX (OLT), que usam perfis diferentes. A versão do VRP prevalece sobre o nome do modelo.
+   - **Telnet:** lê o texto de login (respondendo à negociação de opções, que alguns equipamentos exigem antes de mostrar o pedido): `>>User name:` → SmartAX; `Username:` → VRP/Cisco; `Login:` → FiberHome/Linux; `nome-do-host login:` → Linux/NX-OS; modelo no banner (MA5xxx, AN5xxx). Sem pista, testa no máximo dois perfis, com intervalo e sem repetir um já tentado, para não disparar bloqueio por tentativas. A confirmação da FiberHome recusa saídas que identificam outro fabricante, para que um Cisco ou Linux nunca receba `enable`/`config`.
    - Host acessível e não reconhecido vai para uma **fila de pendentes**, perguntada ao operador depois da fase paralela (nenhuma thread fica parada esperando).
 3. **Coleta:** abre a sessão, trata o aviso `--Press any key--`, extrai o hostname do prompt (recusando capturas inválidas), executa os comandos preparatórios do perfil, as seções escolhidas e, em Linux, os módulos de aplicação detectados. Se um comando cair num paginador que o comando de desativação não cobriu (`---- More ----`, `--More--`, `Press any key to continue`, `-- [Q quit|...]`), o netsnap avança as páginas e remove os marcadores e as sequências de apagamento da saída.
 4. **Queda de sessão:** um vigia acompanha o canal SSH durante cada comando, e o fechamento pelo equipamento é percebido na hora, sem esperar o timeout de leitura. Se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente.
@@ -150,7 +150,7 @@ Detectados automaticamente após o login (cada detecção imprime `PRESENTE`). C
 | **WANGuard** (Andrisoft) | Arquivos de configuração e, no banco MySQL/MariaDB, a configuração operacional: componentes, zonas e prefixos (`ipaddr`), respostas/ações, roteadores BGP/blackhole/Flowspec, regras de mitigação ativas, fila de filtros, as 1000 anomalias mais recentes, distribuição de ataques por tipo (90 dias), logs de ataque, metadados de licença, retenção. Colunas de segredo são excluídas na origem; endereços binários convertidos com `INET6_NTOA`; datas Unix com `FROM_UNIXTIME`. Credenciais lidas de `dbhost.conf`/`dbpass.conf` em tempo de execução |
 | **Zabbix** | Configuração de server/proxy/agent, frontend, scripts externos, serviços e portas; no banco: hosts, grupos, templates, problemas, ações, dashboards |
 | **Grafana** | `grafana.ini`, provisioning, health da API; no banco (SQLite/MySQL/PostgreSQL): dashboards, datasources, regras de alerta, usuários |
-| **BIRD** | `bird.conf` e `conf.d`, `show status`, `show protocols`, memória e contagem de rotas, sessões TCP/179 |
+| **BIRD** | `bird.conf` e `conf.d`, `show status`, `show protocols` e `show protocols all`, memória e contagem de rotas (BIRD 2 por `birdc`/`birdcl`; BIRD 1 também por `birdc6`, que atende o daemon IPv6), sessões TCP/179 |
 | **SmokePing** | Configuração, quantidade de alvos, volume de RRDs |
 | **BIND9** | Configuração efetiva (`named-checkconf -p`, compactada quando há dezenas de milhares de zonas), `rndc status`, portas; **bloqueio DNS**: identifica RPZ ou sinkhole por zona (AnaBlock), lista instalada, script e cron de atualização, e prova de efetividade por `dig` em domínios de teste, numa amostra da lista e num domínio de controle |
 | **ISP-Stack** | `provider.conf`, Routinator, jumphost, módulos instalados, serviços do stack (Unbound, Prometheus, Grafana, Apache, fail2ban, certbot, GVM) e verificadores oficiais `install.sh --audit` e `--verify` (só executados se o script declarar essas opções) |
@@ -169,9 +169,9 @@ Pasta: `snapshots/` ao lado do script ou, sem permissão de escrita, `~/netsnap_
 
 Estrutura:
 
-```markdown
+````markdown
 ---
-netsnap_version: "1.16.0"
+netsnap_version: "1.16.1"
 host: "MX204-BORDA"
 ip: "203.0.113.200"
 platform_key: "juniper_junos"
@@ -197,12 +197,12 @@ config_changes_made: 0
 <saída bruta do comando>
 ```
 ## <Nome do módulo> — <Seção>            (módulos de aplicação em Linux)
-```
+````
 
 Convenções:
 
 - Cada valor do front-matter é JSON válido (listas e booleanos incluídos), portanto YAML válido.
-- `##` = seção temática; `###` = comando **exatamente como executado**; bloco ```` ```text ```` = saída bruta.
+- `##` = seção temática; `###` = comando **exatamente como executado**; bloco ```` ```text ```` = saída bruta. Quando a própria saída contém crases, a cerca do bloco fica uma crase mais longa que a maior sequência delas, para que o bloco não termine antes da hora.
 - `***REMOVIDO***` = valor sensível suprimido; `***CERTIFICADO/CHAVE REMOVIDO***` = bloco PEM; `***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***` = arquivo que é integralmente segredo.
 - `_(sem saída útil — retorno: ...)_` = comando vazio ou não suportado por aquela plataforma/firmware. **Não** significa recurso desabilitado.
 
@@ -218,7 +218,7 @@ Convenções:
 
 ## 9. Tratamento do conteúdo
 
-- **Sanitização** (padrão ligado): senhas e hashes, inclusive com qualificador (`password irreversible-cipher $1c$...`, `enable secret 9 ...`, `key-string 7 ...`, `authentication-key 1 type md5 value "$9$..."`, `pre-shared-key ascii-text ...`); chaves BGP/OSPF/NTP/TACACS/RADIUS/MD5 do MikroTik; communities SNMP v1/v2c (Cisco, Huawei, Junos, MikroTik, snmpd.conf) e credenciais SNMPv3; chaves WireGuard, `bindpw`, tokens e chaves de API; formatos `chave=valor`, `chave: valor`, JSON, PHP (`$DB['PASSWORD']`); blocos PEM, inclusive truncados; arquivos inteiramente secretos (`dbpass.conf`). Comunidades **BGP** são preservadas.
+- **Sanitização** (padrão ligado): senhas e hashes, inclusive com qualificador (`password irreversible-cipher $1c$...`, `enable secret 9 ...`, `key-string 7 ...`, `authentication-key 1 type md5 value "$9$..."`, `pre-shared-key ascii-text ...`); chaves BGP/OSPF/NTP/TACACS/RADIUS/MD5 do MikroTik; communities SNMP v1/v2c (Cisco, Huawei, Junos, MikroTik, snmpd.conf), inclusive em destinos de trap (`snmp-server host`, `snmp-agent target-host`, `trapsink`/`trap2sink`/`informsink`), e credenciais SNMPv3 (`auth`/`priv`, `createUser`); chaves RADIUS/TACACS+/IKE em texto claro, OSPF `message-digest-key`, Huawei `authentication-mode ... plain`, HSRP e `wpa-psk`; todas as cifras Huawei (`%^%#`, `%@%@`, `%$%$`, `%+%#`, `%#%#`); chaves WireGuard, `bindpw`, tokens e chaves de API, chaves de serviço do Alertmanager e webhooks; credenciais em URL (`esquema://usuario:senha@`) e em linha de comando (`mysql -p`, `sshpass -p`, `curl -u`); formatos `chave=valor`, `chave: valor`, JSON, PHP (`$DB['PASSWORD']`); blocos PEM, inclusive truncados; arquivos inteiramente secretos (`dbpass.conf`). Comunidades **BGP** são preservadas.
 - **Sanitização, outras formas cobertas:** credencial em URL (`mysql://u:SENHA@`, repositórios apt), senha em linha de comando (crontab, `ps`, journal: `mysql -p`, `mysqldump -p`, `sshpass -p`, `curl -u`, `lftp -u`, `smbclient -U`, `ttyd -c`), cabeçalho `Authorization` (Basic/Bearer), tokens de formato conhecido (Telegram com o id do bot preservado, JWT, AWS, GitHub/GitLab, Slack, webhooks Slack/Discord), chaves Cisco em claro (`radius-server`/`tacacs-server ... key`, `crypto isakmp key`, keyring `pre-shared-key`, `message-digest-key`, HSRP, `wpa-psk`, `snmp-server host ... COMUNIDADE`), Huawei `authentication-mode ... plain`, `target-host ... securityname` (v1/v2c), cifras `%@%@`/`%$%$`/`%#%#`/`%+%#`, net-snmp `createUser`/`trap2sink`/`trapcommunity`, chaves `preshared-key`, `privacy-key`, `community-name`, `ADMIN_PASS=`, `senha:`, OLT `password-auth`/`checkcode-auth`, e hashes crypt soltos (o prefixo do algoritmo fica visível).
 - **Sanitização, o que deixou de ser removido por engano:** `Accepted/Failed password for <usuário>` dos logs do sshd, `PWD=/caminho` do sudo, versões dos pacotes `passwd`/`base-passwd` no inventário (usadas pelo netcve), ajustes de política de senha (`password minimum-length`, `password expire`, `complexity-check`), nomes de chave TSIG do BIND, `auth-method=pre-shared-key peer=X` do RouterOS.
 - **Bloco PEM sem o fim:** uma chave privada sem `END` (saída truncada) leva consigo o resto da saída; um certificado sem `END` remove só o cabeçalho e as linhas em base64 seguintes.
@@ -247,7 +247,7 @@ python3 netdiag.py 10.0.0.1 [10.0.0.2 ...] [--porta 22] [--usuario U] [--secao o
                    [--plataforma fiberhome] [--timeout 120] [--anonimizar] [--sensivel]
 ```
 
-Repete a detecção registrando cada etapa e o tempo, roda cada comando do perfil (e dos módulos Linux) isoladamente e classifica em `OK`, `VAZIO`, `NAO_SUPORTADO`, `ERRO` ou `PAGINACAO`, marcando os lentos (> 30 s). Gera `_diagnostico_<ts>.md` e `.json` com amostra dos comandos problemáticos, versão e linhas de licença encontradas. `--anonimizar` troca IPv4/IPv6, MACs (três formatos), hostnames e números de série por substitutos consistentes, preservando máscaras e loopback. **Só SSH.**
+Repete a detecção registrando cada etapa e o tempo, roda cada comando do perfil (e dos módulos Linux) isoladamente e classifica em `OK`, `VAZIO`, `NAO_SUPORTADO`, `ERRO` ou `PAGINACAO`, marcando os lentos (> 30 s). Gera `_diagnostico_<ts>.md` e `.json` com amostra dos comandos problemáticos, versão e linhas de licença encontradas. `--anonimizar` troca IPv4/IPv6, MACs (três formatos), hostnames (inclusive alvos informados por nome DNS) e números de série por substitutos consistentes, preservando máscaras e loopback. Os alvos seguem o formato do netsnap (IPv6, `[IPv6]:porta`, CIDR). Os comandos preparatórios não entram na cobertura. **Só SSH.**
 
 ### netcve
 
@@ -256,7 +256,7 @@ python3 netcve.py snapshots/ [--api-key K | NVD_API_KEY] [--sem-rede] [--csv] [-
                              [--limite-cve 15] [--inseguro]
 ```
 
-Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP e OLTs têm versão extraída mas não consultada (sem CPE genérico na NVD). Resultado é triagem, não laudo.
+Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP, SmartAX MA5600 e FiberHome têm versão extraída mas não consultada (sem CPE genérico na NVD); o SmartAX MA5800 é consultado como `huawei:ma5800_firmware`. A versão é convertida para o formato CPE da NVD (Junos `21.4R3-S5.4` → `21.4:r3-s5`; IOS-XE `17.03.04a` → `17.3.4a`). Falha de TLS ou erro 4xx não é repetido; o cache é gravado a cada consulta. Resultado é triagem, não laudo.
 
 ### Painel web (netsnap_web)
 
@@ -285,7 +285,7 @@ Gera `{documento, versao, gerado_em, nos[], enlaces[], sem_vizinhanca[]}`.
 
 ### netsnap_transporte
 
-Sessões SSH e Telnet sem pacotes externos: Telnet completo (RFC 854) sobre socket; SSH conduzindo o cliente OpenSSH do sistema por pseudoterminal (Unix) ou `SSH_ASKPASS` (Windows, OpenSSH 8.4+). Pede algoritmos legados (DH group1/14-sha1, ssh-rsa, CBC, hmac-sha1) apenas se o cliente local os conhecer (`ssh -Q`), o que evita a falha do OpenSSH 10. Interface única para os dois transportes e para o Netmiko opcional:
+Sessões SSH e Telnet sem pacotes externos: Telnet completo (RFC 854) sobre socket; SSH conduzindo o cliente OpenSSH do sistema por pseudoterminal (Unix) ou `SSH_ASKPASS` (Windows, OpenSSH 8.4+). Pede algoritmos legados (DH group1/14-sha1, ssh-rsa, CBC, hmac-sha1) apenas se o cliente local os conhecer (`ssh -Q`), o que evita a falha do OpenSSH 10. Usa o mesmo `~/.netsnap_known_hosts` do netsnap (`StrictHostKeyChecking=accept-new`): chave nova é registrada, chave divergente recusa a conexão sem enviar a senha. Interface única para os dois transportes e para o Netmiko opcional:
 
 ```python
 import netsnap_transporte as tr
@@ -315,15 +315,15 @@ def ler_snapshot(caminho):
     itens = []
     for bloco in re.split(r"(?m)^## ", texto)[1:]:
         secao = bloco.split("\n", 1)[0].strip()
-        for m in re.finditer(r"^### `(.+?)`\n+(?:```text\n(.*?)\n```|_\(sem saída útil.*?\)_)",
+        for m in re.finditer(r"^### `(.+?)`\n+(?:(`{3,})text\n(.*?)\n\2\n|_\(sem saída útil.*?\)_)",
                              bloco, re.S | re.M):
-            itens.append((secao, m.group(1), m.group(2)))   # None = sem saída útil
+            itens.append((secao, m.group(1), m.group(3)))   # None = sem saída útil
     return meta, itens
 ```
 
 O mesmo comando pode aparecer em mais de uma seção (por exemplo `show chassis hardware detail` em ópticas e em inventário), por isso a chave natural é o par seção + comando.
 
-A saída dos comandos não é escapada. Uma linha de saída que comece com `## ` ou com três crases confundiria este parser simplificado; para uso em produção, percorra o arquivo linha a linha e ignore cabeçalhos enquanto estiver dentro de um bloco ```` ```text ````.
+A saída dos comandos não é escapada; o que a protege é a cerca, sempre mais longa que qualquer sequência de crases da saída. Uma linha de saída que comece com `## ` ainda confundiria este parser simplificado; para uso em produção, percorra o arquivo linha a linha e ignore cabeçalhos enquanto estiver dentro de um bloco de código.
 
 - Use `platform_key` para escolher o parser e `collected_at` para ordenar coletas.
 - Confira `session_lost` antes de concluir que algo não existe.
@@ -357,4 +357,4 @@ A saída dos comandos não é escapada. Uma linha de saída que comece com `## `
 | Taxa de erro de interface | Contadores são cumulativos; uma coleta não dá taxa — são necessárias duas |
 | Alcance de transceiver | Inferido do PN em Juniper/Cisco; não é comprimento real de fibra |
 | Rate-limit/anti-brute-force | Muitas instâncias simultâneas contra o mesmo segmento podem gerar falha de banner SSH; o netsnap detecta, aguarda e tenta uma vez |
-| Snapshots Huawei e Cisco gerados pela 1.15.1 | Saída cortada quando o nome do equipamento aparece nela (configuração, logs); corrigido na 1.15.2. Snapshots dessas plataformas com `netsnap_version: "1.15.1"` devem ser coletados de novo. Junos, MikroTik e Linux não são afetados (o prompt inclui o usuário) |
+| Snapshots Huawei e Cisco gerados pela 1.15.1 | Saída cortada quando o nome do equipamento aparece nela (configuração, logs); corrigido na 1.16.0. Snapshots dessas plataformas com `netsnap_version: "1.15.1"` devem ser coletados de novo. Junos, MikroTik e Linux não são afetados (o prompt inclui o usuário) |
