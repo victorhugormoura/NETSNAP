@@ -355,6 +355,7 @@ Requisitos: `sudo` para ler os arquivos de configuração, e o cliente correspon
 
 ## Avisos importantes
 
+- **Chave SSH dos equipamentos.** No primeiro acesso a chave do servidor SSH fica registrada em `~/.netsnap_known_hosts` (no Windows, `%USERPROFILE%\.netsnap_known_hosts`). Se ela mudar, a coleta daquele equipamento é recusada antes de enviar a senha — pode ser interceptação. Se o equipamento foi trocado ou teve a chave refeita, apague a linha dele nesse arquivo.
 - **O filtro de sensíveis é melhor esforço.** A remoção por regex cobre os padrões mais comuns (Junos `encrypted-password`, Huawei `irreversible-cipher`, communities SNMP, chaves e certificados), mas **revise o arquivo antes de compartilhar com terceiros ou enviar para serviços externos de IA**.
 - Em roteadores com muitas subinterfaces (ex.: BNG com PPPoE), comandos de interface completos podem gerar arquivos grandes e demorar alguns minutos.
 - Na OLT MA5800 a coleta básica fica no nível de placa/CPU/alarmes; sinal óptico por PON exige modo de configuração, o que viola a regra de somente leitura.

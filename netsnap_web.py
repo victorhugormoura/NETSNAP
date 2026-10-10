@@ -30,6 +30,7 @@ Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 __version__ = "0.2.0"
 
 import argparse
+import atexit
 import difflib
 import hmac
 import json
@@ -68,7 +69,7 @@ def pasta_gravavel(nome_local, nome_home):
     for pasta in (os.path.join(AQUI, nome_local),
                   os.path.join(os.path.expanduser("~"), nome_home)):
         try:
-            os.makedirs(pasta, exist_ok=True)
+            os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
             with open(teste, "w") as f:
                 f.write("ok")
@@ -277,6 +278,13 @@ def vigiar_painel():
 
 
 def modo_executor(tipo):
+    if os.name == "posix":
+        # O processo de coleta guarda a senha em memória: sem core dump.
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except (ImportError, ValueError, OSError):
+            pass
     cfg = json.loads(sys.stdin.readline())
     threading.Thread(target=vigiar_painel, daemon=True).start()
     try:
@@ -772,9 +780,9 @@ MODELO = [
     (r"(?m)^Model:\s*(\S+)", None),
     (r"HUAWEI\s+([A-Z]{1,3}\d{3,5}[\w-]*)\s+(?:Routing Switch\s+)?uptime", None),
     (r"\b(MA5[68]\d\d[\w-]*)", None),
-    (r"(?m)^\s*cisco\s+(Nexus\s*\S+.*?)\s+[Cc]hassis", None),
+    (r"(?m)^[ \t]*cisco\s+(Nexus\s*\S+.*?)\s+[Cc]hassis", None),
     (r"(?m)^[Cc]isco\s+(\S+)\s+\(.*\)\s+processor", None),
-    (r"(?m)^\s*(?:board-name|model):\s*(.+)$", None),
+    (r"(?m)^[ \t]*(?:board-name|model):\s*(.+)$", None),
     (r"\b(AN\d{4}[\w-]*)", None),
     (r'PRETTY_NAME="([^"]+)"', None),
 ]
@@ -1048,6 +1056,9 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
 class Manipulador(BaseHTTPRequestHandler):
     server_version = "netsnap-web"
     sys_version = ""
+    # Conexão parada (cliente lento ou que nunca termina o pedido) é
+    # encerrada: sem isso, cada uma prende uma thread indefinidamente.
+    timeout = 30
 
     def log_message(self, formato, *args):
         pass
@@ -1107,8 +1118,11 @@ class Manipulador(BaseHTTPRequestHandler):
         self.wfile.write(corpo)
 
     def _corpo(self):
-        tamanho = int(self.headers.get("Content-Length") or 0)
-        if tamanho > LIMITE_CORPO:
+        try:
+            tamanho = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ErroAPI(400, "Content-Length inválido")
+        if tamanho < 0 or tamanho > LIMITE_CORPO:
             raise ErroAPI(413, "Requisição grande demais")
         if not (self.headers.get("Content-Type") or "").startswith(
                 "application/json"):
@@ -1307,8 +1321,17 @@ def abrir_navegador(url):
                     f'<meta http-equiv="refresh" content="0;url={url}">'
                     f'<title>netsnap</title><a href="{url}">Abrir o painel</a>')
         webbrowser.open(pathlib.Path(caminho).as_uri())
-        threading.Timer(60, lambda: os.path.exists(caminho) and
-                        os.remove(caminho)).start()
+        def apagar_arquivo():
+            try:
+                os.remove(caminho)
+            except OSError:
+                pass
+        # Daemon: o painel não espera o timer para encerrar; se encerrar
+        # antes do minuto, o arquivo sai na saída do processo.
+        apagar = threading.Timer(60, apagar_arquivo)
+        apagar.daemon = True
+        apagar.start()
+        atexit.register(apagar_arquivo)
     except OSError:
         webbrowser.open(url)
 

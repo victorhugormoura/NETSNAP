@@ -101,6 +101,10 @@ def ler_tabela(texto):
     vizinhos = []
     linhas = texto.splitlines()
     for idx, linha in enumerate(linhas):
+        # Todo cabeçalho reconhecido tem a coluna da porta local; sem a
+        # palavra, a linha nem é examinada (saída longa ou hostil).
+        if "local" not in linha.lower():
+            continue
         pos = _posicoes(linha)
         papeis = {p for _, p in pos}
         if not {"local", "dispositivo"} <= papeis and \
@@ -164,14 +168,14 @@ def ler_junos_detalhe(texto):
     'show lldp neighbors interface X'. Cada vizinho é um bloco "LLDP Neighbor
     Information" com "Local Information" e "Neighbour Information"."""
     vizinhos = []
-    for bloco in re.split(r"(?mi)^\s*LLDP Neighbou?r Information\s*:?\s*$",
+    for bloco in re.split(r"(?mi)^[ \t]*LLDP Neighbou?r Information\s*:?\s*$",
                           texto):
-        local = _campo(bloco, r"^\s*Local Interface\s*:\s*(\S+)")
+        local = _campo(bloco, r"^[ \t]*Local Interface\s*:\s*(\S+)")
         if not local:
             continue
-        tipo_porta = _campo(bloco, r"^\s*Port type\s*:\s*(.*)$")
-        porta_id = _campo(bloco, r"^\s*Port ID\s*:\s*(.*)$")
-        descricao = _campo(bloco, r"^\s*Port description\s*:\s*(.*)$")
+        tipo_porta = _campo(bloco, r"^[ \t]*Port type\s*:\s*(.*)$")
+        porta_id = _campo(bloco, r"^[ \t]*Port ID\s*:\s*(.*)$")
+        descricao = _campo(bloco, r"^[ \t]*Port description\s*:\s*(.*)$")
         # Vizinho Junos com port-id-subtype padrão (locally-assigned) anuncia
         # o índice SNMP como Port ID; a descrição da porta é o que identifica
         # a interface.
@@ -180,10 +184,10 @@ def ler_junos_detalhe(texto):
         remota = descricao if (indice and descricao) else porta_id
         vizinhos.append(_vizinho(
             local,
-            _campo(bloco, r"^\s*System name\s*:\s*(.*)$"),
+            _campo(bloco, r"^[ \t]*System name\s*:\s*(.*)$"),
             remota,
-            _campo(bloco, r"^\s*Address\s*:\s*(\d+\.\d+\.\d+\.\d+)",
-                   r"^\s*Management address\s*:\s*(\d+\.\d+\.\d+\.\d+)"),
+            _campo(bloco, r"^[ \t]*Address\s*:\s*(\d+\.\d+\.\d+\.\d+)",
+                   r"^[ \t]*Management address\s*:\s*(\d+\.\d+\.\d+\.\d+)"),
             [porta_id, descricao]))
     return vizinhos
 
@@ -198,7 +202,7 @@ def ler_cdp_detalhe(texto):
             _campo(bloco, r"^Interface\s*:\s*([^,]+),"),
             disp,
             _campo(bloco, r"Port ID \(outgoing port\)\s*:\s*(\S+)"),
-            _campo(bloco, r"^\s*(?:IP|IPv4) [Aa]ddress\s*:\s*([0-9.]+)")))
+            _campo(bloco, r"^[ \t]*(?:IP|IPv4) [Aa]ddress\s*:\s*([0-9.]+)")))
     return vizinhos
 
 
@@ -207,32 +211,32 @@ def ler_lldp_detalhe_cisco(texto):
     vizinhos = []
     # NX-OS lista "Local Port id" depois de "Port id": o bloco começa em
     # "Chassis id". IOS e IOS-XR começam pela porta local.
-    if re.search(r"(?m)^\s*Local Port id\s*:", texto):
-        inicio = r"(?m)(?=^\s*Chassis id\s*:)"
+    if re.search(r"(?m)^[ \t]*Local Port id\s*:", texto):
+        inicio = r"(?m)(?=^[ \t]*Chassis id\s*:)"
     else:
-        inicio = r"(?m)(?=^\s*(?:Local Intf|Local Interface)\s*:)"
+        inicio = r"(?m)(?=^[ \t]*(?:Local Intf|Local Interface)\s*:)"
     for bloco in re.split(inicio, texto):
-        local = _campo(bloco, r"^\s*(?:Local Intf|Local Port id|"
+        local = _campo(bloco, r"^[ \t]*(?:Local Intf|Local Port id|"
                               r"Local Interface)\s*:\s*(\S+)")
         if not local:
             continue
         vizinhos.append(_vizinho(
             local,
-            _campo(bloco, r"^\s*System Name\s*:\s*(.*)$"),
-            _campo(bloco, r"^\s*Port id\s*:\s*(.*)$"),
-            _campo(bloco, r"^\s*(?:IP|IPv4 address|Management Address(?:es)?)"
+            _campo(bloco, r"^[ \t]*System Name\s*:\s*(.*)$"),
+            _campo(bloco, r"^[ \t]*Port id\s*:\s*(.*)$"),
+            _campo(bloco, r"^[ \t]*(?:IP|IPv4 address|Management Address(?:es)?)"
                           r"\s*:\s*([0-9]+\.[0-9.]+)",
                    r"^\s+IP\s*:\s*([0-9.]+)"),
-            [_campo(bloco, r"^\s*Port Description\s*:\s*(.*)$")]))
+            [_campo(bloco, r"^[ \t]*Port Description\s*:\s*(.*)$")]))
     return vizinhos
 
 
 def ler_mikrotik(texto):
     """'/ip neighbor print detail': entradas numeradas com chave=valor."""
     vizinhos = []
-    entradas = re.split(r"(?m)^\s*\d+\s+(?=[A-Z ]*\s*\w[\w-]*=)", texto)
+    entradas = re.split(r"(?m)^[ \t]*\d+\s+(?=[A-Z ]*\s*\w[\w-]*=)", texto)
     for e in entradas:
-        pares = dict(re.findall(r'([\w-]+)=("[^"]*"|\S+)', e))
+        pares = dict(re.findall(r'(?<![\w-])([\w-]+)=("[^"]*"|\S+)', e))
         pares = {k: v.strip('"') for k, v in pares.items()}
         if not pares.get("interface"):
             continue
@@ -251,14 +255,14 @@ def ler_lldpd(texto):
         local = _campo(bloco, r"^Interface:\s*([^,\s]+)")
         if not local:
             continue
-        porta = _campo(bloco, r"^\s*PortID:\s*(?:ifname|local)\s+(.*)$",
-                       r"^\s*PortID:\s*\S+\s+(.*)$")
+        porta = _campo(bloco, r"^[ \t]*PortID:\s*(?:ifname|local)\s+(.*)$",
+                       r"^[ \t]*PortID:\s*\S+\s+(.*)$")
         vizinhos.append(_vizinho(
             local,
-            _campo(bloco, r"^\s*SysName:\s*(.*)$"),
+            _campo(bloco, r"^[ \t]*SysName:\s*(.*)$"),
             porta,
-            _campo(bloco, r"^\s*MgmtIP:\s*([0-9.]+)"),
-            [_campo(bloco, r"^\s*PortDescr:\s*(.*)$")]))
+            _campo(bloco, r"^[ \t]*MgmtIP:\s*([0-9.]+)"),
+            [_campo(bloco, r"^[ \t]*PortDescr:\s*(.*)$")]))
     return vizinhos
 
 
@@ -268,7 +272,7 @@ def _eh_tabela(comando):
 
 
 PADRAO_BLOCO_JUNOS = re.compile(
-    r"(?mi)^\s*(?:LLDP Neighbou?r Information|Neighbou?r Information)\s*:")
+    r"(?mi)^[ \t]*(?:LLDP Neighbou?r Information|Neighbou?r Information)\s*:")
 
 
 def vizinhos_do_comando(comando, saida):
@@ -470,7 +474,7 @@ def _variantes_porta(nome):
 # name :" aparece na lista de vizinhos do Huawei e designa o vizinho.
 PADROES_NOME_CONFIG = [
     r"(?m)^set system host-name\s+(\S+)",
-    r"(?m)^\s*sysname\s+(\S+)",
+    r"(?m)^[ \t]*sysname\s+(\S+)",
     r"(?m)^hostname\s+(\S+)",
     r"(?m)^/system identity\s*\n\s*set name=(\"[^\"]+\"|\S+)",
 ]
@@ -504,7 +508,7 @@ def nomes_do_host(snap):
                     nome = m.group(1).strip('"')
                     nomes.add(nome)
                     # Junos anuncia o FQDN quando o host-name o contém
-                    # ("BRAS-CLEMENTINA.migonet.com.br"); vizinhos podem
+                    # ("BRAS-01.exemplo.net.br"); vizinhos podem
                     # usar só a primeira parte.
                     if "." in nome and not re.fullmatch(r"[\d.]+", nome):
                         nomes.add(nome.split(".", 1)[0])
@@ -582,7 +586,7 @@ def enderecos_mikrotik(texto):
         if secao not in ("/ip address", "/ipv6 address") or \
                 not linha.startswith("add "):
             continue
-        pares = dict(re.findall(r'([\w-]+)=("[^"]*"|\S+)', linha))
+        pares = dict(re.findall(r'(?<![\w-])([\w-]+)=("[^"]*"|\S+)', linha))
         if pares.get("disabled") == "yes":
             continue
         ip = _interface_ip(pares.get("address", "").strip('"'))
@@ -622,9 +626,9 @@ def _descricoes(snap):
             if re.search(r"(?i)\bdescription\b", linha) and \
                     re.match(r"(?i)\s*interface", linha):
                 for row in linhas[i + 1:]:
-                    m = re.match(r"^(\S+)\s+\S+\s+\S+\s+(.+?)\s*$", row)
-                    if m and not re.match(r"[-=]+$", m.group(1)):
-                        mapa.setdefault(_norm(m.group(2)), m.group(1))
+                    p = row.split(None, 3)
+                    if len(p) == 4 and not re.match(r"[-=]+$", p[0]):
+                        mapa.setdefault(_norm(p[3]), p[0])
                 break
     return mapa
 
