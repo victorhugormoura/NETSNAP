@@ -360,3 +360,22 @@ details.item > .diff { margin-top: 8px; }
   form.grade, .colunas, .leitor { grid-template-columns: 1fr; }
   .leitor-indice { position: static; max-height: 260px; }
 }
+
+/* ------------------------------------------------------------ desenho da topologia */
+.desenho-barra { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.desenho-barra .acoes { margin-top: 0; }
+/* O desenho é sempre claro (é o mesmo que vai para PNG e PDF), também no
+   tema escuro. */
+.desenho {
+  margin-top: 10px; background: #ffffff; border: 1px solid var(--linha);
+  border-radius: var(--raio); overflow: auto; max-height: 75vh; min-height: 120px;
+}
+.desenho img { display: block; max-width: 100%; height: auto; }
+.desenho .carregando, .desenho .vazio { padding: 16px; color: #5a6878; }
+.sem-vizinhanca { display: grid; gap: 10px; }
+.item-vizinhanca { border-left: 3px solid var(--alerta); padding: 2px 0 2px 12px; }
+.item-vizinhanca p { margin: 2px 0; }
+pre.comandos {
+  margin: 6px 0; padding: 8px 10px; background: var(--console); border-radius: 4px;
+  font-family: var(--mono); font-size: 12.5px; overflow-x: auto; white-space: pre;
+}

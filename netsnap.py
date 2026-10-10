@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.15.1"
+__version__ = "1.16.0"
 
 import os
 import re
@@ -40,6 +40,13 @@ from netmiko import ConnectHandler
 from netmiko.ssh_autodetect import SSHDetect
 from netmiko.terminal_server import TerminalServerTelnet
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
+
+try:
+    # Diagnóstico da vizinhança (sem vizinhos, LLDP desligado, como ativar).
+    # O módulo acompanha o netsnap; sem ele, a coleta segue sem o aviso.
+    import netsnap_topologia as topologia
+except ImportError:
+    topologia = None
 
 # Suprime tracebacks da thread de transporte do Paramiko no console;
 # falhas de conexão são reportadas pelo próprio netsnap de forma resumida.
@@ -213,6 +220,10 @@ PERFIS = {
         ],
         "vizinhanca": [
             "show lldp neighbors",
+            # Forma detalhada (19.1R2+): nome completo do vizinho, Port ID e
+            # descrição da porta remota, endereço de gerência. Em releases
+            # anteriores o comando é recusado e vale a tabela acima.
+            "show lldp neighbors detail",
             # Distingue "sem vizinho" de "LLDP desabilitado": retorno vazio
             # em 'show lldp neighbors' não diz qual dos dois é o caso.
             "show lldp",
@@ -539,6 +550,9 @@ PERFIS = {
         ],
         "vizinhanca": [
             "/ip neighbor print detail without-paging",
+            # Interfaces e protocolos em que a descoberta está ativa: separa
+            # "sem vizinho" de "descoberta desligada".
+            "/ip neighbor discovery-settings print",
         ],
         "inventario": [
             "/system resource print",
@@ -2212,11 +2226,15 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
 
     Devolve (situacao, banner). A situação separa casos que pedem ações
     diferentes do operador:
-      ok          banner recebido
-      recusada    nada escuta na porta (serviço desligado ou outra porta)
+      ok            banner recebido
+      recusada      nada escuta na porta (serviço desligado ou outra porta)
       sem_resposta  nenhuma resposta TCP (host fora, ACL, firewall)
-      sem_banner  conexão aceita, mas o servidor não se identificou —
-                  típico de limite de sessões ou proteção contra força bruta
+      fechada       conexão aceita e encerrada pelo servidor sem banner —
+                    restrição de origem no serviço (lista de endereços
+                    permitidos, TCP wrappers) ou excesso de conexões
+                    (MaxStartups e equivalentes)
+      sem_banner    conexão aceita, servidor em silêncio até o fim do prazo —
+                    típico de limite de sessões ou proteção contra força bruta
     """
     try:
         s = socket.create_connection((ip, porta), timeout=tempo)
@@ -2224,6 +2242,7 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
         return "recusada", None
     except OSError:
         return "sem_resposta", None
+    encerrada = False
     with s:
         s.settimeout(tempo)
         dados = b""
@@ -2231,12 +2250,17 @@ def sondar_ssh(ip: str, porta: int, tempo: int = 4):
             while b"\n" not in dados and len(dados) < 512:
                 pedaco = s.recv(256)
                 if not pedaco:
+                    encerrada = True
                     break
                 dados += pedaco
-        except OSError:
+        except socket.timeout:
             pass
+        except OSError:
+            encerrada = True
     banner = dados.decode("utf-8", "replace").strip()
-    return ("ok", banner) if banner else ("sem_banner", None)
+    if banner:
+        return "ok", banner
+    return ("fechada" if encerrada else "sem_banner"), None
 
 
 MOTIVO_SONDAGEM = {
@@ -2244,10 +2268,18 @@ MOTIVO_SONDAGEM = {
                 "em outra porta)",
     "sem_resposta": "sem resposta TCP na porta {porta} (host fora do ar, "
                     "ACL ou firewall)",
+    "fechada": "a porta {porta} aceitou a conexão e a encerrou sem enviar o "
+               "banner SSH, também na segunda tentativa — provável restrição "
+               "de origem no serviço SSH (endereços permitidos, TCP wrappers) "
+               "ou limite de conexões simultâneas",
     "sem_banner": "porta {porta} aberta, mas o equipamento não enviou o "
-                  "banner SSH — provável limite de sessões simultâneas ou "
-                  "proteção contra força bruta",
+                  "banner SSH, também na segunda tentativa — provável limite "
+                  "de sessões simultâneas ou proteção contra força bruta",
 }
+
+# Situações transitórias da sondagem: valem uma segunda tentativa.
+SONDAGEM_TRANSITORIA = ("fechada", "sem_banner")
+ESPERA_NOVA_SONDAGEM = 10
 
 
 def ler_banner(ip: str, porta: int, tempo: int = 4):
@@ -2306,6 +2338,16 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo,
                                    f"{'confirmado' if ok else 'nao confere'} "
                                    f"({resumir_saida(saida, 120)})")
         return ok
+    except NetmikoAuthenticationException as e:
+        depurar(ip, "confirmacao", f"{tipo}: falhou ({type(e).__name__}: {e})")
+        # No SSH a autenticação acontece antes de qualquer comando e não
+        # depende da plataforma: repetir com outro candidato só gasta
+        # tentativas de login e pode bloquear o usuário (retry-options do
+        # Junos, fail2ban). No Telnet o login é conduzido pelo driver, e uma
+        # recusa pode vir de um driver que não reconheceu o pedido de senha.
+        if protocolo == "ssh":
+            raise
+        return False
     except Exception as e:
         depurar(ip, "confirmacao", f"{tipo}: falhou ({type(e).__name__}: {e})")
         return False
@@ -2356,6 +2398,10 @@ def eh_linux(ip, usuario, senha, porta, protocolo="ssh") -> bool:
                             port=porta, timeout=20, conn_timeout=12) as conn:
             saida = conn.send_command("uname -s", read_timeout=15)
         return "Linux" in saida
+    except NetmikoAuthenticationException:
+        if protocolo == "ssh":
+            raise
+        return False
     except Exception:
         return False
 
@@ -2430,6 +2476,13 @@ def detectar(ip, usuario, senha, porta, protocolo="ssh"):
         return detectar_telnet(ip, usuario, senha, porta)
     t0 = time.perf_counter()
     situacao, banner = sondar_ssh(ip, porta)
+    if situacao in SONDAGEM_TRANSITORIA:
+        depurar(ip, "banner", f"{situacao}; nova tentativa em "
+                              f"{ESPERA_NOVA_SONDAGEM}s")
+        log(ip, f"banner SSH não recebido; nova tentativa em "
+                f"{ESPERA_NOVA_SONDAGEM}s ...")
+        time.sleep(ESPERA_NOVA_SONDAGEM)
+        situacao, banner = sondar_ssh(ip, porta)
     if situacao != "ok":
         motivo = MOTIVO_SONDAGEM[situacao].format(porta=porta)
         depurar(ip, "banner", motivo)
@@ -2681,9 +2734,19 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
         else:
             # O fim da leitura é o prompt ou um paginador; no segundo caso o
             # equipamento recusou desligar a paginação e as páginas são
-            # respondidas aqui.
-            base = re.escape(getattr(conn, "base_prompt", "") or "")
-            esperado = rf"(?:{base}|(?i:{NUCLEO_PAGINADOR}))" if base else None
+            # respondidas aqui. O prompt é o completo, como no padrão do
+            # Netmiko: o nome base sozinho aparece na própria saída (sysname
+            # na configuração, hostname nos logs) e encerraria a leitura no
+            # primeiro trecho recebido. O paginador só conta no fim do que
+            # já chegou (seguido, no máximo, de espaços e códigos de terminal),
+            # quando o equipamento parou à espera de uma tecla.
+            try:
+                prompt = (conn.find_prompt() or "").strip()
+            except Exception:
+                prompt = ""
+            esperado = (rf"(?:{re.escape(prompt)}|"
+                        rf"(?i:{NUCLEO_PAGINADOR})"
+                        rf"(?:\x1b\[[0-9;?]*[A-Za-z]|\s)*$)") if prompt else None
             if esperado:
                 saida = conn.send_command(cmd, read_timeout=180,
                                           expect_string=esperado)
@@ -2737,6 +2800,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
         "conn_timeout": 15,
     }
     usa_timing = perfil.get("timing", False)
+    diag_vizinhanca = None
     blocos = []          # (titulo, [(cmd, saida)])
     apps_detectados = []
     contexto_usado = False
@@ -2831,6 +2895,8 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                     depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
             if saidas:
                 blocos.append((TITULOS[secao], saidas))
+            if secao == "vizinhanca" and saidas and not perdeu_sessao:
+                diag_vizinhanca = avaliar_vizinhanca(ip, tipo, saidas)
             if perdeu_sessao:
                 break
 
@@ -2880,14 +2946,40 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
     arquivo = escrever_relatorio(
         ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         incluir_sensivel, apps_detectados, contexto_usado, protocolo,
-        perdeu_sessao,
+        perdeu_sessao, diag_vizinhanca,
     )
     return arquivo, hostname
 
 
+def avaliar_vizinhanca(ip, tipo, saidas):
+    """Informa no log quantos vizinhos LLDP/CDP o equipamento tem e, quando
+    não há nenhum, o motivo provável e como ativar o protocolo na
+    plataforma. Devolve o diagnóstico, ou None sem o módulo de topologia."""
+    if topologia is None:
+        return None
+    try:
+        diag = topologia.diagnosticar_vizinhanca(tipo, saidas)
+    except Exception as e:
+        depurar(ip, "vizinhanca", f"diagnostico falhou: {type(e).__name__}: {e}")
+        return None
+    depurar(ip, "vizinhanca", f"{diag['estado']} ({diag['vizinhos']} vizinhos)")
+    if diag["vizinhos"]:
+        log(ip, f"vizinhança: {diag['vizinhos']} vizinho(s) LLDP/CDP")
+        return diag
+    log(ip, f"[AVISO] vizinhança: {diag['motivo']}")
+    ativar = diag["como_ativar"]
+    if ativar["comandos"]:
+        log(ip, "  para ativar: "
+                + " ; ".join(c.strip() for c in ativar["comandos"]))
+    if ativar["nota"]:
+        log(ip, "  " + ativar["nota"])
+    return diag
+
+
 def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
                        incluir_sensivel, apps, contexto_usado,
-                       protocolo="ssh", sessao_encerrada=False):
+                       protocolo="ssh", sessao_encerrada=False,
+                       vizinhanca=None):
     agora = datetime.now()
     meta = {
         "netsnap_version": __version__,
@@ -3002,6 +3094,14 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
             "conteúdo deste documento é o mesmo de uma coleta por SSH, mas a "
             "sessão que o originou era legível por qualquer sistema no "
             "caminho de rede. Quando a plataforma suportar SSH, prefira-o.\n"
+        )
+    if vizinhanca and not vizinhanca["vizinhos"]:
+        ativar = vizinhanca["como_ativar"]
+        comandos = "; ".join(f"`{c.strip()}`" for c in ativar["comandos"])
+        md.append(
+            f"> **Vizinhança:** {vizinhanca['motivo']}."
+            + (f" Para ativar: {comandos}." if comandos else "")
+            + (f" {ativar['nota']}" if ativar["nota"] else "") + "\n"
         )
     if contexto_usado and perfil.get("contexto"):
         md.append(
