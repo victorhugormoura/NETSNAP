@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.15.1**, netsnap_transporte 1.1.0, netdiag 1.1.0, netcve 0.3.0, painel netsnap_web 0.1.0, netsnap_topologia 1.0.0, netsnap_md 1.0.0.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.0**, netsnap_transporte 1.1.0, netdiag 1.1.0, netcve 0.3.0, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.0.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -34,7 +34,8 @@ Usos típicos:
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
 | `netcve.py` | Lê os snapshots e faz triagem de vulnerabilidades (NVD + CISA KEV) e de configuração insegura | só biblioteca padrão (certifi opcional) |
 | `netsnap_web.py` + `web/` | Painel local no navegador: coleta, execuções ao vivo, snapshots, inventário, comparação, topologia, netcve, netdiag e agendamentos | só biblioteca padrão; coleta e netdiag usam o Netmiko |
-| `netsnap_topologia.py` | Topologia L2 (LLDP/CDP) dos snapshots em JSON | só biblioteca padrão |
+| `netsnap_topologia.py` | Topologia dos snapshots em JSON: enlaces LLDP/CDP e L3 (sub-redes ponto a ponto das configurações), diagnóstico de vizinhança | só biblioteca padrão |
+| `netsnap_desenho.py` | Desenho da topologia em SVG e PDF vetorial (o painel converte o SVG em PNG) | só biblioteca padrão |
 | `netsnap_md.py` | Leitura estruturada dos snapshots (metadados, seções, comandos, saídas) | só biblioteca padrão |
 | `zabbix-para-netsnap.md` | Instruções para uma IA converter a lista de hosts do Zabbix em arquivo de alvos | — |
 | `README.md`, `DEPENDENCIAS.md` | Documentação de uso e da estratégia de dependências | — |
@@ -93,13 +94,14 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação. Po
 
 1. **Varredura** (modo FAST): ping paralelo (64 simultâneos); no Windows só conta como vivo quem responde com TTL. Sem o comando `ping` no sistema, a varredura é pulada com aviso e todos os alvos seguem para identificação.
 2. **Identificação da plataforma**, por host, em paralelo:
-   - **SSH:** lê o banner SSH sem autenticar (milissegundos). Sem banner, a falha é classificada: porta recusada, sem resposta TCP, ou porta aberta sem banner (típico de limite de sessões ou proteção contra força bruta). `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux.
+   - **SSH:** lê o banner SSH sem autenticar (milissegundos). Sem banner, a falha é classificada: porta recusada; sem resposta TCP; conexão aceita e encerrada sem banner (restrição de origem no serviço SSH ou excesso de conexões); ou conexão aceita e servidor em silêncio (limite de sessões ou proteção contra força bruta). Os dois últimos casos ganham uma segunda tentativa após 10 s. `JSSH` → Junos e `ROSSSH` → MikroTik, com confiança alta; `SSH-2.0--` (identificação vazia) → Huawei; OpenSSH com sufixo de distribuição → Linux; OpenSSH puro → Junos ou Linux. Candidatos de confiança média são confirmados com uma conexão e um comando (`show version`, `display version`, `uname -s`...). Em SSH, uma recusa de usuário/senha encerra a identificação na hora: a autenticação não depende da plataforma, e insistir com outro candidato só consumiria tentativas de login (retry-options do Junos, fail2ban). Sem candidato, recorre ao SSHDetect do Netmiko e, por fim, a uma sonda Linux.
    - **Huawei:** um `display version` decide entre VRP V5 (campus), VRP V8 (CloudEngine/NE) e SmartAX (OLT), que usam perfis diferentes.
    - **Telnet:** lê o texto de login (respondendo à negociação de opções, que alguns equipamentos exigem antes de mostrar o pedido): `>>User name:` → SmartAX; `Username:` → VRP/Cisco; `Login:` → FiberHome/Linux; modelo no banner (MA5xxx, AN5xxx). Sem pista, testa no máximo dois perfis, com intervalo, para não disparar bloqueio por tentativas.
    - Host acessível e não reconhecido vai para uma **fila de pendentes**, perguntada ao operador depois da fase paralela (nenhuma thread fica parada esperando).
 3. **Coleta:** abre a sessão, trata o aviso `--Press any key--`, extrai o hostname do prompt (recusando capturas inválidas), executa os comandos preparatórios do perfil, as seções escolhidas e, em Linux, os módulos de aplicação detectados. Se um comando cair num paginador que o comando de desativação não cobriu (`---- More ----`, `--More--`, `Press any key to continue`, `-- [Q quit|...]`), o netsnap avança as páginas e remove os marcadores e as sequências de apagamento da saída.
 4. **Queda de sessão:** um vigia acompanha o canal SSH durante cada comando, e o fechamento pelo equipamento é percebido na hora, sem esperar o timeout de leitura. Se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente.
-5. **Saída:** grava o snapshot, depois o índice da execução e o resumo no terminal.
+5. **Vizinhança:** depois da seção Vizinhança, o log informa quantos vizinhos LLDP/CDP o equipamento tem. Sem nenhum, diz o motivo provável (LLDP desligado ou não configurado, ou nenhum vizinho anunciando) e o comando para ativar o protocolo na plataforma — Junos, Huawei, Cisco, MikroTik e Linux; para SmartAX e FiberHome, onde a sintaxe não foi conferida, indica o manual. O mesmo aviso vai para o cabeçalho do snapshot (`> **Vizinhança:** ...`).
+6. **Saída:** grava o snapshot, depois o índice da execução e o resumo no terminal.
 
 ---
 
@@ -111,7 +113,7 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação. Po
 | `logs` | Últimas entradas de log (Linux: `journalctl -n 300`, com deduplicação) |
 | `basico` | CPU, memória, alarmes, ambiente/temperatura, sessões BGP/OSPF, resumo de assinantes em BNG, serviços de gerência |
 | `optica` | Interfaces, descrições, DOM (Rx/Tx, temperatura, bias, limiares), modelo/PN do transceiver, velocidade, contadores de erro e tráfego |
-| `vizinhanca` | LLDP (todas), CDP (Cisco), `/ip neighbor` (MikroTik), `lldpcli` (Linux) |
+| `vizinhanca` | LLDP (todas; no Junos também `show lldp neighbors detail`, 19.1R2+, e o estado do protocolo), CDP (Cisco), `/ip neighbor` e `discovery-settings` (MikroTik), `lldpcli` (Linux) |
 | `inventario` | Versão, hardware, firmware, patches, licenças, pacotes instalados, containers |
 
 | Modo | Seções |
@@ -167,7 +169,7 @@ Estrutura:
 
 ```markdown
 ---
-netsnap_version: "1.15.1"
+netsnap_version: "1.16.0"
 host: "MX204-BORDA"
 ip: "203.0.113.200"
 platform_key: "juniper_junos"
@@ -256,15 +258,24 @@ Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--to
 python3 netsnap_web.py [--porta 8765] [--sem-navegador]
 ```
 
-Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia, vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta.
+Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia (desenho dos enlaces confirmados em PNG e PDF, equipamentos sem vizinhança com o comando de ativação), vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `topologia/desenho`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta.
 
-### netsnap_topologia
+### netsnap_topologia e netsnap_desenho
 
-```bash
-python3 netsnap_topologia.py snapshots/ [--saida rede.json]
+```
+python3 netsnap_topologia.py snapshots/ [--saida rede.json] [--desenho rede.pdf|rede.svg] [--todos]
 ```
 
-Gera `{documento, versao, gerado_em, nos[], enlaces[], sem_vizinhanca[]}`. Nó: `id, rotulo, coletado, ip, plataforma, plataforma_nome, fabricante, coletado_em, arquivo, ips_gerencia[]`. Enlace: `a, porta_a, b, porta_b, portas_b[], confirmado, origem[]`. Prefere a saída detalhada à tabela resumida (que trunca nomes); agrupa interfaces lógicas da mesma porta física; marca `confirmado` quando os dois lados foram coletados e se veem. É a entrada prevista para o módulo de desenho da rede.
+Gera `{documento, versao, gerado_em, nos[], enlaces[], sem_vizinhanca[]}`.
+
+- **Nó:** `id, rotulo, coletado, ip, ips[], plataforma, plataforma_nome, fabricante, coletado_em, arquivo, ips_gerencia[]`. Snapshots do mesmo equipamento coletado por vários endereços (mesmo hostname e plataforma) viram um nó, com os endereços em `ips`; nomes de fábrica (MikroTik, HUAWEI) ficam separados por endereço.
+- **Enlace:** `a, porta_a, b, porta_b, portas_b[], tipo ("lldp"|"l3"), rede, confirmado, origem[]`.
+  - LLDP/CDP: prefere a saída detalhada à tabela resumida (que trunca nomes) e agrupa interfaces lógicas da mesma porta física. Confirma quando os dois lados foram coletados e se veem: por nome de porta normalizado entre fabricantes, pela descrição da porta resolvida no snapshot do vizinho (Junos com Port ID = índice SNMP) ou, havendo um único enlace em cada sentido entre o par, pelo próprio par. No enlace confirmado, `porta_b` é o nome que o vizinho dá à porta.
+  - L3: sub-rede ponto a ponto (/29 a /31, /112 a /127) com endereço em exatamente dois equipamentos coletados, lida das configurações Junos, Huawei VRP, Cisco e MikroTik (loopbacks e /32 ignorados; IPv4 e IPv6 da mesma interface contam como um enlace). Sempre confirmado.
+- **Escopo:** todos os snapshots da pasta formam uma rede só. Pastas com clientes diferentes misturam sub-redes privadas repetidas (falso enlace L3) e hostnames iguais (nós fundidos); use uma pasta por rede.
+- **sem_vizinhanca:** `host, id, plataforma, estado ("desligado"|"sem_vizinhos"|"nao_coletada"), motivo, como_ativar {comandos[], nota}`. No Junos, a ausência de `set protocols lldp interface` na configuração marca o LLDP como desligado mesmo em snapshots antigos.
+
+`netsnap_desenho.montar_cena(grafo, incluir_um_lado=False)` posiciona os nós (majorização de tensão, com o comprimento de cada ligação medido para caber os rótulos das portas; sem sorteio, a mesma rede gera o mesmo desenho) e devolve uma cena de caixas, linhas e textos; `para_svg(cena)` e `para_pdf(cena)` serializam a mesma cena. Por padrão entram só os enlaces confirmados; vários enlaces entre o mesmo par viram uma linha com as portas nas pontas (as físicas do LLDP têm precedência sobre as lógicas do L3). No painel: `GET /api/topologia/desenho?formato=svg|pdf&todos=0|1`.
 
 ### netsnap_transporte
 
@@ -332,11 +343,12 @@ A saída dos comandos não é escapada. Uma linha de saída que comece com `## `
 | BIRD e SmokePing | Uma coleta real (um servidor) |
 | Telnet em FiberHome AN551x e Huawei MA5800 | Login corrigido na 1.15.0 e testado contra servidor que reproduz o comportamento observado; **falta validação em equipamento real** |
 | FiberHome (lista de comandos), Zabbix, Grafana, ISP-Stack | Escritos a partir de documentação e do código; sem coleta real recebida até aqui |
-| Painel web | Testado ponta a ponta (navegador automatizado) contra sshd local e servidores Telnet de teste, em Linux; ainda não executado no Windows |
-| Topologia | Huawei VRP validado com saída real; Junos, Cisco, MikroTik e lldpd testados só com exemplos de formato documentado |
+| Painel web | Testado ponta a ponta (navegador automatizado) contra laboratório de equipamentos simulados e em Python para Windows emulado; primeira execução real no Windows 11 (Python 3.13) em 09/10/2026 |
+| Topologia | LLDP: Huawei VRP validado com saída real; Junos (detalhado), Cisco, MikroTik e lldpd testados com exemplos de formato documentado. L3: configuração Junos validada com saída real (Huawei, Cisco e MikroTik por sintaxe). Desenho testado com até 250 equipamentos (cerca de 10 s) |
 | Cisco NX-OS/IOS/XR, MikroTik | Perfis por documentação e sintaxe conhecida; validação de campo limitada |
 | Transporte sem dependências | Validado isoladamente; não integrado ao netsnap.py |
 | Execução não interativa (credenciais por argumento/variável) | Não existe |
 | Taxa de erro de interface | Contadores são cumulativos; uma coleta não dá taxa — são necessárias duas |
 | Alcance de transceiver | Inferido do PN em Juniper/Cisco; não é comprimento real de fibra |
 | Rate-limit/anti-brute-force | Muitas instâncias simultâneas contra o mesmo segmento podem gerar falha de banner SSH; o netsnap detecta, aguarda e tenta uma vez |
+| Snapshots Huawei e Cisco gerados pela 1.15.1 | Saída cortada quando o nome do equipamento aparece nela (configuração, logs); corrigido na 1.15.2. Snapshots dessas plataformas com `netsnap_version: "1.15.1"` devem ser coletados de novo. Junos, MikroTik e Linux não são afetados (o prompt inclui o usuário) |
