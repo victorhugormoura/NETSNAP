@@ -15,7 +15,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import json
 import os
@@ -101,18 +101,20 @@ def ler_snapshot(caminho: str) -> dict:
         i += 1
 
     avisos, secoes = [], []
-    atual, comando, dentro, buffer = None, None, False, []
+    atual, comando, cerca, buffer = None, None, None, []
     for linha in linhas[i:]:
-        if dentro:
-            if linha == "```":
-                dentro = False
+        if cerca:
+            # O bloco fecha só com o mesmo delimitador que o abriu: o netsnap
+            # usa mais crases que qualquer sequência presente na saída.
+            if linha.rstrip("\r") == cerca:
+                cerca = None
                 if comando is not None:
                     comando["saida"] = "\n".join(buffer)
                 continue
             buffer.append(linha)
             continue
         if linha.startswith("```") and comando is not None:
-            dentro, buffer = True, []
+            cerca, buffer = re.match(r"`+", linha).group(0), []
             continue
         if linha.startswith("## "):
             titulo = linha[3:].strip()

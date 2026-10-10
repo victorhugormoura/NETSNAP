@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.0**, netsnap_transporte 1.1.0, netdiag 1.1.0, netcve 0.3.0, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.0.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.0**, netsnap_transporte 1.1.0, netdiag 1.1.1, netcve 0.3.1, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -21,6 +21,8 @@ Usos típicos:
 
 - **Nenhum comando de escrita.** Os perfis contêm apenas `show`, `display`, `print`, leitura de arquivo e consultas SQL `SELECT`/`SHOW`/`DESCRIBE`. Cada snapshot declara `read_only: true` e `config_changes_made: 0`.
 - Exceções de contexto, documentadas no próprio snapshot: a OLT FiberHome exige `enable` e `config` até para `show`; o SmartAX exige `enable` para ler a configuração. Esses comandos apenas mudam o modo da sessão; nada é gravado.
+- **Chave SSH conferida.** No primeiro acesso a um equipamento, a chave do servidor SSH é registrada em `~/.netsnap_known_hosts` (`%USERPROFILE%\.netsnap_known_hosts` no Windows); nos acessos seguintes, chave diferente recusa a conexão **antes** do envio da senha, com mensagem explicando a possível interceptação e como liberar um equipamento trocado (apagar a linha dele). Vale para netsnap, netdiag e o painel; Telnet não tem esse recurso.
+- **Arquivos privados.** Em Linux e macOS, snapshots, relatórios, logs e as pastas criadas pelas ferramentas ficam legíveis só pelo dono (umask 077, pastas 0700). No Windows valem as permissões da pasta onde o netsnap está.
 - Efeitos colaterais conhecidos em Linux, sem alteração de configuração: `certbot certificates` escreve no próprio log do certbot; `install.sh --audit/--verify` do ISP-Stack inicializa o log de instalação do stack.
 
 ---
@@ -217,7 +219,11 @@ Convenções:
 ## 9. Tratamento do conteúdo
 
 - **Sanitização** (padrão ligado): senhas e hashes, inclusive com qualificador (`password irreversible-cipher $1c$...`, `enable secret 9 ...`, `key-string 7 ...`, `authentication-key 1 type md5 value "$9$..."`, `pre-shared-key ascii-text ...`); chaves BGP/OSPF/NTP/TACACS/RADIUS/MD5 do MikroTik; communities SNMP v1/v2c (Cisco, Huawei, Junos, MikroTik, snmpd.conf) e credenciais SNMPv3; chaves WireGuard, `bindpw`, tokens e chaves de API; formatos `chave=valor`, `chave: valor`, JSON, PHP (`$DB['PASSWORD']`); blocos PEM, inclusive truncados; arquivos inteiramente secretos (`dbpass.conf`). Comunidades **BGP** são preservadas.
-- **Limpeza:** códigos ANSI (inclusive cores 256 com `:`), bytes nulos.
+- **Sanitização, outras formas cobertas:** credencial em URL (`mysql://u:SENHA@`, repositórios apt), senha em linha de comando (crontab, `ps`, journal: `mysql -p`, `mysqldump -p`, `sshpass -p`, `curl -u`, `lftp -u`, `smbclient -U`, `ttyd -c`), cabeçalho `Authorization` (Basic/Bearer), tokens de formato conhecido (Telegram com o id do bot preservado, JWT, AWS, GitHub/GitLab, Slack, webhooks Slack/Discord), chaves Cisco em claro (`radius-server`/`tacacs-server ... key`, `crypto isakmp key`, keyring `pre-shared-key`, `message-digest-key`, HSRP, `wpa-psk`, `snmp-server host ... COMUNIDADE`), Huawei `authentication-mode ... plain`, `target-host ... securityname` (v1/v2c), cifras `%@%@`/`%$%$`/`%#%#`/`%+%#`, net-snmp `createUser`/`trap2sink`/`trapcommunity`, chaves `preshared-key`, `privacy-key`, `community-name`, `ADMIN_PASS=`, `senha:`, OLT `password-auth`/`checkcode-auth`, e hashes crypt soltos (o prefixo do algoritmo fica visível).
+- **Sanitização, o que deixou de ser removido por engano:** `Accepted/Failed password for <usuário>` dos logs do sshd, `PWD=/caminho` do sudo, versões dos pacotes `passwd`/`base-passwd` no inventário (usadas pelo netcve), ajustes de política de senha (`password minimum-length`, `password expire`, `complexity-check`), nomes de chave TSIG do BIND, `auth-method=pre-shared-key peer=X` do RouterOS.
+- **Bloco PEM sem o fim:** uma chave privada sem `END` (saída truncada) leva consigo o resto da saída; um certificado sem `END` remove só o cabeçalho e as linhas em base64 seguintes.
+- **Estrutura protegida:** a saída dos equipamentos não é escapada; o bloco de código usa mais crases que qualquer sequência presente nela, e os leitores (netsnap_md, netcve, painel) só fecham o bloco com o mesmo delimitador. Um banner com ```` ``` ```` e `## Configuração` não forja seções nem comandos.
+- **Limpeza:** códigos ANSI (inclusive cores 256 com `:` e títulos OSC terminados por ESC+`\`), bytes nulos.
 - **Limites de tamanho:** 512 KB por comando; 8 MB para configuração; 512 KB para logs e inventário. O corte é sinalizado no texto.
 - **Logs deduplicados:** linhas repetidas (mesma assinatura com dígitos normalizados) viram uma linha e `[+N linha(s) semelhante(s) omitida(s)]`.
 - **Saídas grandes reduzidas na origem:** `dpkg-query` em vez de `dpkg -l`; contagem de subinterfaces `pp0`/`demux0` em BNG em vez de lista; tabelas WANGuard curadas em vez de despejar 2500 tabelas.

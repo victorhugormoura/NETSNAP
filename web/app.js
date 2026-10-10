@@ -145,9 +145,12 @@ function markdown(texto) {
   for (; i < linhas.length; i++) {
     const l = linhas[i];
     if (l.startsWith("```")) {
+      // Fecha só com o mesmo delimitador que abriu (o netsnap usa mais
+      // crases que qualquer sequência presente na saída do equipamento).
       fecharPar();
+      const cerca = l.match(/^`+/)[0];
       const buf = [];
-      for (i++; i < linhas.length && linhas[i] !== "```"; i++) buf.push(linhas[i]);
+      for (i++; i < linhas.length && linhas[i].replace(/\r$/, "") !== cerca; i++) buf.push(linhas[i]);
       out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
       continue;
     }
