@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.0**, netsnap_transporte 1.1.0, netdiag 1.1.1, netcve 0.3.1, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.1**, netsnap_transporte 1.1.1, netdiag 1.1.2, netcve 0.3.2, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -19,7 +19,7 @@ Usos típicos:
 
 ### Garantias
 
-- **Nenhum comando de escrita.** Os perfis contêm apenas `show`, `display`, `print`, leitura de arquivo e consultas SQL `SELECT`/`SHOW`/`DESCRIBE`. Cada snapshot declara `read_only: true` e `config_changes_made: 0`.
+- **Nenhum comando de escrita.** Os perfis contêm comandos de leitura (`show`, `display`, `print`, `/export`, leitura de arquivo e de estado de serviço — `systemctl`, `rndc`, `chronyc`, `unbound-control`, `certbot certificates`, `dig`, `curl` GET em `127.0.0.1` —, verificadores `install.sh --audit/--verify` do ISP-Stack), consultas SQL `SELECT`/`SHOW`/`DESCRIBE` e comandos de sessão (desligar paginação, `enable`/`config` onde a CLI exige, `quit`/`exit`). Cada snapshot declara `read_only: true` e `config_changes_made: 0`.
 - Exceções de contexto, documentadas no próprio snapshot: a OLT FiberHome exige `enable` e `config` até para `show`; o SmartAX exige `enable` para ler a configuração. Esses comandos apenas mudam o modo da sessão; nada é gravado.
 - **Chave SSH conferida.** No primeiro acesso a um equipamento, a chave do servidor SSH é registrada em `~/.netsnap_known_hosts` (`%USERPROFILE%\.netsnap_known_hosts` no Windows); nos acessos seguintes, chave diferente recusa a conexão **antes** do envio da senha, com mensagem explicando a possível interceptação e como liberar um equipamento trocado (apagar a linha dele). Vale para netsnap, netdiag e o painel; Telnet não tem esse recurso.
 - **Arquivos privados.** Em Linux e macOS, snapshots, relatórios, logs e as pastas criadas pelas ferramentas ficam legíveis só pelo dono (umask 077, pastas 0700). No Windows valem as permissões da pasta onde o netsnap está.
@@ -88,7 +88,7 @@ olt-centro.isp.net       nome DNS (resolvido na conexão)
 10.0.0.5   # BRAS        comentário após a entrada
 ```
 
-Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação. Portas fora de 1–65535 e entradas inválidas são ignoradas com aviso. Arquivo com BOM (Bloco de Notas) é aceito.
+Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; uma entrada com mais de 65.536 endereços é recusada antes de ser expandida. Portas fora de 1–65535 e entradas inválidas são ignoradas com aviso. Arquivo com BOM (Bloco de Notas) ou em UTF-16 (PowerShell 5) é aceito; arquivo inexistente encerra com erro.
 
 ---
 
@@ -150,7 +150,7 @@ Detectados automaticamente após o login (cada detecção imprime `PRESENTE`). C
 | **WANGuard** (Andrisoft) | Arquivos de configuração e, no banco MySQL/MariaDB, a configuração operacional: componentes, zonas e prefixos (`ipaddr`), respostas/ações, roteadores BGP/blackhole/Flowspec, regras de mitigação ativas, fila de filtros, as 1000 anomalias mais recentes, distribuição de ataques por tipo (90 dias), logs de ataque, metadados de licença, retenção. Colunas de segredo são excluídas na origem; endereços binários convertidos com `INET6_NTOA`; datas Unix com `FROM_UNIXTIME`. Credenciais lidas de `dbhost.conf`/`dbpass.conf` em tempo de execução |
 | **Zabbix** | Configuração de server/proxy/agent, frontend, scripts externos, serviços e portas; no banco: hosts, grupos, templates, problemas, ações, dashboards |
 | **Grafana** | `grafana.ini`, provisioning, health da API; no banco (SQLite/MySQL/PostgreSQL): dashboards, datasources, regras de alerta, usuários |
-| **BIRD** | `bird.conf` e `conf.d`, `show status`, `show protocols`, memória e contagem de rotas, sessões TCP/179 |
+| **BIRD** | `bird.conf` e `conf.d`, `show status`, `show protocols` e `show protocols all`, memória e contagem de rotas (BIRD 2 por `birdc`/`birdcl`; BIRD 1 também por `birdc6`, que atende o daemon IPv6), sessões TCP/179 |
 | **SmokePing** | Configuração, quantidade de alvos, volume de RRDs |
 | **BIND9** | Configuração efetiva (`named-checkconf -p`, compactada quando há dezenas de milhares de zonas), `rndc status`, portas; **bloqueio DNS**: identifica RPZ ou sinkhole por zona (AnaBlock), lista instalada, script e cron de atualização, e prova de efetividade por `dig` em domínios de teste, numa amostra da lista e num domínio de controle |
 | **ISP-Stack** | `provider.conf`, Routinator, jumphost, módulos instalados, serviços do stack (Unbound, Prometheus, Grafana, Apache, fail2ban, certbot, GVM) e verificadores oficiais `install.sh --audit` e `--verify` (só executados se o script declarar essas opções) |
@@ -169,9 +169,9 @@ Pasta: `snapshots/` ao lado do script ou, sem permissão de escrita, `~/netsnap_
 
 Estrutura:
 
-```markdown
+````markdown
 ---
-netsnap_version: "1.16.0"
+netsnap_version: "1.16.1"
 host: "MX204-BORDA"
 ip: "203.0.113.200"
 platform_key: "juniper_junos"
@@ -197,12 +197,12 @@ config_changes_made: 0
 <saída bruta do comando>
 ```
 ## <Nome do módulo> — <Seção>            (módulos de aplicação em Linux)
-```
+````
 
 Convenções:
 
 - Cada valor do front-matter é JSON válido (listas e booleanos incluídos), portanto YAML válido.
-- `##` = seção temática; `###` = comando **exatamente como executado**; bloco ```` ```text ```` = saída bruta.
+- `##` = seção temática; `###` = comando **exatamente como executado**; bloco ```` ```text ```` = saída bruta. Quando a própria saída contém crases, a cerca do bloco fica uma crase mais longa que a maior sequência delas, para que o bloco não termine antes da hora.
 - `***REMOVIDO***` = valor sensível suprimido; `***CERTIFICADO/CHAVE REMOVIDO***` = bloco PEM; `***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***` = arquivo que é integralmente segredo.
 - `_(sem saída útil — retorno: ...)_` = comando vazio ou não suportado por aquela plataforma/firmware. **Não** significa recurso desabilitado.
 
@@ -247,7 +247,7 @@ python3 netdiag.py 10.0.0.1 [10.0.0.2 ...] [--porta 22] [--usuario U] [--secao o
                    [--plataforma fiberhome] [--timeout 120] [--anonimizar] [--sensivel]
 ```
 
-Repete a detecção registrando cada etapa e o tempo, roda cada comando do perfil (e dos módulos Linux) isoladamente e classifica em `OK`, `VAZIO`, `NAO_SUPORTADO`, `ERRO` ou `PAGINACAO`, marcando os lentos (> 30 s). Gera `_diagnostico_<ts>.md` e `.json` com amostra dos comandos problemáticos, versão e linhas de licença encontradas. `--anonimizar` troca IPv4/IPv6, MACs (três formatos), hostnames e números de série por substitutos consistentes, preservando máscaras e loopback. **Só SSH.**
+Repete a detecção registrando cada etapa e o tempo, roda cada comando do perfil (e dos módulos Linux) isoladamente e classifica em `OK`, `VAZIO`, `NAO_SUPORTADO`, `ERRO` ou `PAGINACAO`, marcando os lentos (> 30 s). Gera `_diagnostico_<ts>.md` e `.json` com amostra dos comandos problemáticos, versão e linhas de licença encontradas. `--anonimizar` troca IPv4/IPv6, MACs (três formatos), hostnames (inclusive alvos informados por nome DNS) e números de série por substitutos consistentes, preservando máscaras e loopback. Os alvos seguem o formato do netsnap (IPv6, `[IPv6]:porta`, CIDR). Os comandos preparatórios não entram na cobertura. **Só SSH.**
 
 ### netcve
 
@@ -256,7 +256,7 @@ python3 netcve.py snapshots/ [--api-key K | NVD_API_KEY] [--sem-rede] [--csv] [-
                              [--limite-cve 15] [--inseguro]
 ```
 
-Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP e OLTs têm versão extraída mas não consultada (sem CPE genérico na NVD). Resultado é triagem, não laudo.
+Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP, SmartAX MA5600 e FiberHome têm versão extraída mas não consultada (sem CPE genérico na NVD); o SmartAX MA5800 é consultado como `huawei:ma5800_firmware`. A versão é convertida para o formato CPE da NVD (Junos `21.4R3-S5.4` → `21.4:r3-s5`; IOS-XE `17.03.04a` → `17.3.4a`). Falha de TLS ou erro 4xx não é repetido; o cache é gravado a cada consulta. Resultado é triagem, não laudo.
 
 ### Painel web (netsnap_web)
 
@@ -315,15 +315,15 @@ def ler_snapshot(caminho):
     itens = []
     for bloco in re.split(r"(?m)^## ", texto)[1:]:
         secao = bloco.split("\n", 1)[0].strip()
-        for m in re.finditer(r"^### `(.+?)`\n+(?:```text\n(.*?)\n```|_\(sem saída útil.*?\)_)",
+        for m in re.finditer(r"^### `(.+?)`\n+(?:(`{3,})text\n(.*?)\n\2\n|_\(sem saída útil.*?\)_)",
                              bloco, re.S | re.M):
-            itens.append((secao, m.group(1), m.group(2)))   # None = sem saída útil
+            itens.append((secao, m.group(1), m.group(3)))   # None = sem saída útil
     return meta, itens
 ```
 
 O mesmo comando pode aparecer em mais de uma seção (por exemplo `show chassis hardware detail` em ópticas e em inventário), por isso a chave natural é o par seção + comando.
 
-A saída dos comandos não é escapada. Uma linha de saída que comece com `## ` ou com três crases confundiria este parser simplificado; para uso em produção, percorra o arquivo linha a linha e ignore cabeçalhos enquanto estiver dentro de um bloco ```` ```text ````.
+A saída dos comandos não é escapada; o que a protege é a cerca, sempre mais longa que qualquer sequência de crases da saída. Uma linha de saída que comece com `## ` ainda confundiria este parser simplificado; para uso em produção, percorra o arquivo linha a linha e ignore cabeçalhos enquanto estiver dentro de um bloco de código.
 
 - Use `platform_key` para escolher o parser e `collected_at` para ordenar coletas.
 - Confira `session_lost` antes de concluir que algo não existe.
