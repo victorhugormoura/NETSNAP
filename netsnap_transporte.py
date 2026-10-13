@@ -27,12 +27,13 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import codecs
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -71,10 +72,11 @@ PADRAO_ANSI = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1
 PADRAO_SENHA = re.compile(r"(?i)(password|senha|passwd)\s*:\s*$")
 PADRAO_USUARIO = re.compile(r"(?i)(login|user\s*name|username|usuario)\s*:\s*$")
 # Prompt genérico, usado só enquanto o prompt real não é conhecido. O fim
-# é [ \t]*$ e não \s*$: com \s, qualquer linha de saída terminada em %, >,
-# # ou ] (ex.: "CPU: 5%") seguida de quebra de linha passaria por prompt e
-# cortaria a saída no meio.
-PADRAO_PROMPT = re.compile(r"[\r\n][^\r\n]{0,80}[\$#>\]%][ \t]*$")
+# é [ \t]*\Z: com \s*, ou com $ (que também casa antes de uma quebra de
+# linha final), qualquer linha de saída terminada em %, >, # ou ] (ex.:
+# "CPU: 5%") seguida de quebra de linha passaria por prompt e cortaria a
+# saída no meio.
+PADRAO_PROMPT = re.compile(r"[\r\n][^\r\n]{0,80}[\$#>\]%][ \t]*\Z")
 # Paginadores: Huawei/SmartAX "---- More ( Press 'Q' to break ) ----",
 # Junos "---(more 12%)---", Cisco "--More--", MikroTik "-- [Q quit|D dump|...]".
 PADRAO_PAGINACAO = re.compile(
@@ -84,12 +86,14 @@ PADRAO_PAGINACAO = re.compile(
 PADRAO_FALHA_LOGIN = re.compile(
     r"(?i)login incorrect|authentication fail|access denied|"
     r"authentication is rejected|invalid (?:user|password|login)|"
+    r"(?:password|user\s*name)\s+(?:is\s+)?(?:invalid|incorrect)|"
     r"bad password|login failed"
 )
 
 
-# Gancho de depuração: o netsnap substitui esta função para registrar
-# eventos de transporte no mesmo log dos demais componentes.
+# Gancho de depuração: quem integrar o transporte (o netsnap, quando migrar
+# para esta camada) substitui esta função para registrar os eventos de
+# transporte no mesmo log dos demais componentes.
 def depurar_transporte(host: str, mensagem: str):
     pass
 
@@ -115,10 +119,18 @@ def limpar(texto: str) -> str:
     texto = re.sub(r"\x1b\[(\d*)D", lambda m: "\b" * int(m.group(1) or 1),
                    texto or "")
     texto = PADRAO_ANSI.sub("", texto)
-    texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+    # CR antes ou depois do LF (\r\r\n, \n\r) é fim de linha único; contado
+    # duas vezes, inseria linhas em branco que não existem na saída. Um
+    # "texto\r   \r" é o paginador apagando o próprio aviso.
+    texto = re.sub(r"\r*\n\r?", "\n", texto)
+    texto = re.sub(r"[^\r\n]*\r[ \t]*\r", "", texto)
+    texto = texto.replace("\r", "\n")
     if "\b" in texto:
         texto = "\n".join(_aplicar_retrocesso(l) for l in texto.split("\n"))
     return texto
+
+
+LIMITE_PAGINAS = 100000
 
 
 def porta_aberta(host: str, porta: int, tempo: float = 3.0) -> bool:
@@ -155,7 +167,7 @@ class _Sessao:
         descobrir_prompt() de novo."""
         if self.prompt:
             return re.compile(r"(?:^|\n)[ \t]*" + re.escape(self.prompt)
-                              + r"[ \t]*$")
+                              + r"[ \t]*\Z")
         return PADRAO_PROMPT
 
     # -- a implementar nas subclasses -------------------------------------
@@ -183,7 +195,9 @@ class _Sessao:
             if pedaco:
                 acumulado += pedaco
                 ultimo = time.time()
-                if ate and ate.search(limpar(acumulado)[-400:]):
+                # Só o final é limpo: limpar o buffer inteiro a cada leitura
+                # tornava a coleta de saídas grandes quadrática.
+                if ate and ate.search(limpar(acumulado[-2000:])[-400:]):
                     break
             elif acumulado and time.time() - ultimo > silencio:
                 break
@@ -258,16 +272,21 @@ class _Sessao:
             # acumulado: um "--More--" já respondido permaneceria no buffer e
             # o laço ficaria enviando espaços até esgotar o tempo.
             recente = limpar(trecho)
-            if (paginacao_automatica and paginas < 500
+            # O teto de páginas só protege contra laço; o limite real é o
+            # tempo. Com 500, uma configuração Huawei paginada a cada 24
+            # linhas era cortada em ~12 mil linhas.
+            if (paginacao_automatica and paginas < LIMITE_PAGINAS
                     and PADRAO_PAGINACAO.search(recente[-200:])):
                 paginas += 1
                 self._escrever(b" ")
                 continue
-            if fim.search(limpar(saida)[-300:]):
+            if fim.search(limpar(saida[-3000:])[-300:]):
                 break
         if paginas:
             depurar_transporte(self.host,
-                               f"{paginas} página(s) respondida(s) em: {comando[:60]}")
+                               f"{paginas} página(s) respondida(s) em: {comando[:60]}"
+                               + (" (teto atingido; saída incompleta)"
+                                  if paginas >= LIMITE_PAGINAS else ""))
         return self._limpar_saida(saida, comando)
 
     # Sessão sem terminal (askpass, -T) com um shell Unix do outro lado não
@@ -303,13 +322,20 @@ class _Sessao:
             linhas.pop()
         return "\n".join(linhas).strip("\n")
 
+    # Distinto de 'encerrada', que também indica fim de fluxo visto na leitura:
+    # uma sessão encerrada pelo equipamento ainda precisa liberar descritor,
+    # processo e arquivos temporários.
+    _fechado = False
+
     def fechar(self):
-        if not self.encerrada:
-            try:
-                self._fechar()
-            except Exception:
-                pass
-            self.encerrada = True
+        if self._fechado:
+            return
+        self._fechado = True
+        try:
+            self._fechar()
+        except Exception:
+            pass
+        self.encerrada = True
 
     def __enter__(self):
         return self
@@ -348,6 +374,11 @@ class SessaoTelnet(_Sessao):
             raise ErroConexao(f"sem resposta TCP em {host}:{porta} ({e})")
         self.sock.settimeout(0.2)
         self._resto = b""
+        # Estado de cada opção (True ativa, False recusada, ausente nunca
+        # negociada): só se responde a mudança de estado. Responder de novo
+        # a cada pedido repetido viola a RFC 854 e, com um par que faça o
+        # mesmo, a troca não termina.
+        self._local, self._remota = {}, {}
         try:
             self._autenticar(usuario, senha, timeout)
         except BaseException:
@@ -379,23 +410,46 @@ class SessaoTelnet(_Sessao):
                 opt = dados[i + 2]
                 if cmd == DO:
                     aceita = opt in (OPT_SGA, OPT_TTYPE, OPT_NAWS)
-                    resposta += bytes([IAC, WILL if aceita else WONT, opt])
-                    if opt == OPT_NAWS:
-                        # Janela larga e alta: menos quebras de linha e menos
-                        # paginação. 254 evita o byte 0xFF, que exigiria escape.
-                        resposta += bytes([IAC, SB, OPT_NAWS, 0, 254, 0, 200,
-                                           IAC, SE])
+                    if self._local.get(opt) is not aceita:
+                        self._local[opt] = aceita
+                        resposta += bytes([IAC, WILL if aceita else WONT, opt])
+                        if aceita and opt == OPT_NAWS:
+                            # Janela larga e alta: menos quebras de linha e
+                            # menos paginação. 254 evita o byte 0xFF, que
+                            # exigiria escape.
+                            resposta += bytes([IAC, SB, OPT_NAWS, 0, 254, 0,
+                                               200, IAC, SE])
+                elif cmd == DONT:
+                    if self._local.get(opt):
+                        self._local[opt] = False
+                        resposta += bytes([IAC, WONT, opt])
                 elif cmd == WILL:
                     aceita = opt in (OPT_ECHO, OPT_SGA)
-                    resposta += bytes([IAC, DO if aceita else DONT, opt])
+                    if self._remota.get(opt) is not aceita:
+                        self._remota[opt] = aceita
+                        resposta += bytes([IAC, DO if aceita else DONT, opt])
+                else:                            # WONT
+                    if self._remota.get(opt):
+                        self._remota[opt] = False
+                        resposta += bytes([IAC, DONT, opt])
                 i += 3
             elif cmd == SB:                      # subnegociação
-                fim = dados.find(bytes([IAC, SE]), i)
+                # O fim é IAC SE; um IAC IAC dentro dela é um 0xFF escapado.
+                fim, j = -1, i + 2
+                while True:
+                    k = dados.find(bytes([IAC]), j)
+                    if k == -1 or k + 1 >= len(dados):
+                        break
+                    if dados[k + 1] == SE:
+                        fim = k
+                        break
+                    j = k + 2
                 if fim == -1:
                     self._resto = dados[i:]
                     break
                 trecho = dados[i:fim]
-                if OPT_TTYPE in trecho:
+                # Só "SB TTYPE SEND" pede o tipo de terminal.
+                if len(trecho) >= 4 and trecho[2] == OPT_TTYPE and trecho[3] == 1:
                     resposta += bytes([IAC, SB, OPT_TTYPE, 0]) + b"VT100" + \
                                 bytes([IAC, SE])
                 i = fim + 2
@@ -465,6 +519,12 @@ class SessaoTelnet(_Sessao):
                 self.banner_login = limpar(banner)
                 return
             if self.encerrada:
+                if pediu_senha:
+                    # Sessão encerrada logo após a senha, sem mensagem: é como
+                    # boa parte dos equipamentos recusa credenciais.
+                    raise ErroAutenticacao(
+                        f"credenciais recusadas por {self.host} (sessão "
+                        "encerrada após a senha)")
                 raise ErroConexao("equipamento encerrou a sessão durante o login")
         if not pediu_senha:
             raise ErroConexao(f"pedido de login não reconhecido em {self.host}: "
@@ -517,6 +577,10 @@ def opcoes_ssh() -> list:
     opcoes = [
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=" + ("NUL" if WINDOWS else "/dev/null"),
+        # Sem isto, uma chave antiga do equipamento em /etc/ssh/ssh_known_hosts
+        # ainda é consultada, e com StrictHostKeyChecking=no o OpenSSH desliga
+        # a autenticação por senha: o erro aparece como credencial recusada.
+        "-o", "GlobalKnownHostsFile=" + ("NUL" if WINDOWS else "/dev/null"),
         "-o", "LogLevel=ERROR",
         "-o", "NumberOfPasswordPrompts=1",
         # Sem estes, um host inacessível só falha no timeout TCP do sistema
@@ -596,6 +660,7 @@ class SessaoSSHPty(_Sessao):
         mestre, escravo = pty.openpty()
         self.fd = mestre
         self.proc = None
+        self._logado = False
         try:
             # Sem desligar o eco, o ssh lê a própria saída como entrada e
             # consome as tentativas de senha com linhas vazias.
@@ -658,11 +723,14 @@ class SessaoSSHPty(_Sessao):
             raise ErroConexao(f"sessão ssh encerrada ({e})")
 
     def _fechar(self):
-        try:
-            os.write(self.fd, b"exit\n")
-            time.sleep(0.2)
-        except OSError:
-            pass
+        # "exit" só com a CLI aberta: diante de um pedido de senha ele seria
+        # enviado como senha e somaria uma tentativa de login falha.
+        if self._logado and not self.encerrada:
+            try:
+                os.write(self.fd, b"exit\n")
+                time.sleep(0.2)
+            except OSError:
+                pass
         try:
             if self.proc is not None:
                 self.proc.terminate()
@@ -696,17 +764,19 @@ class SessaoSSHPty(_Sessao):
                 self._escrever(senha.encode() + b"\n")
                 enviou_senha, acumulado = True, ""
                 continue
-            erro = _erro_de_ssh(recente)
+            erro = _erro_de_ssh(recente, enviou_senha)
             if erro:
                 raise erro
             if PADRAO_PROMPT.search(limpar(acumulado)) or \
                     PADRAO_PAGINACAO.search(recente):
+                self._logado = True
                 return
             if self.encerrada:
-                raise _erro_de_ssh(recente) or ErroConexao(
+                raise _erro_de_ssh(recente, enviou_senha) or ErroConexao(
                     "sessão ssh encerrada durante o login")
         if not recebeu_algo:
             raise ErroConexao(f"sem resposta de {self.host} em {timeout:.0f}s")
+        self._logado = True
         # Recebeu algo, sem prompt reconhecido: a sessão pode estar viva com
         # prompt exótico. descobrir_prompt() decide depois.
 
@@ -737,28 +807,57 @@ class SessaoSSHAskpass(_Sessao):
                 "use transporte='netmiko'.")
         self._dir = tempfile.mkdtemp(prefix="netsnap_")
         self.proc = None
+        self._recusa = None
         env = dict(os.environ)
         if senha:
+            # A senha é entregue uma única vez. Com password e
+            # keyboard-interactive habilitados, o ssh chama o askpass de novo
+            # para o segundo método, e responder outra vez dobraria as
+            # tentativas falhas a cada senha errada. Encerrar o askpass com
+            # erro não basta: o ssh envia então uma resposta vazia, que também
+            # conta como tentativa. No segundo pedido o askpass marca a recusa
+            # e espera; _confirmar_login vê a marca e encerra o ssh antes.
             if WINDOWS:
                 # A senha não passa pelo interpretador do cmd: '%VAR%' sem
                 # aspas faria & | < > ^ da senha virarem sintaxe do shell. O
-                # próprio Python que executa o netsnap a imprime.
+                # próprio Python que executa o netsnap a imprime, em UTF-8 —
+                # sys.stdout num pipe usaria a página de código ANSI.
                 script = os.path.join(self._dir, "ask.cmd")
-                with open(script, "w") as f:
-                    f.write(f'@"{sys.executable}" -c "import os,sys;'
-                            f"sys.stdout.write(os.environ['NETSNAP_PW'])\"\r\n")
+                conteudo = (
+                    '@if exist "%~f0.usado" (type nul > "%~f0.recusada" & '
+                    'ping -n 21 127.0.0.1 >nul & exit /b 1)\r\n'
+                    '@type nul > "%~f0.usado"\r\n'
+                    f'@"{sys.executable}" -c "import os,sys;'
+                    "sys.stdout.buffer.write(os.environ['NETSNAP_PW']"
+                    '.encode(\'utf-8\'))"\r\n')
+                # O cmd lê o .cmd na página de código OEM: um caminho com
+                # acento (C:\\Users\\João) gravado em ANSI ficaria ilegível.
+                try:
+                    dados = conteudo.encode("oem")
+                except (LookupError, UnicodeEncodeError):
+                    dados = conteudo.encode("mbcs", "replace")
+                with open(script, "wb") as f:
+                    f.write(dados)
             else:
                 script = os.path.join(self._dir, "ask.sh")
                 with open(script, "w") as f:
-                    f.write("#!/bin/sh\nprintf '%s' \"$NETSNAP_PW\"\n")
+                    f.write("#!/bin/sh\n"
+                            "if [ -e \"$0.usado\" ]; then "
+                            ": > \"$0.recusada\"; sleep 20; exit 1; fi\n"
+                            ": > \"$0.usado\"\n"
+                            "printf '%s' \"$NETSNAP_PW\"\n")
                 os.chmod(script, 0o700)
+            self._recusa = script + ".recusada"
             env.update(NETSNAP_PW=senha, SSH_ASKPASS=script,
                        SSH_ASKPASS_REQUIRE="force", DISPLAY=env.get("DISPLAY", ":0"))
         try:
             self.proc = subprocess.Popen(
                 _args_ssh(host, usuario, porta, bool(senha)) + ["-T"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, env=env, bufsize=0)
+                stderr=subprocess.STDOUT, env=env, bufsize=0,
+                # Grupo próprio: ao fechar, o askpass que espera no segundo
+                # pedido termina junto com o ssh.
+                start_new_session=not WINDOWS)
             self._configurar_leitura_nao_bloqueante()
             self._confirmar_login(timeout)
         except BaseException:
@@ -775,7 +874,11 @@ class SessaoSSHAskpass(_Sessao):
         while time.time() - inicio < timeout:
             acumulado += self._ler_bruto(0.5)
             texto = limpar(acumulado)
-            erro = _erro_de_ssh(texto)
+            if self._recusa and os.path.exists(self._recusa):
+                raise ErroAutenticacao("credenciais recusadas")
+            # A marca '.usado' indica que o askpass já entregou a senha.
+            erro = _erro_de_ssh(texto, bool(self._recusa) and os.path.exists(
+                self._recusa.replace(".recusada", ".usado")))
             if erro:
                 raise erro
             if texto.strip():
@@ -844,10 +947,16 @@ class SessaoSSHAskpass(_Sessao):
             raise ErroConexao(f"sessão ssh encerrada ({e})")
 
     def _fechar(self):
-        try:
-            self.proc.stdin.close()
-        except Exception:
-            pass
+        for canal in ("stdin", "stdout"):
+            try:
+                getattr(self.proc, canal).close()
+            except Exception:
+                pass
+        if not WINDOWS and self.proc is not None and self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
         try:
             if self.proc is not None:
                 self.proc.terminate()
@@ -861,12 +970,21 @@ class SessaoSSHAskpass(_Sessao):
         shutil.rmtree(self._dir, ignore_errors=True)
 
 
-def _erro_de_ssh(texto: str):
+def _erro_de_ssh(texto: str, enviou_senha: bool = False):
     """Traduz mensagens do cliente OpenSSH em exceções do netsnap."""
     if not texto:
         return None
-    if re.search(r"(?i)permission denied|authentication fail", texto):
+    if re.search(r"(?i)permission denied|authentication fail|"
+                 r"too many authentication failures", texto):
         return ErroAutenticacao("credenciais recusadas")
+    if enviou_senha and not re.search(r"(?i)kex_exchange_identification",
+                                      texto) and \
+            re.search(r"(?i)connection closed by|connection reset|"
+                      r"received disconnect", texto):
+        # Vários equipamentos derrubam a conexão diante de senha errada, em
+        # vez de pedir de novo.
+        return ErroAutenticacao("credenciais recusadas (conexão encerrada "
+                                "após a senha)")
     if re.search(r"(?i)connection refused", texto):
         return ErroConexao("conexão recusada")
     if re.search(r"(?i)no route to host|network is unreachable", texto):
@@ -899,7 +1017,7 @@ def _erro_de_ssh(texto: str):
 # Mantido por dois motivos: permite comparar o comportamento em algum
 # equipamento problemático, e cobre a máquina onde o cliente OpenSSH não
 # esteja instalado nem possa ser instalado. Envolvido na mesma interface das
-# demais sessões, de modo que o restante do netsnap não distingue um do outro.
+# demais sessões, de modo que quem chama não distingue um do outro.
 # ---------------------------------------------------------------------------
 def netmiko_disponivel() -> bool:
     """Presença do Netmiko, verificada sem importá-lo.
