@@ -1,0 +1,91 @@
+/* netsnap · servidor — complementos do painel (app.css)
+
+   Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
+   Licenciado sob a licença MIT. */
+
+/* ------------------------------------------------------------ sem sessão */
+body.sem-sessao .moldura { grid-template-columns: 1fr; }
+body.sem-sessao .trilho { display: none; }
+body.sem-sessao main { max-width: none; padding: 0; }
+
+.entrada {
+  min-height: 100vh; display: grid; place-items: center;
+  padding: 32px 16px;
+}
+.entrada-cartao {
+  width: 100%; max-width: 440px;
+  background: var(--superficie); border: 1px solid var(--linha);
+  border-radius: var(--raio); padding: 26px 28px 22px;
+}
+.entrada-cartao .marca { padding: 0 0 18px; margin: 0; }
+.entrada-cartao h1 { font-size: 22px; margin-bottom: 14px; }
+.entrada-cartao p { margin: 0 0 14px; }
+.entrada-cartao .alerta-campo { margin-bottom: 16px; }
+.entrada-cartao form { margin-top: 4px; }
+.entrada-cartao details { margin: 0 0 16px; }
+.entrada-cartao summary { cursor: pointer; color: var(--acao); font-weight: 600; }
+
+input.codigo {
+  font-family: var(--mono); font-size: 20px; letter-spacing: .18em;
+  text-align: center; max-width: 240px;
+}
+.qr {
+  display: block; width: 216px; height: 216px; margin: 0 auto 16px;
+  background: #fff; border: 1px solid var(--linha); border-radius: var(--raio);
+  image-rendering: pixelated;
+}
+.segredo {
+  font-size: 15px; letter-spacing: .06em; word-break: break-all;
+  background: var(--superficie-2); padding: 8px 10px; border-radius: var(--raio);
+}
+.codigos {
+  columns: 2; column-gap: 24px; margin: 0 0 14px; padding-left: 22px;
+  font-size: 14px; line-height: 1.9;
+}
+
+/* ------------------------------------------------------------ trilho */
+#menu li.separador { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--linha); }
+.trilho-conta {
+  margin: 14px 20px 0; padding-top: 12px; border-top: 1px solid var(--linha);
+  display: flex; flex-direction: column; gap: 6px; font-size: 13px;
+}
+.trilho-conta a { color: var(--tinta); text-decoration: none; font-weight: 600; }
+.trilho-conta a:hover, .trilho-conta a.ativo { color: var(--acao); }
+.trilho-conta .link { align-self: flex-start; font-weight: 600; }
+.trilho-rodape { margin-top: 14px; }
+
+/* ------------------------------------------------------------ formulários */
+.linha-campo { display: flex; gap: 8px; }
+.linha-campo input { flex: 1; }
+.dias { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.dias .marcar { margin: 0; }
+.filtros { display: flex; flex-wrap: wrap; gap: 0 14px; align-items: flex-end; margin: 6px 0 12px; }
+.filtros .campo { margin-bottom: 8px; min-width: 200px; }
+.filtros .acoes { margin: 0 0 8px; }
+
+details.acao-linha > summary {
+  cursor: pointer; color: var(--acao); font-weight: 600; white-space: nowrap;
+  list-style: none;
+}
+details.acao-linha > summary::-webkit-details-marker { display: none; }
+details.acao-linha[open] > summary { margin-bottom: 10px; }
+details.acao-linha form, details.acao-linha .painel-acoes {
+  min-width: 280px; max-width: 360px;
+  background: var(--superficie-2); border: 1px solid var(--linha);
+  border-radius: var(--raio); padding: 12px 14px;
+}
+details.acao-linha .campo { margin-bottom: 10px; }
+
+/* ------------------------------------------------------------ estados próprios */
+.estado.bloqueado, .estado.desativado, .estado.sem-credencial { background: var(--falha-fundo); color: var(--falha); }
+.estado.aguardando-1º-acesso { background: var(--alerta-fundo); color: var(--alerta); }
+
+@media (max-width: 900px) {
+  .moldura { grid-template-columns: 1fr; }
+  .trilho { position: static; height: auto; }
+  main { padding: 20px 16px 48px; }
+  form.grade, .colunas, .lado-a-lado { grid-template-columns: 1fr; }
+}
+
+th.num { text-align: right; }
+textarea.mini { min-height: 70px; font-size: 12.5px; }
