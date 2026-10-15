@@ -84,6 +84,8 @@ def preparar_ambiente() -> str:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnosticos"),
         os.path.join(os.path.expanduser("~"), "netdiag_diagnosticos"),
     ]
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], "diagnosticos")]
     for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)
