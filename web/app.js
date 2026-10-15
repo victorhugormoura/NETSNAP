@@ -72,6 +72,8 @@ async function api(metodo, caminho, corpo) {
   // tela anterior, mais lenta, sobrescreveria a atual.
   const geracao = S.geracao;
   const opcoes = { method: metodo, headers: { "X-Netsnap-Token": S.token } };
+  // Modo servidor: sessão por cookie, e toda alteração leva o token CSRF.
+  if (S.csrf && metodo !== "GET") opcoes.headers["X-Netsnap-CSRF"] = S.csrf;
   if (corpo !== undefined) {
     opcoes.headers["Content-Type"] = "application/json";
     opcoes.body = JSON.stringify(corpo);
@@ -277,7 +279,7 @@ async function vPainel() {
       <div><strong>${d.executando}</strong><span>execuções em andamento</span></div>
     </div>
     <div class="colunas">
-      <section><h2>Execuções desta sessão</h2>${execucoes}</section>
+      <section><h2>${S.info.modo === "servidor" ? "Execuções recentes" : "Execuções desta sessão"}</h2>${execucoes}</section>
       <section><h2>Últimas coletas</h2>${ultimas}</section>
     </div>
     <div class="colunas">
@@ -332,7 +334,9 @@ async function vColetar() {
   const alvos = S.prefill || "";
   S.prefill = null;
   tela(`<h1>Nova coleta</h1>
-    <p class="lead">Somente leitura: nenhum comando altera os equipamentos. A senha vai direto para o processo de coleta e não é gravada.</p>
+    <p class="lead">Somente leitura: nenhum comando altera os equipamentos. ${S.info.modo === "servidor"
+      ? "A senha do equipamento é entregue só ao processo de coleta; a do cofre nunca volta ao navegador."
+      : "A senha vai direto para o processo de coleta e não é gravada."}</p>
     <form class="grade" id="f-coleta" autocomplete="off">
       <div>
         <div class="campo"><label for="alvos">Alvos</label>
@@ -362,7 +366,7 @@ async function vColetar() {
             <input id="instancias" name="instancias" type="number" min="1" max="10" value="5">
             <small>1 a 10 equipamentos ao mesmo tempo.</small></div>
         </div>
-        <label class="marcar"><input type="checkbox" name="sensivel"> <span>Incluir senhas, chaves e communities no snapshot</span></label>
+        ${S.info.modo !== "servidor" || S.info.permitir_sensivel ? `<label class="marcar"><input type="checkbox" name="sensivel"> <span>Incluir senhas, chaves e communities no snapshot</span></label>` : ""}
         <label class="marcar"><input type="checkbox" name="debug"> <span>Gerar log de depuração (sempre sem segredos)</span></label>
         <div class="acoes"><button class="principal" type="submit">Iniciar coleta</button>
           <span class="suave pequeno" id="contagem-alvos"></span></div>
@@ -388,16 +392,17 @@ async function vColetar() {
     const fd = new FormData(f);
     const cfg = {
       alvos: fd.get("alvos"), modo: fd.get("modo"), protocolo: fd.get("protocolo"),
-      usuario: fd.get("usuario").trim(), senha: fd.get("senha"), porta: Number(fd.get("porta")),
+      usuario: (fd.get("usuario") || "").trim(), senha: fd.get("senha") || "", porta: Number(fd.get("porta")),
       varredura: fd.get("varredura"), instancias: Number(fd.get("instancias")),
       sensivel: !!fd.get("sensivel"), debug: !!fd.get("debug"),
+      credencial: fd.get("credencial") || undefined, salvar_como: fd.get("salvar_como") || undefined,
     };
     const botao = f.querySelector("button[type=submit]");
     botao.disabled = true;
     try {
       guardar("usuario", cfg.usuario);
       const job = await api("POST", "coletas", cfg);
-      $("#senha").value = "";
+      if ($("#senha")) $("#senha").value = "";
       location.hash = "#/execucoes/" + job.id;
     } catch (err) {
       aviso(err.message, true);
@@ -975,7 +980,7 @@ async function vDiagnostico() {
         <div class="campo"><label for="d-timeout">Tempo máximo por comando (s)</label>
           <input id="d-timeout" name="timeout" type="number" min="10" max="600" value="120"></div>
         <label class="marcar"><input type="checkbox" name="anonimizar"> <span>Anonimizar IPs, MACs, nomes e números de série, para compartilhar</span></label>
-        <label class="marcar"><input type="checkbox" name="sensivel"> <span>Não mascarar senhas nas amostras (só para uso local)</span></label>
+        ${S.info.modo !== "servidor" || S.info.permitir_sensivel ? `<label class="marcar"><input type="checkbox" name="sensivel"> <span>Não mascarar senhas nas amostras (só para uso local)</span></label>` : ""}
         <div class="acoes"><button class="principal" type="submit">Iniciar diagnóstico</button></div>
       </div>
     </form>
@@ -984,9 +989,10 @@ async function vDiagnostico() {
     e.preventDefault();
     const fd = new FormData(e.target);
     try {
-      guardar("usuario", fd.get("usuario").trim());
+      guardar("usuario", (fd.get("usuario") || "").trim());
       const job = await api("POST", "netdiag", {
-        alvos: fd.get("alvos"), usuario: fd.get("usuario").trim(), senha: fd.get("senha"),
+        alvos: fd.get("alvos"), usuario: (fd.get("usuario") || "").trim(), senha: fd.get("senha") || "",
+        credencial: fd.get("credencial") || undefined, salvar_como: fd.get("salvar_como") || undefined,
         porta: Number(fd.get("porta")), secoes: fd.getAll("secoes"), plataforma: fd.get("plataforma"),
         timeout: Number(fd.get("timeout")), anonimizar: !!fd.get("anonimizar"), sensivel: !!fd.get("sensivel") });
       location.hash = "#/execucoes/" + job.id;
@@ -1133,4 +1139,5 @@ async function iniciar() {
   rotear();
 }
 
-iniciar();
+// No servidor, servidor.js cuida do login e chama iniciarServidor().
+if (document.documentElement.dataset.modo !== "servidor") iniciar();

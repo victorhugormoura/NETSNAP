@@ -145,6 +145,9 @@ def preparar_ambiente() -> str:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots"),
         os.path.join(os.path.expanduser("~"), "netsnap_snapshots"),
     ]
+    # Instalação como serviço: pasta de dados fixa, fora do código.
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], "snapshots")]
     for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)
@@ -2465,6 +2468,13 @@ def varrer_icmp(alvos, paralelo: int = 64):
         # descartados como fora do ar.
         print("\n[!] Comando 'ping' não encontrado nesta máquina: a varredura "
               "ICMP foi pulada e todos os alvos serão tentados.")
+        return list(alvos), []
+    if not ping("127.0.0.1"):
+        # Ping que não funciona nem no loopback é falta de permissão (serviço
+        # sem privilégio e net.ipv4.ping_group_range fechado, por exemplo):
+        # descartar a rede inteira como fora do ar seria um falso resultado.
+        print("\n[!] O ping não funciona nesta máquina (nem para 127.0.0.1): a "
+              "varredura ICMP foi pulada e todos os alvos serão tentados.")
         return list(alvos), []
     print(f"\n[+] Varredura ICMP em {len(alvos)} alvo(s) ...")
     with ThreadPoolExecutor(max_workers=min(paralelo, max(len(alvos), 1))) as pool:

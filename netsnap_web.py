@@ -65,9 +65,14 @@ NOME_SEGURO = re.compile(r"[\w.\-]+")
 
 
 def pasta_gravavel(nome_local, nome_home):
-    """Mesma regra do netsnap: ao lado do script ou, sem permissão, na home."""
-    for pasta in (os.path.join(AQUI, nome_local),
-                  os.path.join(os.path.expanduser("~"), nome_home)):
+    """Mesma regra do netsnap: ao lado do script ou, sem permissão, na home.
+
+    Com NETSNAP_DADOS (instalação como serviço), só a pasta de dados."""
+    candidatos = [os.path.join(AQUI, nome_local),
+                  os.path.join(os.path.expanduser("~"), nome_home)]
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], nome_local)]
+    for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
