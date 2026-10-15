@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.16.1"
+__version__ = "1.17.0"
 
 import os
 import re
@@ -2495,14 +2495,6 @@ def porta_recusada(ip: str, porta: int, tempo: int = 3) -> bool:
             return False
     except ConnectionRefusedError:
         return True
-    except OSError:
-        return False
-
-
-def porta_aberta(ip: str, porta: int, tempo: int = 3) -> bool:
-    try:
-        with socket.create_connection((ip, porta), timeout=tempo):
-            return True
     except OSError:
         return False
 

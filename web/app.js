@@ -1,6 +1,9 @@
 /* netsnap · painel local
    Sem dependências externas: funciona em rede de gerência isolada.
-   Todo dado vindo do servidor passa por esc() antes de ir para o HTML. */
+   Todo dado vindo do servidor passa por esc() antes de ir para o HTML.
+
+   Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
+   Licenciado sob a licença MIT. */
 "use strict";
 
 const S = {
@@ -1134,7 +1137,7 @@ async function iniciar() {
     return e.status === 401 ? semToken() : tela(`<h1>Painel inacessível</h1><p class="erro-campo">${esc(e.message)}</p>`);
   }
   const c = S.info.capacidades;
-  $("#rodape").innerHTML = `painel ${esc(S.info.versao)}${c.netsnap ? ` · netsnap ${esc(c.netsnap)}` : ""}<br>${c.coleta ? "coleta disponível" : "modo consulta"}`;
+  $("#rodape").innerHTML = `painel ${esc(S.info.versao)}${c.netsnap ? ` · netsnap ${esc(c.netsnap)}` : ""}<br>${c.coleta ? "coleta disponível" : "modo consulta"}<br><span class="credito">© 2026 Victor Hugo R. Moura · Infinity Consulting</span>`;
   window.addEventListener("hashchange", rotear);
   rotear();
 }
