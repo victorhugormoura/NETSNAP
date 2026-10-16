@@ -195,6 +195,13 @@ class Banco:
             self._local.con = c
         return c
 
+    def fechar_da_thread(self):
+        """Fecha a conexão da thread atual (a próxima chamada abre outra)."""
+        c = getattr(self._local, "con", None)
+        if c is not None:
+            self._local.con = None
+            c.close()
+
     @contextmanager
     def transacao(self):
         c = self._con()
