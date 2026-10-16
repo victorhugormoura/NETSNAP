@@ -481,8 +481,8 @@ def preparar_credencial(cfg, cid, limite):
         raise web.ErroAPI(403, f"A credencial \"{cred['nome']}\" não permite "
                                "Telnet (o Telnet manda a senha em texto claro). "
                                "Um administrador pode liberar no cofre.")
-    porta = int(cfg.get("porta") or (23 if cfg.get("protocolo") == "telnet"
-                                     else 22))
+    porta = web.porta_valida(cfg.get("porta"),
+                             23 if cfg.get("protocolo") == "telnet" else 22)
     cfg["alvos"] = resolver_alvos(cfg.get("alvos", ""), porta, segredo["redes"],
                                   cred["nome"], limite)
     cfg["usuario"], cfg["senha"] = segredo["usuario"], segredo["senha"]
@@ -1200,7 +1200,8 @@ def criar_manipulador():
                     d = BANCO.execucao(p[1])
                     if not d:
                         raise web.ErroAPI(404, "Execução não encontrada")
-                    desde = int(q.get("desde", 0) or 0)
+                    desde = web.inteiro_valido(q.get("desde"), 0, 0, 10 ** 9,
+                                               "desde")
                     d["linhas"] = d["linhas"][desde:]
                     return d
             if raiz in ("coletas", "netdiag") and metodo == "POST":
