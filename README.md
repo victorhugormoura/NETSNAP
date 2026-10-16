@@ -542,6 +542,16 @@ Trate o relatório como **triagem para priorizar investigação**, não como lau
 
 ---
 
+## Testes
+
+```bash
+python3 testes/test_sanitizar.py          # mascaramento de segredos: 199 casos, falsos positivos e desempenho
+python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sintéticos
+./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
+```
+
+Os testes do servidor e o roteador simulado estão descritos em [`servidor/LEIA-ME.md`](servidor/LEIA-ME.md) (seção 10). A cada push e pull request, o GitHub Actions roda tudo em Python 3.10 e 3.12 (`.github/workflows/testes.yml`).
+
 ## Licença
 
 Distribuído sob a licença [MIT](LICENSE).

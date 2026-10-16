@@ -273,7 +273,7 @@ if [ "$MODO" != atualizar ]; then
     sim "O firewall ufw está ativo. Liberar a porta $PORTA/tcp$( [ "$CERT" = letsencrypt ] && echo " e 80/tcp")?" s && UFW=1
   fi
 
-  PING_RANGE=$(sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo "1 0")
+  PING_RANGE=$( (sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo "1 0") | tr -s "[:space:]" " " | sed "s/ $//")
   PING_FIX=0
   if [ "${PING_RANGE%%[[:space:]]*}" -gt "${PING_RANGE##*[[:space:]]}" ] 2>/dev/null; then
     echo "A varredura por ping roda sem privilégio e precisa de net.ipv4.ping_group_range (hoje: $PING_RANGE)."
