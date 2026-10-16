@@ -399,7 +399,8 @@ max_execucoes_simultaneas = 2
         st, corpo, h = self.admin.req("GET", f"/api/analises/{a['id']}/baixar")
         self.assertEqual(st, 200)
         caminho = os.path.join(self.dir, "pacote.zip")
-        open(caminho, "wb").write(corpo)
+        with open(caminho, "wb") as f:
+            f.write(corpo)
         z = zipfile.ZipFile(caminho)
         nomes = z.namelist()
         for n in ("manifesto.json", "resumo.json", "RESUMO.md", "PROMPT.md"):
@@ -409,6 +410,7 @@ max_execucoes_simultaneas = 2
         self.assertEqual(resumo[0]["ip"], LAB)
         self.assertIsNotNone(resumo[0]["mudanca_config"])  # há coleta anterior
         man = json.loads(z.read("manifesto.json"))
+        z.close()
         self.assertEqual(man["totais"]["ok"], 1)
         st, ags, _ = self.admin.req("GET", "/api/agendamentos")
         este = next(x for x in ags if x["id"] == ag)
