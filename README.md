@@ -406,6 +406,19 @@ O terminal mostra o endereço com o token desta execução (`http://127.0.0.1:87
 
 **Execução:** cada coleta, diagnóstico ou triagem roda num processo separado. As execuções ficam na memória do painel e somem ao reiniciá-lo; os arquivos gerados permanecem na pasta.
 
+## Servidor (pasta `servidor/`)
+
+O mesmo netsnap instalado num servidor Linux, para uma equipe. Os técnicos entram por uma página HTTPS (Nginx ou Apache na frente) com senha e código TOTP, e coletam dali, sem nada instalado no próprio computador. Em relação ao painel local, acrescenta:
+
+- **Cofre de credenciais** AES-256-GCM, com a chave-mestra selada pelo `systemd-creds` (TPM2 quando houver). Cada credencial só vale para as redes cadastradas nela, e a senha nunca volta ao navegador.
+- **Agendador persistente**: todo dia, em dias da semana, a cada N dias ou a cada N horas, sem depender de alguém com o navegador aberto.
+- **Pacote de análise** ao fim de cada execução (`.zip` com snapshots, diferenças de configuração, resumo de erros e logs por equipamento e o `PROMPT.md` para o NETANALYTIC).
+- Papéis (leitura, técnico, administrador), auditoria encadeada por HMAC, certificado por CA interna, Let's Encrypt ou importado, backup cifrado e administração por `netsnapctl`.
+
+Continua somente leitura. Instalação, segurança e operação: [`servidor/LEIA-ME.md`](servidor/LEIA-ME.md). O pacote de instalação é montado com `./servidor/montar.sh --zip` e fica anexado às *releases*.
+
+O netsnap, o netdiag e o painel aceitam a variável `NETSNAP_DADOS` para gravar numa pasta fixa (é assim que o servidor os usa); sem ela, nada muda (pasta ao lado do programa ou, sem permissão de escrita, na pasta pessoal).
+
 ## Topologia (netsnap_topologia e netsnap_desenho)
 
 Monta o grafo da rede a partir do snapshot mais recente de cada equipamento, com duas fontes:
@@ -528,6 +541,16 @@ A correspondência é feita **pela versão declarada**, não por verificação a
 Trate o relatório como **triagem para priorizar investigação**, não como laudo de vulnerabilidade. Os itens marcados **KEV** (catálogo CISA de exploração confirmada) são a prioridade real e merecem verificação imediata.
 
 ---
+
+## Testes
+
+```bash
+python3 testes/test_sanitizar.py          # mascaramento de segredos: 199 casos, falsos positivos e desempenho
+python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sintéticos
+./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
+```
+
+Os testes do servidor e o roteador simulado estão descritos em [`servidor/LEIA-ME.md`](servidor/LEIA-ME.md) (seção 10). A cada push e pull request, o GitHub Actions roda tudo em Python 3.10 e 3.12 (`.github/workflows/testes.yml`).
 
 ## Licença
 
