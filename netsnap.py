@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.16.1"
+__version__ = "1.17.0"
 
 import os
 import re
@@ -145,6 +145,9 @@ def preparar_ambiente() -> str:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots"),
         os.path.join(os.path.expanduser("~"), "netsnap_snapshots"),
     ]
+    # Instalação como serviço: pasta de dados fixa, fora do código.
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], "snapshots")]
     for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)
@@ -2466,6 +2469,13 @@ def varrer_icmp(alvos, paralelo: int = 64):
         print("\n[!] Comando 'ping' não encontrado nesta máquina: a varredura "
               "ICMP foi pulada e todos os alvos serão tentados.")
         return list(alvos), []
+    if not ping("127.0.0.1"):
+        # Ping que não funciona nem no loopback é falta de permissão (serviço
+        # sem privilégio e net.ipv4.ping_group_range fechado, por exemplo):
+        # descartar a rede inteira como fora do ar seria um falso resultado.
+        print("\n[!] O ping não funciona nesta máquina (nem para 127.0.0.1): a "
+              "varredura ICMP foi pulada e todos os alvos serão tentados.")
+        return list(alvos), []
     print(f"\n[+] Varredura ICMP em {len(alvos)} alvo(s) ...")
     with ThreadPoolExecutor(max_workers=min(paralelo, max(len(alvos), 1))) as pool:
         futuros = {pool.submit(ping, ip): (ip, porta) for ip, porta in alvos}
@@ -2485,14 +2495,6 @@ def porta_recusada(ip: str, porta: int, tempo: int = 3) -> bool:
             return False
     except ConnectionRefusedError:
         return True
-    except OSError:
-        return False
-
-
-def porta_aberta(ip: str, porta: int, tempo: int = 3) -> bool:
-    try:
-        with socket.create_connection((ip, porta), timeout=tempo):
-            return True
     except OSError:
         return False
 

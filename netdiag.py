@@ -23,7 +23,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 import os
 import re
@@ -84,6 +84,8 @@ def preparar_ambiente() -> str:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagnosticos"),
         os.path.join(os.path.expanduser("~"), "netdiag_diagnosticos"),
     ]
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], "diagnosticos")]
     for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)

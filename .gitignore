@@ -38,3 +38,7 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Pacote do servidor gerado por servidor/montar.sh
+servidor/build/
+servidor/dist/

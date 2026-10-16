@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.16.1**, netsnap_transporte 1.1.1, netdiag 1.1.2, netcve 0.3.2, painel netsnap_web 0.2.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, netcve 0.3.2, painel netsnap_web 0.3.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap servidor 1.0.0**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -39,6 +39,7 @@ Usos típicos:
 | `netsnap_topologia.py` | Topologia dos snapshots em JSON: enlaces LLDP/CDP e L3 (sub-redes ponto a ponto das configurações), diagnóstico de vizinhança | só biblioteca padrão |
 | `netsnap_desenho.py` | Desenho da topologia em SVG e PDF vetorial (o painel converte o SVG em PNG) | só biblioteca padrão |
 | `netsnap_md.py` | Leitura estruturada dos snapshots (metadados, seções, comandos, saídas) | só biblioteca padrão |
+| `servidor/` | Instalação como serviço Linux para equipe: login com TOTP, papéis, cofre de credenciais cifrado, agendador persistente, pacote de análise para o NETANALYTIC, auditoria, Nginx/Apache, certificados, backup (ver seção 11) | Python 3.10+, systemd, cryptography, Netmiko |
 | `zabbix-para-netsnap.md` | Instruções para uma IA converter a lista de hosts do Zabbix em arquivo de alvos | — |
 | `README.md`, `DEPENDENCIAS.md` | Documentação de uso e da estratégia de dependências | — |
 
@@ -266,6 +267,18 @@ python3 netsnap_web.py [--porta 8765] [--sem-navegador]
 
 Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia (desenho dos enlaces confirmados em PNG e PDF, equipamentos sem vizinhança com o comando de ativação), vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `topologia/desenho`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta.
 
+### Servidor (`servidor/`)
+
+Serviço systemd (`netsnap-servidor`, usuário sem privilégios) atrás de Nginx ou Apache com TLS, falando com o proxy por socket Unix. Reaproveita as telas e a API do painel local e acrescenta:
+
+- **Contas:** senha (scrypt) + TOTP obrigatório, 10 códigos de recuperação, troca de senha no primeiro acesso, papéis `leitura`, `tecnico` e `admin`, bloqueio por conta e origem, sessões com cookie `__Host-` e CSRF.
+- **Cofre:** credenciais em AES-256-GCM com chave-mestra entregue pelo systemd (`systemd-creds`, TPM2 quando houver). Cada credencial tem redes CIDR obrigatórias e flag de Telnet; alvos fora das redes são recusados em coleta, netdiag e agendamento. A senha nunca volta ao navegador.
+- **Agendamentos:** `diario`, `semanal` (dias da semana), `dias` (a cada N dias a partir de uma data) e `horas`; persistentes, disparados pelo próprio serviço.
+- **Pacote de análise** (`netsnap-analise/1`), gerado ao fim de cada execução agendada com a opção ligada: `manifesto.json` (execução, totais, falhas com motivo, arquivos, snapshots omitidos por conter segredos), `resumo.json` (por equipamento: plataforma, modelo, versões, apontamentos do netcve, logs por gravidade, contadores de erro candidatos, comandos sem saída, avisos da coleta, tamanho da mudança de configuração), `RESUMO.md`, `PROMPT.md` (instruções e formato de resposta `netanalytic-achados/1`), `snapshots/` e `mudancas/*.diff`. É o ponto de entrada natural do NETANALYTIC.
+- **Auditoria** encadeada por HMAC com âncora assinada, espelhada no journald; `netsnapctl` para usuários, chave-mestra, certificados, backup cifrado e restauração.
+
+API adicional em `/api/*`: `sessao`, `conta`, `cofre`, `usuarios`, `auditoria`, `analises`, além das do painel. Detalhes de instalação, segurança e operação em `servidor/LEIA-ME.md`.
+
 ### netsnap_topologia e netsnap_desenho
 
 ```
@@ -353,7 +366,8 @@ A saída dos comandos não é escapada; o que a protege é a cerca, sempre mais 
 | Topologia | LLDP: Huawei VRP validado com saída real; Junos (detalhado), Cisco, MikroTik e lldpd testados com exemplos de formato documentado. L3: configuração Junos validada com saída real (Huawei, Cisco e MikroTik por sintaxe). Desenho testado com até 250 equipamentos (cerca de 10 s) |
 | Cisco NX-OS/IOS/XR, MikroTik | Perfis por documentação e sintaxe conhecida; validação de campo limitada |
 | Transporte sem dependências | Validado isoladamente; não integrado ao netsnap.py |
-| Execução não interativa (credenciais por argumento/variável) | Não existe |
+| Servidor | Testes automatizados (cofre, banco, API completa contra roteador simulado), instalador em Ubuntu 24.04 com Nginx e Apache reais e ponta a ponta por TLS. **Falta:** systemd real como PID 1, Debian 12 e Ubuntu 22.04, Let's Encrypt real e TPM2 físico |
+| Execução não interativa (credenciais por argumento/variável) | Não existe no netsnap.py; no servidor, coletas agendadas usam a credencial do cofre |
 | Taxa de erro de interface | Contadores são cumulativos; uma coleta não dá taxa — são necessárias duas |
 | Alcance de transceiver | Inferido do PN em Juniper/Cisco; não é comprimento real de fibra |
 | Rate-limit/anti-brute-force | Muitas instâncias simultâneas contra o mesmo segmento podem gerar falha de banner SSH; o netsnap detecta, aguarda e tenta uma vez |

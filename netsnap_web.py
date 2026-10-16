@@ -27,7 +27,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import argparse
 import atexit
@@ -65,9 +65,14 @@ NOME_SEGURO = re.compile(r"[\w.\-]+")
 
 
 def pasta_gravavel(nome_local, nome_home):
-    """Mesma regra do netsnap: ao lado do script ou, sem permissão, na home."""
-    for pasta in (os.path.join(AQUI, nome_local),
-                  os.path.join(os.path.expanduser("~"), nome_home)):
+    """Mesma regra do netsnap: ao lado do script ou, sem permissão, na home.
+
+    Com NETSNAP_DADOS (instalação como serviço), só a pasta de dados."""
+    candidatos = [os.path.join(AQUI, nome_local),
+                  os.path.join(os.path.expanduser("~"), nome_home)]
+    if os.environ.get("NETSNAP_DADOS"):
+        candidatos = [os.path.join(os.environ["NETSNAP_DADOS"], nome_local)]
+    for pasta in candidatos:
         try:
             os.makedirs(pasta, mode=0o700, exist_ok=True)
             teste = os.path.join(pasta, ".wtest")
@@ -530,13 +535,10 @@ def nova_coleta(cfg, origem="manual"):
     if cfg.get("tipo") and cfg["tipo"] not in {
             p["chave"] for p in CAPACIDADES["plataformas"]}:
         raise ErroAPI(400, "Plataforma inválida")
-    cfg.setdefault("porta", 23 if cfg["protocolo"] == "telnet" else 22)
-    try:
-        cfg["porta"] = int(cfg["porta"])
-        if not 1 <= cfg["porta"] <= 65535:
-            raise ValueError
-    except (TypeError, ValueError):
-        raise ErroAPI(400, "Porta inválida")
+    cfg["porta"] = porta_valida(cfg.get("porta"),
+                                23 if cfg["protocolo"] == "telnet" else 22)
+    cfg["instancias"] = inteiro_valido(cfg.get("instancias"), 5, 1, 10,
+                                       "Número de simultâneos")
     linhas = [l for l in cfg["alvos"].splitlines()
               if l.split("#", 1)[0].strip()]
     total = contar_alvos(linhas)
@@ -558,13 +560,37 @@ def nova_coleta(cfg, origem="manual"):
     return job
 
 
+def inteiro_valido(valor, padrao, minimo, maximo, nome):
+    """Número inteiro vindo do navegador, dentro da faixa, ou ErroAPI(400)."""
+    try:
+        n = int(padrao if valor in (None, "") else valor)
+    except (TypeError, ValueError):
+        raise ErroAPI(400, f"{nome} inválido")
+    if not minimo <= n <= maximo:
+        raise ErroAPI(400, f"{nome} fora da faixa ({minimo} a {maximo})")
+    return n
+
+
+def porta_valida(valor, padrao):
+    """Porta TCP vinda do navegador: inteiro de 1 a 65535 ou ErroAPI(400)."""
+    try:
+        porta = int(valor or padrao)
+    except (TypeError, ValueError):
+        raise ErroAPI(400, "Porta inválida")
+    if not 1 <= porta <= 65535:
+        raise ErroAPI(400, "Porta inválida")
+    return porta
+
+
 def novo_netdiag(cfg):
     if not CAPACIDADES["coleta"]:
         raise ErroAPI(409, CAPACIDADES["motivo"])
     for c in ("alvos", "usuario", "senha"):
         if not str(cfg.get(c, "")).strip():
             raise ErroAPI(400, f"Preencha: {c}")
-    cfg["porta"] = int(cfg.get("porta") or 22)
+    cfg["porta"] = porta_valida(cfg.get("porta"), 22)
+    cfg["timeout"] = inteiro_valido(cfg.get("timeout"), 120, 10, 600,
+                                    "Tempo máximo por comando")
     validas = {s["chave"] for s in CAPACIDADES["secoes"]}
     cfg["secoes"] = [s for s in cfg.get("secoes") or [] if s in validas]
     job = Job("netdiag", "Diagnóstico · " + cfg["alvos"].splitlines()[0][:40])
@@ -1081,6 +1107,8 @@ class Manipulador(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
 
     def _json(self, status, dados):
         corpo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
@@ -1130,7 +1158,9 @@ class Manipulador(BaseHTTPRequestHandler):
         bruto = self.rfile.read(tamanho) if tamanho else b"{}"
         try:
             dados = json.loads(bruto.decode("utf-8"))
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: aninhamento extremo ("[[[[...") estoura a pilha
+            # do decodificador; é entrada inválida, não erro interno.
             raise ErroAPI(400, "JSON inválido")
         if not isinstance(dados, dict):
             raise ErroAPI(400, "JSON inválido")
@@ -1204,7 +1234,8 @@ class Manipulador(BaseHTTPRequestHandler):
             if not job:
                 raise ErroAPI(404, "Execução não encontrada")
             if metodo == "GET" and n == 2:
-                return job.detalhe(int(q.get("desde", 0) or 0))
+                return job.detalhe(inteiro_valido(q.get("desde"), 0, 0,
+                                                  10 ** 9, "desde"))
             if metodo == "POST" and n == 3 and p[2] == "cancelar":
                 with job.trava:
                     if job.estado == "executando" and job.proc:

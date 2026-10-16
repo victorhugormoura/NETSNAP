@@ -27,7 +27,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import codecs
 import os
@@ -575,11 +575,17 @@ def opcoes_ssh() -> list:
         return list(_cache_opcoes)
 
     opcoes = [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=" + ("NUL" if WINDOWS else "/dev/null"),
+        # Chave do equipamento aprendida no primeiro acesso e conferida nos
+        # seguintes, no mesmo arquivo do netsnap (formato do OpenSSH): chave
+        # diferente encerra a conexão antes de a senha ser enviada. O '~' é
+        # expandido pelo próprio cliente, também no Windows, e evita o
+        # problema de caminhos com espaço. accept-new existe desde o
+        # OpenSSH 7.6.
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=~/.netsnap_known_hosts",
         # Sem isto, uma chave antiga do equipamento em /etc/ssh/ssh_known_hosts
-        # ainda é consultada, e com StrictHostKeyChecking=no o OpenSSH desliga
-        # a autenticação por senha: o erro aparece como credencial recusada.
+        # ainda seria consultada e recusaria a conexão por um registro que não
+        # é do netsnap.
         "-o", "GlobalKnownHostsFile=" + ("NUL" if WINDOWS else "/dev/null"),
         "-o", "LogLevel=ERROR",
         "-o", "NumberOfPasswordPrompts=1",
@@ -633,14 +639,17 @@ def versao_ssh() -> tuple:
     return _cache_versao
 
 
-def _args_ssh(host, usuario, porta, com_senha):
-    args = [ssh_disponivel(), "-p", str(porta)] + opcoes_ssh()
+def _args_ssh(host, usuario, porta, com_senha, terminal):
+    args = [ssh_disponivel(), terminal, "-p", str(porta)] + opcoes_ssh()
     if com_senha:
         args += ["-o", "PreferredAuthentications=password,keyboard-interactive",
                  "-o", "PubkeyAuthentication=no"]
     else:
         args += ["-o", "BatchMode=yes"]
-    return args + [f"{usuario}@{host}"]
+    # Usuário e destino separados, com '--': um alvo começando por '-' não
+    # pode ser lido como opção do ssh. Nada pode vir depois do destino: o ssh
+    # trataria como comando remoto.
+    return args + ["-l", usuario, "--", host]
 
 
 class SessaoSSHPty(_Sessao):
@@ -683,7 +692,7 @@ class SessaoSSHPty(_Sessao):
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
             self.proc = subprocess.Popen(
-                _args_ssh(host, usuario, porta, bool(senha)) + ["-tt"],
+                _args_ssh(host, usuario, porta, bool(senha), "-tt"),
                 stdin=escravo, stdout=escravo, stderr=escravo,
                 close_fds=True, preexec_fn=preparar_filho)
         except BaseException:
@@ -852,7 +861,7 @@ class SessaoSSHAskpass(_Sessao):
                        SSH_ASKPASS_REQUIRE="force", DISPLAY=env.get("DISPLAY", ":0"))
         try:
             self.proc = subprocess.Popen(
-                _args_ssh(host, usuario, porta, bool(senha)) + ["-T"],
+                _args_ssh(host, usuario, porta, bool(senha), "-T"),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, env=env, bufsize=0,
                 # Grupo próprio: ao fechar, o askpass que espera no segundo
@@ -1004,8 +1013,13 @@ def _erro_de_ssh(texto: str, enviou_senha: bool = False):
             "cliente OpenSSH recusa por padrão, ou que esta versão do "
             "OpenSSH removeu. Acrescente o algoritmo indicado às listas "
             "LEGADO_* — só entram na conexão os que 'ssh -Q' reconhecer")
-    if re.search(r"(?i)host key verification failed", texto):
-        return ErroConexao("verificação de chave de host falhou")
+    if re.search(r"(?i)remote host identification has changed|"
+                 r"host key verification failed", texto):
+        return ErroConexao(
+            "a chave SSH do equipamento é diferente da registrada no primeiro "
+            "acesso — possível interceptação; a senha não foi enviada. Se o "
+            "equipamento foi trocado ou teve a chave refeita, apague a linha "
+            "dele em ~/.netsnap_known_hosts")
     if re.search(r"(?i)could not resolve hostname", texto):
         return ErroConexao("nome não resolvido")
     return None

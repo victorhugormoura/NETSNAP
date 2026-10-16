@@ -1,7 +1,10 @@
 /* netsnap · painel local
    Cores de plataforma seguem o código de cores de fibra TIA-598
    (azul, laranja, verde, marrom, ardósia, branco, vermelho, preto,
-   amarelo, violeta): cada plataforma tem a "capa" de uma fibra. */
+   amarelo, violeta): cada plataforma tem a "capa" de uma fibra.
+
+   Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
+   Licenciado sob a licença MIT. */
 
 :root {
   --papel: #eef1f3;
@@ -115,6 +118,7 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 #menu a:hover { background: var(--superficie-2); }
 #menu a.ativo { background: var(--acao-suave); color: var(--acao); font-weight: 600; }
 .trilho-rodape { margin: auto 20px 0; color: var(--suave); font-size: 12px; }
+.trilho-rodape .credito { display: inline-block; margin-top: 6px; }
 
 main { padding: 28px 36px 64px; max-width: 1280px; width: 100%; min-width: 0; }
 main:focus, main:focus-visible { outline: none; }
