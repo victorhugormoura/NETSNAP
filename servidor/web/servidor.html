@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- netsnap · Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting · Licença MIT -->
+<html lang="pt-BR" data-modo="servidor">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>netsnap · servidor</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="servidor.css">
+</head>
+<body class="sem-sessao">
+<div class="moldura">
+  <nav class="trilho" aria-label="Seções do painel">
+    <a class="marca" href="#/painel">
+      <span class="marca-fibras" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span>netsnap</span>
+    </a>
+    <ul id="menu">
+      <li><a href="#/painel" data-rota="painel">Visão geral</a></li>
+      <li data-papel="tecnico"><a href="#/coletar" data-rota="coletar">Nova coleta</a></li>
+      <li><a href="#/execucoes" data-rota="execucoes">Execuções</a></li>
+      <li><a href="#/agendamentos" data-rota="agendamentos">Agendamentos</a></li>
+      <li><a href="#/analises" data-rota="analises">Pacotes de análise</a></li>
+      <li class="separador"><a href="#/snapshots" data-rota="snapshots">Snapshots</a></li>
+      <li><a href="#/inventario" data-rota="inventario">Inventário</a></li>
+      <li><a href="#/comparar" data-rota="comparar">Comparar coletas</a></li>
+      <li><a href="#/topologia" data-rota="topologia">Topologia</a></li>
+      <li><a href="#/vulnerabilidades" data-rota="vulnerabilidades">Vulnerabilidades</a></li>
+      <li data-papel="tecnico"><a href="#/diagnostico" data-rota="diagnostico">Diagnóstico</a></li>
+      <li data-papel="tecnico" class="separador"><a href="#/cofre" data-rota="cofre">Cofre de credenciais</a></li>
+      <li data-papel="admin"><a href="#/usuarios" data-rota="usuarios">Usuários</a></li>
+      <li data-papel="admin"><a href="#/auditoria" data-rota="auditoria">Auditoria</a></li>
+    </ul>
+    <div class="trilho-conta">
+      <a href="#/conta" data-rota="conta" id="conta-link"></a>
+      <button type="button" class="link" id="sair">Sair</button>
+    </div>
+    <p class="trilho-rodape" id="rodape"></p>
+  </nav>
+  <main id="conteudo" tabindex="-1">
+    <p class="carregando">Carregando…</p>
+  </main>
+</div>
+<div id="aviso" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+<script src="servidor.js"></script>
+</body>
+</html>
