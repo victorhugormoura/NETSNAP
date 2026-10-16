@@ -788,6 +788,14 @@ def criar_manipulador():
     class Manipulador(web.Manipulador):
         server_version = "netsnap"
 
+        def finish(self):
+            # Uma thread por conexão: a conexão SQLite dela fecha junto, em vez
+            # de esperar o coletor de lixo.
+            try:
+                super().finish()
+            finally:
+                BANCO.fechar_da_thread()
+
         # -- identidade da requisição -------------------------------------
         def _par(self):
             """Origem da conexão; "unix" quando chega pelo socket Unix, que só
