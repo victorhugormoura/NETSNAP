@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, netcve 0.3.2, painel netsnap_web 0.3.0, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap servidor 1.0.0**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.0**, painel netsnap_web 0.3.1, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap_ia 0.1.0**, **netsnap servidor 1.0.1**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -34,7 +34,8 @@ Usos típicos:
 | `netsnap.py` | Coletor principal (menu interativo e modo lote) | Python 3.8+, Netmiko |
 | `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.8+, cliente OpenSSH para SSH |
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
-| `netcve.py` | Lê os snapshots e faz triagem de vulnerabilidades (NVD + CISA KEV) e de configuração insegura | só biblioteca padrão (certifi opcional) |
+| `netcve.py` | Triagem de vulnerabilidades dos snapshots: NVD por CPE, OSV para pacotes Linux, CISA KEV, EPSS, catálogo de falhas graves com condição de exposição e heurísticas de configuração; saída MD, CSV e JSON | só biblioteca padrão (certifi opcional) |
+| `netsnap_ia.py` + `contextos/` | Análise por IA de cada equipamento com contexto Markdown por plataforma; resposta `netanalytic-achados/1` | só biblioteca padrão; API Anthropic ou compatível com OpenAI (inclusive local) |
 | `netsnap_web.py` + `web/` | Painel local no navegador: coleta, execuções ao vivo, snapshots, inventário, comparação, topologia, netcve, netdiag e agendamentos | só biblioteca padrão; coleta e netdiag usam o Netmiko |
 | `netsnap_topologia.py` | Topologia dos snapshots em JSON: enlaces LLDP/CDP e L3 (sub-redes ponto a ponto das configurações), diagnóstico de vizinhança | só biblioteca padrão |
 | `netsnap_desenho.py` | Desenho da topologia em SVG e PDF vetorial (o painel converte o SVG em PNG) | só biblioteca padrão |
@@ -253,11 +254,30 @@ Repete a detecção registrando cada etapa e o tempo, roda cada comando do perfi
 ### netcve
 
 ```bash
-python3 netcve.py snapshots/ [--api-key K | NVD_API_KEY] [--sem-rede] [--csv] [--todos]
-                             [--limite-cve 15] [--inseguro]
+python3 netcve.py snapshots/ [--api-key K | NVD_API_KEY] [--sem-rede] [--csv] [--json] [--todos]
+                             [--limite-cve 15] [--sem-osv] [--sem-epss] [--catalogo extra.json]
+                             [--inseguro]
 ```
 
-Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`), extrai a versão a partir do Inventário (ignorando Vizinhança e Logs), aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação), consulta a NVD 2.0 por CPE com paginação completa e cruza com o catálogo CISA KEV. Gera `_cve_triagem_<ts>.md` (e `.csv`). Cache de 7 dias em `~/.netcve_cache.json`. Huawei VRP, SmartAX MA5600 e FiberHome têm versão extraída mas não consultada (sem CPE genérico na NVD); o SmartAX MA5800 é consultado como `huawei:ma5800_firmware`. A versão é convertida para o formato CPE da NVD (Junos `21.4R3-S5.4` → `21.4:r3-s5`; IOS-XE `17.03.04a` → `17.3.4a`). Falha de TLS ou erro 4xx não é repetido; o cache é gravado a cada consulta. Resultado é triagem, não laudo.
+Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--todos`) e:
+
+- extrai versões do Inventário (ignorando Vizinhança e Logs) e consulta a NVD 2.0 por CPE, com paginação completa (Junos, IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, SmartAX MA5800, kernel, BIND, OpenSSH, nginx, Apache, PHP). Huawei VRP, SmartAX MA5600 e FiberHome têm versão extraída mas não consultada (sem CPE genérico). A versão é convertida para o formato CPE da NVD (Junos `21.4R3-S5.4` → `21.4:r3-s5`; IOS-XE `17.03.04a` → `17.3.4a`);
+- em servidores Debian, Ubuntu, Rocky Linux e AlmaLinux, consulta todos os pacotes no OSV pelo pacote-fonte e pela versão exata (coluna nova do inventário a partir do netsnap 1.17.1). Software que veio de pacote da distribuição (PHP, OpenSSH, BIND, nginx, Apache, kernel em execução igual ao instalado) sai da consulta pela NVD, que usaria a versão upstream. Por vulnerabilidade: CVEs, CVSS 3 calculado do vetor, prioridade do Ubuntu, urgência do Debian (descarta `unimportant`) e versão corrigida;
+- cruza tudo com o CISA KEV (com fabricante, produto, data e uso por ransomware) e com o EPSS;
+- aplica o catálogo de falhas graves: versão afetada **e** condição de exposição lida do snapshot, mais mitigações encontradas. Entradas: PHP2Shell (CVE-2026-109618/109619) e MikroTrick (CVE-2026-67279, 86060, 67277, 67276, 67278, 67281). Para PHP de pacote da distribuição, vale o resultado do OSV;
+- lista o "KEV do fabricante": CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim;
+- aplica 9 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação).
+
+Gera `_cve_triagem_<ts>.md`, e com as opções `.csv` e `.json` (`netcve/1`: por host, versões com CVEs, pacotes com vulnerabilidades, catálogo, KEV do fabricante e configuração, com KEV e EPSS por CVE). Cache de 7 dias em `~/.netcve_cache.json` (NVD, resumos do OSV e EPSS). Falha de TLS ou erro 4xx não é repetido. Resultado é triagem, não laudo.
+
+### netsnap_ia
+
+```bash
+python3 netsnap_ia.py <pacote.zip | pasta> [--provedor anthropic|openai] [--modelo M] [--url URL]
+                      [--contextos PASTA | NETSNAP_CONTEXTOS] [--saida PASTA] [--simular]
+```
+
+Um pedido por equipamento: instruções fixas + contexto da plataforma (`geral` + `junos`, `mikrotik`, `huawei-vrp`, `olt`, `cisco` ou `linux`; a pasta privada substitui o contexto-base de mesmo nome, arquivo `.md` ou pasta com vários `.md`, até 150 mil caracteres), resumo do equipamento (do pacote do servidor ou da triagem JSON do netcve), diferença de configuração e o snapshot cortado por seção (120 mil caracteres, configuração com o maior peso). No `anthropic`, o bloco de sistema vai com `cache_control` para cache entre equipamentos da mesma plataforma. Snapshot com `sensitive_data: included` não é enviado. A resposta é validada (severidade e categoria normalizadas; achado sem evidência fica com confiança baixa) e gravada em `_ia_analise_<ts>.json` (`netanalytic-achados/1`) e `.md`. `--simular` grava os pedidos em `_ia_pedidos_<ts>/` sem chamar a API.
 
 ### Painel web (netsnap_web)
 
@@ -366,6 +386,8 @@ A saída dos comandos não é escapada; o que a protege é a cerca, sempre mais 
 | Topologia | LLDP: Huawei VRP validado com saída real; Junos (detalhado), Cisco, MikroTik e lldpd testados com exemplos de formato documentado. L3: configuração Junos validada com saída real (Huawei, Cisco e MikroTik por sintaxe). Desenho testado com até 250 equipamentos (cerca de 10 s) |
 | Cisco NX-OS/IOS/XR, MikroTik | Perfis por documentação e sintaxe conhecida; validação de campo limitada |
 | Transporte sem dependências | Validado isoladamente; não integrado ao netsnap.py |
+| netcve 0.4 (OSV, EPSS, catálogo) | Testado contra as APIs reais do OSV, EPSS, KEV e NVD com um Ubuntu 24.04 (1078 pacotes; achou o PHP2Shell no php8.3 da distribuição). RPM (Rocky/Alma) testado só com saída sintética. Condições de exposição do MikroTrick testadas com saída sintética, sem equipamento real |
+| netsnap_ia | Testado com APIs simuladas (Anthropic e OpenAI); sem execução contra a API real nem modelo local |
 | Servidor | Testes automatizados (cofre, banco, API completa contra roteador simulado), instalador em Ubuntu 24.04 com Nginx e Apache reais e ponta a ponta por TLS. **Falta:** systemd real como PID 1, Debian 12 e Ubuntu 22.04, Let's Encrypt real e TPM2 físico |
 | Execução não interativa (credenciais por argumento/variável) | Não existe no netsnap.py; no servidor, coletas agendadas usam a credencial do cofre |
 | Taxa de erro de interface | Contadores são cumulativos; uma coleta não dá taxa — são necessárias duas |

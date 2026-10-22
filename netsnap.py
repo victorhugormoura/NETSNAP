@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.17.0"
+__version__ = "1.17.1"
 
 import os
 import re
@@ -196,6 +196,21 @@ PERFIS = {
             # milhares de linhas.
             "show subscribers summary",
             "show pppoe statistics",
+            # Estado que a auditoria de snapshot usa: alarmes de chassi,
+            # adjacências IS-IS, BFD, sessões RPKI, violações do
+            # ddos-protection, disco, cores e histórico de commits (commit
+            # sem comentário é apontamento). 'show vmhost version' responde
+            # só em VM host (MX204, MX304); nos demais o erro fica registrado.
+            "show system uptime",
+            "show chassis alarms",
+            "show isis adjacency",
+            "show bfd session",
+            "show validation session",
+            "show ddos-protection protocols violations",
+            "show system storage",
+            "show system core-dumps",
+            "show system commit",
+            "show vmhost version",
         ],
         "optica": [
             # Filtro positivo pelas interfaces de infraestrutura. Um filtro
@@ -542,6 +557,20 @@ PERFIS = {
             # Serviços de gerência (telnet, ftp, www, api) e origens
             # permitidas: habilitado é o padrão e não aparece no export.
             "/ip service print without-paging",
+            # Forma chave=valor: mostra address/available-from (7.24+) de
+            # cada serviço, o que separa SSH restrito de SSH aberto (cadeia
+            # MikroTrick, CVE-2026-67279 + CVE-2026-86060).
+            "/ip service print detail without-paging",
+            "/ip ssh print",
+            # Servidor do bandwidth-test (CVE-2026-67277, catálogo KEV).
+            "/tool bandwidth-server print",
+            # device-mode 'flagged=yes' indica suspeita de invasão (7.17+).
+            "/system device-mode print",
+            # Contas e sessões abertas: a campanha MikroTrick criou a conta
+            # "ops". A lista não traz senhas.
+            "/user print without-paging",
+            "/user active print without-paging",
+            "/ip cloud print",
         ],
         "optica": [
             "/interface print stats without-paging",
@@ -665,11 +694,32 @@ PERFIS = {
             # inventário.
             # O status de um pipeline é o do último comando (cut), sempre
             # zero: com '||' o rpm nunca rodava em RHEL e derivados.
+            # As duas últimas colunas são o pacote-fonte e a versão dele: as
+            # bases de vulnerabilidade das distribuições (OSV, trackers do
+            # Debian e do Ubuntu) são indexadas pelo pacote-fonte (php8.2,
+            # openssh), não pelo binário (php8.2-fpm, openssh-server).
             "if command -v dpkg-query >/dev/null 2>&1; then "
             "dpkg-query -W -f '${db:Status-Abbrev}\\t${Package}\\t"
-            "${Version}\\t${Architecture}\\n' 2>/dev/null | "
+            "${Version}\\t${Architecture}\\t${source:Package}\\t"
+            "${source:Version}\\n' 2>/dev/null | "
             "grep '^ii' | cut -f2-; else rpm -qa --qf '%{NAME}\\t"
-            "%{VERSION}-%{RELEASE}\\t%{ARCH}\\n' 2>/dev/null; fi",
+            "%{EPOCH}:%{VERSION}-%{RELEASE}\\t%{ARCH}\\t%{SOURCERPM}\\n' "
+            "2>/dev/null; fi",
+            # PHP: versão, forma de execução (FPM, mod_php, CGI) e os
+            # parâmetros que mitigam o PHP2Shell (CVE-2026-109618 e
+            # CVE-2026-109619) enquanto o pacote não é atualizado. O php.ini
+            # da CLI não vale para o FPM: cada SAPI tem o seu.
+            "command -v php >/dev/null 2>&1 && php -v; "
+            "for f in /etc/php/*/*/php.ini /etc/php.ini /etc/opt/remi/*/php.ini "
+            "/usr/local/etc/php/php.ini; do [ -f \"$f\" ] && { echo \"===== $f\"; "
+            "grep -E '^[[:space:]]*(memory_limit|session\\.upload_progress\\.enabled|"
+            "fatal_error_backtraces|expose_php|allow_url_include|"
+            "disable_functions)[[:space:]]*=' \"$f\"; }; done 2>/dev/null; "
+            "systemctl list-units --type=service --all --no-pager --no-legend "
+            "'php*' 2>/dev/null; ls /etc/apache2/mods-enabled/ "
+            "/etc/httpd/conf.modules.d/ 2>/dev/null | grep -i php; "
+            "grep -rhoE 'php_admin_value\\[memory_limit\\][^;]*' "
+            "/etc/php/*/fpm/pool.d/ /etc/php-fpm.d/ 2>/dev/null | sort -u",
             "{S}ls -1 /etc/apt/sources.list.d/ 2>/dev/null; "
             "apt list --upgradable 2>/dev/null | head -n 40",
             "(command -v docker >/dev/null && {S}docker ps -a --format "

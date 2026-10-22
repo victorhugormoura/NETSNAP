@@ -27,7 +27,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import argparse
 import atexit
@@ -603,7 +603,7 @@ def novo_netdiag(cfg):
 
 def novo_netcve(cfg):
     argv = [sys.executable, "-u", os.path.join(AQUI, "netcve.py"),
-            PASTA_SNAPSHOTS, "--csv"]
+            PASTA_SNAPSHOTS, "--csv", "--json"]
     if cfg.get("sem_rede"):
         argv.append("--sem-rede")
     if cfg.get("todos"):
@@ -621,7 +621,8 @@ def novo_netcve(cfg):
         # na lista de processos.
         env["NVD_API_KEY"] = cfg["api_key"]
     job = Job("netcve", "Vulnerabilidades · " +
-              ("só configuração" if cfg.get("sem_rede") else "NVD + KEV"))
+              ("só configuração" if cfg.get("sem_rede")
+               else "NVD, OSV, KEV e EPSS"))
     job.config = {k: v for k, v in cfg.items() if k != "api_key"}
     registrar(job)
     iniciar_processo(job, argv, env_extra=env)
@@ -853,12 +854,38 @@ def caminho_seguro(pasta, nome):
     return caminho
 
 
+def _cves_do_json(caminho):
+    """Contagem por (host, ip) a partir do JSON do netcve 0.4+: CVEs por
+    versão (NVD) mais vulnerabilidades de pacote (OSV)."""
+    with open(caminho, encoding="utf-8") as f:
+        dados = json.load(f)
+    contagem = {}
+    for h in dados.get("hosts", []):
+        total, consultado = 0, False
+        for v in h.get("versoes", []):
+            if v.get("cves") is not None:
+                total += len(v["cves"])
+                consultado = True
+        for p in (h.get("pacotes") or {}).get("resultado") or []:
+            total += len(p.get("vulns", []))
+            consultado = True
+        contagem[(h.get("host"), h.get("ip"))] = {"cves": total,
+                                                  "consultado": consultado}
+    return contagem
+
+
 def cves_por_host():
     """Contagem de CVEs da triagem netcve mais recente, por (host, ip)."""
     triagens = sorted(n for n in os.listdir(PASTA_SNAPSHOTS)
                       if n.startswith("_cve_triagem_") and n.endswith(".md"))
     if not triagens:
         return {}, None
+    par_json = os.path.join(PASTA_SNAPSHOTS, triagens[-1][:-3] + ".json")
+    if os.path.isfile(par_json):
+        try:
+            return _cves_do_json(par_json), triagens[-1]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     contagem = {}
     texto = open(os.path.join(PASTA_SNAPSHOTS, triagens[-1]),
                  encoding="utf-8", errors="replace").read()

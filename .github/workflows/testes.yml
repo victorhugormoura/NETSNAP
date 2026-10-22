@@ -28,6 +28,10 @@ jobs:
         run: |
           python -I testes/test_sanitizar.py
           python -I testes/test_topologia.py
+      - name: netcve e análise por IA (APIs simuladas)
+        run: |
+          python -I testes/test_netcve.py
+          python -I testes/test_netsnap_ia.py
       - name: Pacote do servidor
         run: ./servidor/montar.sh --zip
       - name: Servidor (cofre, banco, agenda)

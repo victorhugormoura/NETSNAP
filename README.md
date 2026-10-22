@@ -496,7 +496,14 @@ O parâmetro `--sensivel` desativa o mascaramento; use apenas em diagnóstico lo
 
 ## netcve — triagem de vulnerabilidades (ferramenta complementar)
 
-O `netcve.py` lê os snapshots gerados pelo netsnap, extrai versões de software e indicadores de configuração insegura, consulta a base **NVD (NIST)** e o catálogo **CISA KEV**, e produz um relatório consolidado de exposição.
+O `netcve.py` lê os snapshots gerados pelo netsnap, extrai versões de software, pacotes instalados e indicadores de configuração insegura, e cruza com:
+
+- **NVD (NIST)**, por CPE, para o sistema dos equipamentos e para aplicações;
+- **OSV.dev**, para os pacotes de servidores **Debian, Ubuntu, Rocky Linux e AlmaLinux**, pela versão exata do pacote da distribuição. Isso respeita as correções retroportadas: o PHP 8.3.6 do Ubuntu 24.04 recebe as correções de segurança e continua 8.3.6, e a comparação pela versão upstream erraria;
+- **CISA KEV** (exploração confirmada) e **EPSS** (probabilidade de exploração em 30 dias);
+- um **catálogo de falhas graves** que avalia, além da versão, a configuração que torna o equipamento explorável. Começa com o **PHP2Shell** (CVE-2026-109618/109619: FPM ou mod_php ativo, mitigações no php.ini) e o **MikroTrick** (SSH do RouterOS aberto, bandwidth-server, device-mode `flagged`, conta `ops`). Entradas extras podem vir de um JSON com `--catalogo`.
+
+Gera relatório Markdown e, com `--json`, o mesmo resultado em JSON (`netcve/1`) para painel, API ou análise por IA.
 
 Não acessa equipamentos e não usa credenciais: opera apenas sobre os arquivos já coletados. Isso permite rodar a coleta numa rede isolada e a análise em outra máquina, com internet.
 
@@ -507,7 +514,12 @@ python3 netcve.py snapshots/ --sem-rede         # só heurísticas locais
 python3 netcve.py snapshots/ --csv              # gera CSV além do Markdown
 python3 netcve.py snapshots/ --todos            # inclui coletas antigas do mesmo host
 python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver abaixo)
+python3 netcve.py snapshots/ --json             # resultado também em JSON
+python3 netcve.py snapshots/ --sem-osv --sem-epss
+python3 netcve.py snapshots/ --catalogo extra.json
 ```
+
+**Pacotes de servidores Linux:** a partir do netsnap 1.17.1 o inventário traz o pacote-fonte de cada pacote (`php8.3` para `php8.3-fpm`, `openssh` para `openssh-server`), que é como as distribuições indexam as vulnerabilidades. Snapshots anteriores são avaliados pelo nome do binário, com cobertura parcial, e o relatório avisa. A primeira análise de um servidor faz centenas de consultas ao OSV (alguns minutos); as seguintes vêm do cache local de 7 dias.
 
 **Coletas repetidas:** por padrão, quando a pasta tem vários snapshots do mesmo host, apenas o mais recente é analisado — evita linhas duplicadas no relatório e consultas desnecessárias à NVD. Use `--todos` para incluir o histórico.
 
@@ -522,7 +534,10 @@ python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver ab
 | Fonte | Cobertura |
 |---|---|
 | Versões de sistema | Junos, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux e Huawei SmartAX MA5800 (consultados na NVD); Huawei VRP, SmartAX MA5600 e FiberHome (extraídos e listados, sem consulta — ver limitações) |
-| Versões de aplicação | BIND, OpenSSH, nginx, Apache |
+| Versões de aplicação | BIND, OpenSSH, nginx, Apache, PHP (pela NVD só quando não vierem de pacote da distribuição) |
+| Pacotes de servidores Linux | Todos os pacotes instalados, pelo OSV: Debian, Ubuntu, Rocky Linux, AlmaLinux |
+| Falhas graves (catálogo) | PHP2Shell, MikroTrick: versão + condição de exposição + mitigações encontradas |
+| KEV do fabricante | CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim |
 | Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação |
 
 ### Limitações — leia antes de usar o resultado
@@ -533,7 +548,9 @@ A correspondência é feita **pela versão declarada**, não por verificação a
 - **Falsos negativos são esperados.** A cobertura de CPE na NVD é incompleta para equipamentos de rede — OLTs FiberHome praticamente não têm CPE publicado, e o SmartAX só é consultado quando o snapshot identifica um MA5800 (`huawei:ma5800_firmware`), já que o CPE é por modelo. O Huawei VRP não existe na NVD como produto único: os CPEs são por modelo (`s6730-h_firmware`, por exemplo), e a consulta genérica não retornava nada. Nesses casos o netcve extrai a versão mas marca explicitamente *"Sem mapeamento CPE conhecido"* em vez de reportar "nenhuma vulnerabilidade".
 - **A versão é convertida para o formato da NVD.** O Junos é consultado com a release no campo *version* e o restante no *update* (`21.4R3-S5.4` → `21.4` / `r3-s5`), e o IOS-XE sem os zeros à esquerda do `show version` (`17.03.04a` → `17.3.4a`). O relatório continua mostrando a versão como o equipamento a declara.
 - **"Não consultado" não é "zero".** No modo `--sem-rede`, ou quando a consulta falha, a coluna de CVEs mostra *não consultado*.
-- **Kernel de distribuição.** A versão do kernel é consultada pela numeração upstream (`5.4.0`); distribuições como Ubuntu e RHEL retroportam correções, então a lista tende a superestimar a exposição. Confira no boletim de segurança da distribuição.
+- **Kernel de distribuição.** Quando o kernel em execução é o de um pacote instalado, ele é avaliado pelo OSV, como os demais pacotes. Se não for (reinício pendente, kernel do hipervisor ou compilado à mão), é consultado na NVD pela numeração upstream, que superestima a exposição.
+- **Debian e Ubuntu listam CVEs sem correção.** Muitas entradas aparecem como "sem correção" (aguardando triagem da distribuição). O relatório separa por pacote, mostra só KEV, crítica, alta ou EPSS ≥ 10% e traz a maior versão corrigida; médias e baixas ficam na contagem e no JSON.
+- **O catálogo depende do que foi coletado.** As condições de exposição do MikroTrick usam comandos novos do perfil RouterOS (1.17.1); em snapshots antigos a exposição aparece como "nenhum indicador encontrado". O formato da saída de `/ip service print detail` foi conferido pela documentação, não em equipamento `[validar]`.
 - **A versão é lida do próprio equipamento.** A busca começa pela seção *Inventário* e ignora *Vizinhança* e *Logs*, que descrevem outros equipamentos — em versões anteriores, a versão de um vizinho LLDP podia ser atribuída ao host.
 - **Community SNMP padrão** só é detectável em snapshots coletados com dados sensíveis incluídos; com a sanitização ativa, o valor chega mascarado. A regra considera apenas declarações SNMP, para não confundir com nomes de community BGP.
 - A fonte autoritativa é sempre o boletim do fabricante (Juniper SIRT, Cisco PSIRT, Huawei PSIRT, MikroTik).
@@ -542,11 +559,31 @@ Trate o relatório como **triagem para priorizar investigação**, não como lau
 
 ---
 
+## netsnap_ia — análise por IA com contexto por plataforma
+
+O `netsnap_ia.py` manda cada equipamento para um modelo de IA com o contexto da plataforma em Markdown e recebe os achados no formato `netanalytic-achados/1` (evidência citada do snapshot, impacto, comandos propostos e de reversão). Lê um pacote de análise do servidor (`.zip`) ou uma pasta de snapshots; nesse caso usa também a triagem JSON mais recente do netcve (falhas graves, KEV).
+
+```bash
+python3 netsnap_ia.py snapshots/ --simular                     # grava os pedidos para conferência, sem chamar a API
+ANTHROPIC_API_KEY=... python3 netsnap_ia.py snapshots/          # Claude (API Messages, contexto em cache)
+python3 netsnap_ia.py pacote.zip --provedor openai --url http://127.0.0.1:11434/v1 --modelo <modelo>
+```
+
+- **Contextos:** `contextos/` traz contextos-base por plataforma (Junos, RouterOS, Linux, Huawei VRP, Cisco, OLT). As skills completas ficam numa pasta privada, fora do repositório, indicada por `--contextos` ou `NETSNAP_CONTEXTOS`; um `junos.md` ou uma pasta `junos/` ali substitui o contexto-base de mesmo nome.
+- **Provedores:** `anthropic`, ou `openai` para qualquer API compatível com `/chat/completions`, inclusive modelos locais (Ollama, LM Studio, vLLM), que não mandam dado para fora da rede.
+- **Segurança:** snapshots coletados com segredos (`sensitive_data: included`) não são enviados. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
+- **Validação da resposta:** severidade e categoria fora da lista são normalizadas; achado sem evidência fica com confiança baixa.
+
+Testado com servidores de API simulados; a primeira execução contra a API real fica com você (veja `docs/IMPLANTACAO-NUC.md`).
+
 ## Testes
 
 ```bash
 python3 testes/test_sanitizar.py          # mascaramento de segredos: 199 casos, falsos positivos e desempenho
 python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sintéticos
+python3 testes/test_netcve.py             # CVSS, versões de pacote, catálogo, KEV por fabricante
+NETCVE_TESTE_REDE=1 python3 testes/test_netcve.py   # inclui consulta real ao OSV
+python3 testes/test_netsnap_ia.py         # análise por IA contra APIs simuladas
 ./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
 ```
 
