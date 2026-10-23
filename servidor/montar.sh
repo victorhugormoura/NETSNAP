@@ -20,7 +20,7 @@ VERSAO=$(cat "$AQUI/VERSAO")
 DEST="$AQUI/build/netsnap-servidor"
 
 NUCLEO="netsnap.py netsnap_md.py netsnap_topologia.py netsnap_desenho.py
-        netsnap_transporte.py netdiag.py netcve.py netsnap_web.py"
+        netsnap_transporte.py netdiag.py netcve.py netsnap_web.py netsnap_ia.py"
 
 rm -rf "$AQUI/build"
 mkdir -p "$DEST/app/web" "$DEST/testes"
@@ -28,6 +28,8 @@ mkdir -p "$DEST/app/web" "$DEST/testes"
 for f in $NUCLEO; do cp "$REPO/$f" "$DEST/app/"; done
 cp "$REPO/LICENSE" "$DEST/app/"
 cp "$REPO"/web/index.html "$REPO"/web/app.js "$REPO"/web/app.css "$DEST/app/web/"
+mkdir -p "$DEST/app/contextos"
+cp "$REPO"/contextos/*.md "$DEST/app/contextos/"
 cp "$AQUI"/*.py "$DEST/app/"
 cp "$AQUI"/web/* "$DEST/app/web/"
 cp "$AQUI"/testes/*.py "$DEST/testes/"

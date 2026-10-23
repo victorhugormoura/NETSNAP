@@ -5,6 +5,10 @@ diagnosticos/
 netdiag_diagnosticos/
 _cve_triagem_*.md
 _cve_triagem_*.csv
+_cve_triagem_*.json
+_ia_analise_*.md
+_ia_analise_*.json
+_ia_pedidos_*/
 _diagnostico_*.md
 _diagnostico_*.json
 _indice_*.md
@@ -42,3 +46,6 @@ Thumbs.db
 # Pacote do servidor gerado por servidor/montar.sh
 servidor/build/
 servidor/dist/
+
+# Claude Code: permissões locais de cada máquina
+.claude/settings.local.json

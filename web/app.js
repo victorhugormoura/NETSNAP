@@ -932,7 +932,7 @@ async function vRelatorio(tipo, nome) {
 async function vVulnerabilidades() {
   const lista = await listaRelatorios("triagem", "Nenhuma triagem ainda.");
   tela(`<h1>Vulnerabilidades</h1>
-    <p class="lead">Lê os snapshots, identifica versões e configuração insegura, e cruza com a NVD e o catálogo CISA KEV.
+    <p class="lead">Lê os snapshots, identifica versões, pacotes e configuração insegura, e cruza com a NVD, o OSV (pacotes de servidores Linux), o catálogo CISA KEV, o EPSS e o catálogo de falhas graves (PHP2Shell, MikroTrick).
       Resultado é triagem para priorizar investigação, não laudo: o boletim do fabricante é a fonte final.</p>
     <form class="bloco" id="f-cve" autocomplete="off">
       <label class="marcar"><input type="checkbox" name="sem_rede"> <span>Sem internet: só as verificações de configuração</span></label>
