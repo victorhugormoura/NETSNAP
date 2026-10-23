@@ -778,6 +778,7 @@ ESTATICOS_SERVIDOR = {
     "/index.html": ("servidor.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/tema.js": ("tema.js", "text/javascript; charset=utf-8"),
     "/servidor.js": ("servidor.js", "text/javascript; charset=utf-8"),
     "/servidor.css": ("servidor.css", "text/css; charset=utf-8"),
 }

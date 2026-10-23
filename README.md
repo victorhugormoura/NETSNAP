@@ -395,6 +395,8 @@ O terminal mostra o endereço com o token desta execução (`http://127.0.0.1:87
 | Diagnóstico | Roda o netdiag e mostra o relatório |
 | Agendamentos | Coletas recorrentes (diárias num horário ou a cada N horas) enquanto o painel estiver aberto |
 
+Tema escuro por padrão; o botão **Tema escuro** no menu alterna para o claro, e a escolha fica salva no navegador (painel local e servidor). O desenho da topologia continua claro nos dois temas, porque é o mesmo que vai para PNG e PDF.
+
 **Segurança**
 
 - Escuta só em `127.0.0.1`. Toda chamada exige o token, o que impede que outra página aberta no mesmo navegador dispare coletas; o cabeçalho `Host` é conferido contra DNS rebinding.

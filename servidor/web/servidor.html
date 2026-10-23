@@ -1,11 +1,12 @@
 <!doctype html>
 <!-- netsnap · Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting · Licença MIT -->
-<html lang="pt-BR" data-modo="servidor">
+<html lang="pt-BR" data-modo="servidor" data-tema="escuro">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>netsnap · servidor</title>
+<script src="tema.js"></script>
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="servidor.css">
 </head>
@@ -32,6 +33,7 @@
       <li data-papel="admin"><a href="#/usuarios" data-rota="usuarios">Usuários</a></li>
       <li data-papel="admin"><a href="#/auditoria" data-rota="auditoria">Auditoria</a></li>
     </ul>
+    <button type="button" class="tema-botao" id="tema" aria-pressed="true">Tema escuro</button>
     <div class="trilho-conta">
       <a href="#/conta" data-rota="conta" id="conta-link"></a>
       <button type="button" class="link" id="sair">Sair</button>
