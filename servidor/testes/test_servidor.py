@@ -236,6 +236,13 @@ max_execucoes_simultaneas = 2
         self.assertEqual(st, 200)
         self.assertIn("default-src 'self'", h.get("Content-Security-Policy", ""))
         self.assertEqual(h.get("X-Frame-Options"), "DENY")
+        # Tema escuro por padrão, aplicado antes do CSS por tema.js
+        texto = corpo if isinstance(corpo, str) else corpo.decode("utf-8", "replace")
+        self.assertIn('data-tema="escuro"', texto)
+        self.assertLess(texto.index("tema.js"), texto.index("app.css"))
+        st, js, h = Cliente(self.porta).req("GET", "/tema.js")
+        self.assertEqual(st, 200)
+        self.assertTrue(h.get("Content-Type", "").startswith("text/javascript"))
 
     def test_06_login_com_totp_e_recuperacao(self):
         c = Cliente(self.porta)

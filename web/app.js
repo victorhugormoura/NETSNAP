@@ -1142,5 +1142,24 @@ async function iniciar() {
   rotear();
 }
 
+// Tema: escuro por padrão (tema.js aplica a escolha salva antes do
+// primeiro desenho); o botão alterna e guarda neste navegador.
+function aplicarTema(tema) {
+  document.documentElement.setAttribute("data-tema", tema);
+  const b = $("#tema");
+  if (!b) return;
+  // Rótulo fixo com aria-pressed: o leitor de tela anuncia "Tema escuro,
+  // pressionado" ou "não pressionado".
+  const escuro = tema !== "claro";
+  b.setAttribute("aria-pressed", String(escuro));
+  b.title = escuro ? "Mudar para o tema claro" : "Mudar para o tema escuro";
+}
+aplicarTema(document.documentElement.getAttribute("data-tema") === "claro" ? "claro" : "escuro");
+$("#tema")?.addEventListener("click", () => {
+  const novo = document.documentElement.getAttribute("data-tema") === "claro" ? "escuro" : "claro";
+  guardar("tema", novo);
+  aplicarTema(novo);
+});
+
 // No servidor, servidor.js cuida do login e chama iniciarServidor().
 if (document.documentElement.dataset.modo !== "servidor") iniciar();

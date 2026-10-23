@@ -1,11 +1,12 @@
 <!doctype html>
 <!-- netsnap · Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting · Licença MIT -->
-<html lang="pt-BR">
+<html lang="pt-BR" data-tema="escuro">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>netsnap · painel</title>
+<script src="tema.js"></script>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -27,6 +28,7 @@
       <li><a href="#/diagnostico" data-rota="diagnostico">Diagnóstico</a></li>
       <li><a href="#/agendamentos" data-rota="agendamentos">Agendamentos</a></li>
     </ul>
+    <button type="button" class="tema-botao" id="tema" aria-pressed="true">Tema escuro</button>
     <p class="trilho-rodape" id="rodape"></p>
   </nav>
   <main id="conteudo" tabindex="-1">
