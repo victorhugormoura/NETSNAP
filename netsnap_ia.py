@@ -70,6 +70,12 @@ CONTEXTO_POR_PLATAFORMA = {
     "linux": "linux",
 }
 
+# Contexto extra por módulo de aplicação detectado no Linux (campo
+# 'applications' do snapshot), pelo início do nome do módulo.
+CONTEXTO_POR_APLICACAO = {
+    "WANGuard": "wanguard",
+}
+
 # Ordem e peso das seções do snapshot quando é preciso cortar: configuração
 # e estado primeiro; inventário por último (as versões já vão no resumo).
 ORDEM_SECOES = ["config", "basico", "logs", "optica", "vizinhanca", "inventario"]
@@ -150,14 +156,19 @@ def _ler_contexto(base, nome):
     return None, []
 
 
-def montar_contexto(plataforma, pasta_privada=None):
-    """Texto do contexto (geral + plataforma), arquivos usados e se cortou.
+def montar_contexto(plataforma, pasta_privada=None, aplicacoes=()):
+    """Texto do contexto (geral + plataforma + aplicações), arquivos usados
+    e se cortou.
 
     A pasta privada tem prioridade, nome a nome: um 'junos.md' (ou pasta
     'junos/') ali substitui o contexto-base de mesmo nome."""
     nomes = ["geral"]
     if CONTEXTO_POR_PLATAFORMA.get(plataforma):
         nomes.append(CONTEXTO_POR_PLATAFORMA[plataforma])
+    for app in aplicacoes or ():
+        for prefixo, nome in CONTEXTO_POR_APLICACAO.items():
+            if str(app).startswith(prefixo) and nome not in nomes:
+                nomes.append(nome)
     partes, usados = [], []
     for nome in nomes:
         texto = None
@@ -258,8 +269,33 @@ def hosts_da_pasta(pasta, triagem_json=None):
 # ---------------------------------------------------------------------------
 # Montagem do pedido
 # ---------------------------------------------------------------------------
+def _cotas_justas(tamanhos, teto):
+    """Divide o teto entre as saídas: as menores entram inteiras e o que
+    sobra é repartido por igual entre as maiores (water-filling)."""
+    cotas = [0] * len(tamanhos)
+    restantes = sorted(range(len(tamanhos)), key=lambda i: tamanhos[i])
+    sobra = teto
+    while restantes:
+        parte = sobra // len(restantes)
+        i = restantes[0]
+        if tamanhos[i] <= parte:
+            cotas[i] = tamanhos[i]
+            sobra -= tamanhos[i]
+            restantes.pop(0)
+        else:
+            for j in restantes:
+                cotas[j] = parte
+            break
+    return cotas
+
+
 def texto_do_snapshot(caminho, limite=LIMITE_SNAPSHOT):
-    """Snapshot em texto, seção a seção, cortado proporcionalmente."""
+    """Snapshot em texto, seção a seção, cortado proporcionalmente.
+
+    Quando uma seção passa da sua cota, o corte é por comando: as saídas
+    pequenas ficam inteiras e as grandes são encurtadas por igual. Cortar
+    só o fim da seção apagava justamente os módulos de aplicação, que vêm
+    depois dos comandos do sistema (no Wanguard, todo o banco)."""
     snap = md.ler_snapshot(caminho)
     por_secao = {}
     for s in snap["secoes"]:
@@ -267,22 +303,30 @@ def texto_do_snapshot(caminho, limite=LIMITE_SNAPSHOT):
         for c in s["comandos"]:
             saida = c["saida"] if c["saida"] is not None else (
                 f"(sem saída útil: {c['retorno']})" if c["vazio"] else "(sem saída)")
-            partes.append(f"### {c['comando']}\n{saida}")
+            partes.append([f"### {c['comando']}\n", saida])
         if partes:
-            por_secao.setdefault(s["chave"], []).append(
-                f"## {s['titulo']}\n\n" + "\n\n".join(partes))
-    total = sum(len("\n".join(v)) for v in por_secao.values())
+            por_secao.setdefault(s["chave"], []).append((f"## {s['titulo']}\n\n", partes))
+
+    def montar(grupos):
+        return "\n\n".join(t + "\n\n".join(c + s for c, s in partes)
+                            for t, partes in grupos)
+
+    total = sum(len(montar(v)) for v in por_secao.values())
     saida, cortes = [], []
     for chave in ORDEM_SECOES + sorted(set(por_secao) - set(ORDEM_SECOES)):
         if chave not in por_secao:
             continue
-        bloco = "\n\n".join(por_secao[chave])
-        if total > limite:
-            teto = int(limite * PESO_SECOES.get(chave, 0.05))
-            if len(bloco) > teto:
-                cortes.append(chave)
-                bloco = bloco[:teto] + f"\n[... seção cortada em {teto} caracteres]"
-        saida.append(bloco)
+        grupos = por_secao[chave]
+        teto = int(limite * PESO_SECOES.get(chave, 0.05))
+        if total > limite and len(montar(grupos)) > teto:
+            cortes.append(chave)
+            todas = [p for _, partes in grupos for p in partes]
+            fixo = sum(len(t) + 2 for t, _ in grupos) + sum(len(c) + 2 for c, _ in todas)
+            cotas = _cotas_justas([len(s) for _, s in todas], max(teto - fixo, 0))
+            for p, cota in zip(todas, cotas):
+                if len(p[1]) > cota:
+                    p[1] = p[1][:cota] + f"\n[... saída cortada: {len(p[1])} caracteres]"
+        saida.append(montar(grupos))
     return snap["meta"], "\n\n".join(saida), cortes
 
 
@@ -292,7 +336,11 @@ def montar_pedido(item, pasta_contextos):
         raise ErroIA("snapshot coletado com segredos (sensitive_data: "
                      "included); não é enviado à IA")
     plataforma = meta.get("platform_key") or item["resumo"].get("plataforma")
-    contexto, usados, ctx_cortado = montar_contexto(plataforma, pasta_contextos)
+    aplicacoes = meta.get("applications") or []
+    if not isinstance(aplicacoes, list):
+        aplicacoes = [aplicacoes]
+    contexto, usados, ctx_cortado = montar_contexto(plataforma, pasta_contextos,
+                                                    aplicacoes)
     partes = ["# Resumo do equipamento", "```json",
               json.dumps(item["resumo"], ensure_ascii=False, indent=1), "```"]
     if item.get("diff"):

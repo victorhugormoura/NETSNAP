@@ -30,8 +30,8 @@ Extrator de snapshot **multi-vendor** e **somente leitura** para equipamentos de
 | **ISP-Stack** | Identidade do provedor (`provider.conf`) e módulos efetivamente instalados (`/etc/isp-stack/state/`); configuração de Unbound com adblock, Chrony, SNMP, Prometheus com alvos e regras, Alertmanager, Blackbox, Routinator, Apache com os vhosts do stack, jump host, unidades `isp-*` e endurecimento (fail2ban, unattended-upgrades, auditd) |
 | **ISP-Stack — estado operacional** | Serviços e timers ativos, portas do stack em escuta, `unbound-control status` e estatísticas, `chronyc tracking/sources`, status e métricas do Routinator (sem disparar validação), alvos e alertas do Prometheus, estado do Alertmanager, última execução do backup e certificados do certbot |
 | **ISP-Stack — conformidade** | Executa `install.sh --audit` e `--verify`, que são as entradas **não interativas** do próprio stack, para obter o diagnóstico oficial da instalação |
-| **WANGuard** | Configuração (descoberta por glob — o nome do arquivo muda entre versões; arquivos de credencial são pulados), unidades systemd e processos ativos, endereçamento, mitigação em uso (`iptables`, `nftables`, `ipset`), sessões BGP de blackhole/flowspec (BIRD, FRR, ExaBGP), log de anomalias, binários e versão |
-| **WANGuard — configuração operacional** | Toda a configuração do Wanguard 9 vive no MariaDB. Consulta somente leitura a: componentes (server, sensor, flow, sniff, snmp, filter, console, BGP), interfaces monitoradas com tipo de enlace e velocidade, zonas de IP e prefixos, perfis de detecção e limiares, respostas automáticas, roteadores com blackhole e **Flowspec**, listas brancas e exceções, mitigação ativa no instante, **as 1.000 anomalias mais recentes** com distribuição por tipo e por dia, e descoberta automática de tabelas não previstas |
+| **WANGuard** | Configuração (descoberta por glob — o nome do arquivo muda entre versões; arquivos de credencial são pulados); configuração do daemon BGP da mitigação (ExaBGP, também instalado em `/opt/exabgp`; GoBGP; FRR), com senha MD5 mascarada, usuário da unit e permissão do pipe do ExaBGP; unidades e processos (com os argumentos: `WANflow -i`, `WANsupervisor` com ou sem `-n`); saúde de MariaDB, InfluxDB e ClickHouse; sessões BGP estabelecidas (`ss`, sem tocar no daemon); descarte de UDP no recebimento de flows; contagem de regras de filtro por tabela; disco dos flows e dos bancos; backup do `WANmaintenance`; journal do WANsupervisor sem o SQL repetido; versões do Wanguard e das dependências |
+| **WANGuard — configuração operacional** | Toda a configuração do Wanguard 9 vive no MariaDB. Consulta somente leitura a: componentes (server, sensor, flow, sniff, snmp, filter, console, BGP), interfaces monitoradas com tipo de enlace e velocidade, zonas de IP e prefixos, perfis de detecção e limiares, respostas automáticas, roteadores com blackhole e **Flowspec**, listas brancas e exceções, mitigação ativa no instante, eventos da plataforma (`events`), as 200 anomalias mais recentes e, em 30 dias, **os alvos mais frequentes, as regras que mais disparam** (calibração de threshold), anomalias por sensor e por dia, variáveis do MariaDB e descoberta automática de tabelas não previstas |
 | **Zabbix** | `zabbix_server.conf` / `zabbix_proxy.conf` / agente **sem linhas comentadas**, includes, frontend e vhost, scripts externos e de alerta, estado dos serviços e portas, versões e pacotes |
 | **Zabbix — inventário monitorado** | Consulta ao banco (somente `SELECT`): contagem de hosts/itens/triggers, **lista de hosts com IP e estado**, grupos, templates, **problemas ativos com severidade**, ações, tipos de mídia, dashboards e proxies |
 | **Grafana** | `grafana.ini` sem comentários, provisionamento declarativo (`provisioning/datasources`, `dashboards`, `alerting`), plugins, `/api/health`, versões e pacotes |
@@ -326,7 +326,7 @@ Quando a diferença passa de cinco segundos, o resumo mostra as duas medidas: `C
 
 Serviço em falha repete a mesma mensagem centenas de vezes. Num servidor WANGuard real, 285 das 300 linhas coletadas eram o mesmo erro de conexão com o ClickHouse, cada uma arrastando o comando SQL inteiro: 97 KB para dizer uma coisa só.
 
-As seções de log em hosts Linux passam por um filtro que trunca linhas muito longas, agrupa as que têm a mesma assinatura (dígitos normalizados) e informa quantas foram omitidas — `[+35 linha(s) semelhante(s) omitida(s)]`. No caso acima a saída caiu 89% e a repetição ficou **mais** visível, não menos.
+As seções de log em hosts Linux passam por um filtro que trunca linhas muito longas e agrupa as que têm a mesma assinatura (dígitos normalizados), mesmo intercaladas com outras mensagens: cada uma aparece uma vez, na posição da primeira ocorrência, seguida de `[+35 linha(s) semelhante(s) omitida(s); a última em ago 20 23:12:34]`. Acima de 200 mensagens distintas ficam as mais recentes. No módulo WANGuard, o comando SQL que os `genrrds_*` repetem a cada falha é cortado antes do agrupamento.
 
 ---
 
@@ -538,7 +538,7 @@ python3 netcve.py snapshots/ --catalogo extra.json
 | Pacotes de servidores Linux | Todos os pacotes instalados, pelo OSV: Debian, Ubuntu, Rocky Linux, AlmaLinux |
 | Falhas graves (catálogo) | PHP2Shell, MikroTrick: versão + condição de exposição + mitigações encontradas |
 | KEV do fabricante | CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim |
-| Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, NTP sem autenticação |
+| Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard: pipe do ExaBGP gravável por todos, Server Commands ligado (`WANsupervisor` sem `-n`), gráficos sem banco de séries |
 
 ### Limitações — leia antes de usar o resultado
 
@@ -569,7 +569,7 @@ ANTHROPIC_API_KEY=... python3 netsnap_ia.py snapshots/          # Claude (API Me
 python3 netsnap_ia.py pacote.zip --provedor openai --url http://127.0.0.1:11434/v1 --modelo <modelo>
 ```
 
-- **Contextos:** `contextos/` traz contextos-base por plataforma (Junos, RouterOS, Linux, Huawei VRP, Cisco, OLT). As skills completas ficam numa pasta privada, fora do repositório, indicada por `--contextos` ou `NETSNAP_CONTEXTOS`; um `junos.md` ou uma pasta `junos/` ali substitui o contexto-base de mesmo nome.
+- **Contextos:** `contextos/` traz contextos-base por plataforma (Junos, RouterOS, Linux, Huawei VRP, Cisco, OLT) e por aplicação detectada no Linux (Wanguard). As skills completas ficam numa pasta privada, fora do repositório, indicada por `--contextos` ou `NETSNAP_CONTEXTOS`; um `junos.md` ou uma pasta `junos/` ali substitui o contexto-base de mesmo nome.
 - **Provedores:** `anthropic`, ou `openai` para qualquer API compatível com `/chat/completions`, inclusive modelos locais (Ollama, LM Studio, vLLM), que não mandam dado para fora da rede.
 - **Segurança:** snapshots coletados com segredos (`sensitive_data: included`) não são enviados. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
 - **Validação da resposta:** severidade e categoria fora da lista são normalizadas; achado sem evidência fica com confiança baixa.
@@ -584,6 +584,7 @@ python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sinté
 python3 testes/test_netcve.py             # CVSS, versões de pacote, catálogo, KEV por fabricante
 NETCVE_TESTE_REDE=1 python3 testes/test_netcve.py   # inclui consulta real ao OSV
 python3 testes/test_netsnap_ia.py         # análise por IA contra APIs simuladas
+python3 testes/test_coleta_linux.py       # sintaxe de todos os comandos Linux (dash e bash) e agrupamento de logs
 ./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
 ```
 

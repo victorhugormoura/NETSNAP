@@ -148,6 +148,12 @@ MAPA_APP = [
      "Apache httpd"),
     # 'php -v' do inventário Linux: "PHP 8.3.6 (cli) (built: ...)"
     (r"(?m)^PHP ([5-9]\.[0-9]+\.[0-9]+)\b", "php", "php", "PHP"),
+    # Daemons BGP da mitigação do Wanguard. GoBGP em binário do GitHub não
+    # aparece no gerenciador de pacotes: a versão vem do 'gobgpd --version'.
+    (r"(?im)^gobgpd? version v?([0-9]+\.[0-9]+\.[0-9]+)", "osrg", "gobgp",
+     "GoBGP"),
+    (r"(?im)^(?:frr version|FRRouting) ([0-9]+\.[0-9]+(?:\.[0-9]+)?)",
+     "frrouting", "frrouting", "FRRouting"),
 ]
 
 # Software que, num servidor com pacotes da distribuição, é avaliado pelo
@@ -159,6 +165,8 @@ COBERTO_PELO_OSV = {
     "nginx": r"^nginx$",
     "Apache httpd": r"^(apache2|httpd)$",
     "PHP": r"^php(\d+(\.\d+)?)?$",
+    "GoBGP": r"^gobgp$",
+    "FRRouting": r"^frr$",
     # O OSV avalia o pacote do kernel instalado; o kernel em execução pode
     # ser mais antigo se falta reiniciar.
     "Kernel Linux": r"^(linux|linux-signed(-\w+)?|kernel)$",
@@ -251,6 +259,57 @@ REGRAS_CONFIG = [
                   r"\s*options\s*\{(?![\s\S]{0,2000}?version\s)",
         "recomendacao": "Definir version \"none\"; em options{} para não "
                         "revelar a release em uso.",
+    },
+    {
+        "id": "CFG-BANCO-EXPOSTO",
+        "titulo": "Banco de dados escutando em todas as interfaces",
+        "severidade": "MEDIA",
+        "plataformas": ["linux"],
+        # Linha do 'ss -tulpn': MariaDB/MySQL, PostgreSQL, Redis, InfluxDB,
+        # ClickHouse ou MongoDB em 0.0.0.0, [::] ou *.
+        "padrao": r"(?im)^tcp\s+LISTEN\s+\d+\s+\d+\s+(?:0\.0\.0\.0|\[::\]|\*)"
+                  r":(?:3306|5432|6379|8086|8123|9000|27017)\s",
+        "recomendacao": "Limitar o bind ao localhost ou à gerência. No "
+                        "Wanguard, a Console precisa do 3306 aberto só se "
+                        "houver Sensor/Filter remoto; nesse caso, liberar no "
+                        "firewall apenas os IPs desses servidores.",
+    },
+    {
+        "id": "CFG-WG-PIPE-EXABGP",
+        "titulo": "Pipe do ExaBGP gravável por qualquer usuário local",
+        "severidade": "ALTA",
+        "plataformas": ["linux"],
+        "padrao": r"(?m)^p[r-][w-][x-][r-][w-][x-][r-]w[x-]\s+\S+\s+"
+                  r"(?:/var)?/run/exabgp\S*",
+        "recomendacao": "Quem escreve no pipe anuncia rotas (RTBH/Flowspec) "
+                        "em nome do Wanguard. Deixar 0660 com grupo do "
+                        "ExaBGP e o usuário andrisoft nesse grupo (drop-in "
+                        "systemd com RuntimeDirectoryMode=0770 e UMask=0007).",
+    },
+    {
+        "id": "CFG-WG-SERVER-COMMANDS",
+        "titulo": "WANsupervisor sem -n: comandos de shell pela Console "
+                  "(Server Commands) habilitados",
+        "severidade": "MEDIA",
+        "plataformas": ["linux"],
+        # Processo sem argumentos no ps ou no CGroup do systemctl status.
+        "padrao": r"(?m)(?:[├└]─\d+|\s\d+(?:\.\d+)?)\s+"
+                  r"/opt/andrisoft/bin/WANsupervisor[ \t]*$",
+        "recomendacao": "Se o recurso não é usado, iniciar o WANsupervisor "
+                        "com -n (override do ExecStart na unit): qualquer "
+                        "conta da Console com acesso executa comandos no "
+                        "servidor como andrisoft.",
+    },
+    {
+        "id": "CFG-WG-GRAFICOS-SEM-BANCO",
+        "titulo": "Wanguard sem gravar gráficos: banco de séries inacessível",
+        "severidade": "MEDIA",
+        "plataformas": ["linux"],
+        "padrao": r"genrrds_\w+(?:\[\d+\])?: fail \d+ (?:clickhouse|influxdb)"
+                  r" \d+ \(Couldn't connect to server\)",
+        "recomendacao": "Subir o ClickHouse/InfluxDB configurado em Graphs & "
+                        "Storage ou removê-lo da configuração. Sem ele, "
+                        "gráficos, Flow Graphs e Profiling ficam sem dados.",
     },
     {
         "id": "CFG-NTP-SEM-AUTENTICACAO",

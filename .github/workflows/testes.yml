@@ -28,6 +28,7 @@ jobs:
         run: |
           python -I testes/test_sanitizar.py
           python -I testes/test_topologia.py
+          python -I testes/test_coleta_linux.py
       - name: netcve e análise por IA (APIs simuladas)
         run: |
           python -I testes/test_netcve.py

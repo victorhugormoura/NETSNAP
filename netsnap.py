@@ -659,6 +659,13 @@ PERFIS = {
             "df -h",
             "ss -s",
             "ps aux --sort=-%cpu | head -n 25",
+            # Horário e fuso: o log de NAT do Marco Civil, a correlação de
+            # flows (Wanguard exige o mesmo fuso em todos os servidores) e o
+            # TOTP dependem disso.
+            "timedatectl status 2>/dev/null | grep -E 'Local time|Time zone|"
+            "synchronized|NTP service|RTC in local'; chronyc -n tracking "
+            "2>/dev/null | grep -E 'Reference ID|System time|Leap status' "
+            "|| ntpq -pn 2>/dev/null | head -n 8",
         ],
         "optica": [
             "ip -br link",
@@ -1113,7 +1120,12 @@ DEF_Q_WANGUARD = (
     r"'(banco do Wanguard nao localizado)'; "
     r'else MYSQL_PWD="$WP" mysql -h "${WH:-localhost}" -u "$WU" -D "$WD" '
     r'-B -e "$1" 2>&1; fi; }; '
-    r'WT(){ C=$(W "DESCRIBE \`$1\`" 2>/dev/null | tail -n +2 | '
+    # Tabela ausente nesta versão vira uma linha só, em vez de o texto do
+    # erro ser lido como lista de colunas.
+    r'WT(){ D=$(W "DESCRIBE \`$1\`" 2>/dev/null); case "$D" in '
+    '*"ERROR 1146"*) echo "(tabela $1 inexistente nesta versao)"; '
+    'return;; "("*) printf "%s\\n" "$D"; return;; esac; '
+    r'C=$(printf "%s\n" "$D" | tail -n +2 | '
     'awk -v F="${3:-}" \'{ n=tolower($1); t=tolower($2) } '
     r"n ~ /pass|secret|_key$|^key$|token|community|credential|hash|salt|^license$|^prev_license$/ { next } "
     r'F != "" && n !~ F { next } '
@@ -1196,83 +1208,162 @@ APPS_LINUX = {
             # (dbpass.conf e similares) e limitando o volume por arquivo:
             # a partir do Wanguard 9 o etc/ traz influxdb.conf com centenas
             # de linhas de comentário que nada acrescentam ao diagnóstico.
+            # dbconsole.conf só existe no secundário de HA.
             "for f in /opt/andrisoft/etc/*.conf /opt/andrisoft/etc/*.cfg "
             "/etc/wanguard*.conf /etc/wanguard.conf; do [ -f \"$f\" ] || continue; "
             "case \"$f\" in *pass*|*secret*|*key*|*cred*) "
             "echo \"===== $f (omitido: arquivo de credencial)\"; continue;; esac; "
             "echo \"===== $f\"; {S}grep -v -E '^[[:space:]]*#|^[[:space:]]*$' "
             "\"$f\" | head -n 120; done",
-            # Unidades descobertas por padrão de nome, não por lista fixa
-            "systemctl list-units --no-pager --all --plain 2>/dev/null | "
-            "grep -i -E 'wanguard|andrisoft|wansupervisor|wanflow|wanfilter'",
-            # Console web: o diretório é 'webroot' a partir do Wanguard 9
-            "{S}ls -la /opt/andrisoft/webroot/ /opt/andrisoft/web/ "
-            "/opt/andrisoft/api/ 2>/dev/null | head -n 30",
+            # O Wanguard não tem pilha BGP própria: RTBH e Flowspec saem por
+            # ExaBGP, GoBGP ou FRR. A configuração deles é parte da
+            # mitigação (vizinhos, famílias, next-hop). As senhas MD5 saem
+            # mascaradas pelo sanitizador. Instalação do ExaBGP pelo GitHub
+            # fica em /opt/exabgp, fora do PATH.
+            "for f in /etc/exabgp/*.conf /etc/exabgp/*.env "
+            "/opt/exabgp/etc/exabgp/*.conf /opt/exabgp/etc/exabgp/*.env "
+            "/usr/local/etc/exabgp/*.conf /etc/gobgpd.conf /etc/gobgp/*.toml "
+            "/etc/gobgp/*.yaml /etc/gobgp/*.yml /etc/frr/frr.conf "
+            "/etc/frr/bgpd.conf /etc/frr/daemons; do [ -f \"$f\" ] || continue; "
+            "echo \"===== $f\"; {S}grep -v -E '^[[:space:]]*(#|!|$)' \"$f\" "
+            "| head -n 150; done",
+            # Usuário e permissões do daemon BGP: o Wanguard escreve no pipe
+            # do ExaBGP como 'andrisoft'; pipe gravável por todos permite a
+            # qualquer usuário local injetar anúncios.
+            "for u in exabgp gobgpd frr; do c=$(systemctl cat --no-pager "
+            "\"$u.service\" 2>/dev/null) || continue; [ -n \"$c\" ] || continue; "
+            "echo \"===== $u.service\"; "
+            "printf '%s\\n' \"$c\" | grep -E '^(# /|ExecStart=|User=|Group=|"
+            "RuntimeDirectory|UMask=|Environment)'; done; "
+            "for p in /run/exabgp/exabgp.in /run/exabgp/exabgp.out "
+            "/run/exabgp.in /run/exabgp.out /var/run/exabgp.cmd; do "
+            "[ -p \"$p\" ] && stat -c '%A %U:%G %n' \"$p\"; done; "
+            "id andrisoft 2>/dev/null",
+            # Unidades do Wanguard e dos serviços de que ele depende
+            "systemctl list-units --no-pager --all --plain --no-legend 2>/dev/null | "
+            "grep -i -E 'wanguard|andrisoft|wansupervisor|wanflow|wanfilter|"
+            "exabgp|gobgp|frr|mariadb|mysql|influx|clickhouse'",
+            # Console: Apache com HTTPS ou só HTTP (o padrão é HTTP)
+            "for f in $(grep -l -r -i -E 'andrisoft|wanguard' /etc/apache2/sites-enabled "
+            "/etc/apache2/conf-enabled /etc/httpd/conf.d 2>/dev/null); do "
+            "echo \"===== $f\"; grep -v -E '^[[:space:]]*(#|$)' \"$f\" | head -n 40; "
+            "done; echo \"modulos SSL do Apache: $(ls /etc/apache2/mods-enabled/ 2>/dev/null "
+            "| grep -i -c '^ssl')\"",
         ],
         "logs": [
             # Só executa journalctl se houver unit correspondente; sem a
             # guarda, a expansão vazia despejaria o journal inteiro do
-            # sistema rotulado como log do WANGuard.
+            # sistema rotulado como log do WANGuard. Os genrrds_* rodam no
+            # cgroup do WANsupervisor e repetem o INSERT inteiro a cada
+            # falha; o comando SQL é cortado antes do agrupamento.
             "U=$(systemctl list-units --no-pager --plain --no-legend 2>/dev/null "
             "| awk '/wanguard|andrisoft|WANsupervisor|WANflow|WANfilter/"
             "{printf \" -u \"$1}'); "
-            "if [ -n \"$U\" ]; then {S}journalctl $U -n 300 --no-pager 2>&1; "
+            "if [ -n \"$U\" ]; then {S}journalctl $U -n 1000 --no-pager 2>&1 | "
+            "sed -E 's/ \\[(INSERT|SELECT|UPDATE|DELETE) .*$/ [SQL omitido]/'; "
             "else echo '(nenhuma unit systemd do WANGuard encontrada)'; fi",
-            # Filtra pelo processo do WANGuard: procurar apenas por palavras
-            # como 'mitigation' traz mitigações de CPU do kernel (Spectre,
-            # MMIO) e nada de DDoS.
-            "{S}grep -h -i -E '(wanguard|andrisoft|WAN(supervisor|flow|filter|"
-            "sensor))' /var/log/syslog /var/log/messages 2>/dev/null | "
-            "grep -i -E 'anomal|attack|mitigat|blackhole|flowspec|threshold|"
-            "decision' | tail -n 200",
-            # Caminho de log descoberto, não presumido
-            "{S}find /opt/andrisoft /var/log -maxdepth 3 "
-            "\\( -iname '*wanguard*' -o -iname '*andrisoft*' -o -iname 'WAN*' \\) "
-            "-name '*.log' 2>/dev/null | head -n 20",
+            # Subidas e quedas de sessão do daemon BGP da mitigação
+            "U=$(systemctl list-units --no-pager --plain --no-legend 2>/dev/null "
+            "| awk '/exabgp|gobgpd|frr/{printf \" -u \"$1}'); "
+            "if [ -n \"$U\" ]; then {S}journalctl $U -n 500 --no-pager 2>&1; "
+            "else echo '(nenhum daemon BGP com unit systemd)'; fi",
         ],
         "basico": [
-            # Estado dos serviços realmente presentes, descobertos acima
+            # Estado dos serviços (memória e CPU por unit); o log já está na
+            # seção de logs, daí o -n 0
             "U=$(systemctl list-units --no-pager --plain --no-legend 2>/dev/null "
             "| awk '/wanguard|andrisoft|WANsupervisor|WANflow|WANfilter/"
             "{printf \" \"$1}'); "
-            "if [ -n \"$U\" ]; then systemctl status --no-pager $U 2>&1 | "
+            "if [ -n \"$U\" ]; then systemctl status -n 0 --no-pager $U 2>&1 | "
             "head -n 80; else echo '(nenhuma unit systemd do WANGuard)'; fi",
-            "{S}ps -eo pid,etime,pcpu,pmem,comm,args --sort=-pcpu 2>/dev/null | "
-            "grep -i -E 'wanguard|andrisoft|WANsupervisor|WANflow|WANfilter|"
-            "WANsensor' | grep -v grep",
-            "ip -br address",
-            # Mitigação ativa: regras de filtro em uso
-            "{S}iptables -L -n -v 2>/dev/null | head -n 120",
-            "{S}nft list ruleset 2>/dev/null | head -n 120",
-            "{S}ipset list -t 2>/dev/null | head -n 80",
-            # Anúncios de blackhole/flowspec normalmente saem por BGP
-            "for b in birdc birdcl vtysh exabgpcli; do command -v $b "
-            ">/dev/null 2>&1 && { echo \"===== $b\"; case $b in "
-            "birdc|birdcl) {S}$b show protocols 2>&1 | head -n 30;; "
-            "vtysh) {S}$b -c 'show bgp summary' 2>&1 | head -n 30; "
-            "{S}$b -c 'show run' 2>&1 | head -n 60;; "
-            "exabgpcli) {S}$b show neighbor summary 2>&1 | head -n 30;; "
-            "esac; }; done",
-            # Os processos chamam-se WANflow/WANsupervisor: filtrar por
-            # 'wanguard' não os encontra. Portas de flow são configuráveis.
-            "{S}ss -tulpn 2>/dev/null | grep -i -E "
-            "'WAN[a-z]+|andrisoft|:179|:161|:2055|:4739|:6343|:9996'",
+            # Os argumentos mostram o modo de cada componente: WANflow -i <id>
+            # e WANsupervisor sem '-n' (Server Commands habilitado)
+            "{S}ps -eo pid,user,etime,pcpu,pmem,rss,args --sort=-pcpu 2>/dev/null | "
+            "grep -E 'WAN[A-Za-z]+|exabgp|gobgpd|bgpd|mariadbd|mysqld|influxd|"
+            "clickhouse' | grep -v -E 'grep|ps -eo'",
+            # Bancos de gráficos e de configuração: o WANsupervisor para
+            # quando o MariaDB da Console cai, e os gráficos e flows somem em
+            # silêncio quando o ClickHouse ou o InfluxDB não respondem.
+            "for s in mariadb mysql influxdb clickhouse-server; do "
+            "printf '%-18s %s/%s\\n' \"$s\" "
+            "\"$(systemctl show -p LoadState --value \"$s\" 2>/dev/null)\" "
+            "\"$(systemctl show -p ActiveState --value \"$s\" 2>/dev/null)\"; done; "
+            "if command -v curl >/dev/null 2>&1; then "
+            "printf 'InfluxDB   127.0.0.1:8086/ping  HTTP %s\\n' "
+            "\"$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8086/ping)\"; "
+            "printf 'ClickHouse 127.0.0.1:8123/ping  HTTP %s\\n' "
+            "\"$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8123/ping)\"; "
+            "else echo '(curl ausente: sem teste HTTP dos bancos de graficos)'; fi",
+            # Processos por nome, não por porta: a porta do Flow Sensor é
+            # configurável (8888 no servidor de referência). O bind mostra
+            # se banco e vty estão expostos fora do localhost.
+            "{S}ss -tulpn 2>/dev/null | grep -E 'WAN[A-Za-z]+|mariadbd|mysqld|"
+            "influxd|clickhouse|exabgp|gobgpd|bgpd|zebra|apache2|httpd|rpc|nfsd' "
+            "| tr -s ' '",
+            # Sessões BGP estabelecidas. Não usa exabgpcli: ele lê o mesmo
+            # pipe de saída que o Health Checker do Wanguard e pode tomar a
+            # resposta dele.
+            "{S}ss -tnpo state established '( sport = :179 or dport = :179 )' "
+            "2>/dev/null | tr -s ' '",
+            "if command -v vtysh >/dev/null 2>&1; then "
+            "{S}vtysh -c 'show bgp summary' 2>&1 | head -n 40; fi; "
+            "if command -v gobgp >/dev/null 2>&1; then echo '===== gobgp neighbor'; "
+            "timeout 10 gobgp neighbor 2>&1 | head -n 30; "
+            "for a in ipv4-flowspec ipv6-flowspec; do echo \"===== gobgp $a\"; "
+            "timeout 10 gobgp global rib -a $a 2>&1 | head -n 40; done; fi",
+            # Perda de flow: o Flow Sensor recebe por UDP e descarta em
+            # silêncio quando o buffer de recepção enche.
+            "nstat -asz UdpInErrors UdpRcvbufErrors Udp6InErrors "
+            "Udp6RcvbufErrors 2>/dev/null || netstat -su 2>/dev/null | "
+            "grep -i -E 'errors|buffer'; sysctl net.core.rmem_max "
+            "net.core.rmem_default net.core.netdev_max_backlog "
+            "net.ipv4.conf.all.rp_filter 2>/dev/null",
+            # Regras de mitigação local: o Packet Filter usa as tabelas raw e
+            # filter. Só a contagem; a lista inteira está na configuração.
+            "for t in raw filter mangle; do printf '%-7s IPv4 %s regra(s), IPv6 "
+            "%s regra(s)\\n' \"$t\" \"$({S}iptables -t $t -S 2>/dev/null | "
+            "grep -c '^-A')\" \"$({S}ip6tables -t $t -S 2>/dev/null | "
+            "grep -c '^-A')\"; done; {S}ipset list -t 2>/dev/null | head -n 60",
+            # Disco: arquivos de IP por RRD nascem cheios, e flows crus
+            # enchem o volume. ionice e timeout para não pesar em produção.
+            "df -h /opt/andrisoft /var/lib/mysql /var/lib/influxdb "
+            "/var/lib/clickhouse 2>/dev/null | awk '!v[$0]++'; "
+            "for d in /opt/andrisoft/flows /opt/andrisoft/dumps /opt/andrisoft/rrd "
+            "/var/lib/mysql /var/lib/influxdb /var/lib/clickhouse; do "
+            "[ -d \"$d\" ] && {S}ionice -c3 timeout 20 du -sh \"$d\" 2>/dev/null; "
+            "done",
+            # Backup do banco feito pelo WANmaintenance (/root, só root lê)
+            "{S}sh -c 'ls -la --time-style=long-iso /root/wanguard_db_backup_* "
+            "2>/dev/null | tail -n 5' | grep . || "
+            "echo '(nenhum backup do WANmaintenance em /root)'",
         ],
         "inventario": [
-            # Binários apenas listados; a execução com -v usa timeout para
-            # não travar a coleta caso o binário seja um daemon.
-            "{S}ls -la /opt/andrisoft/bin/ 2>/dev/null | head -n 40",
-            # Todos os binários reportam a mesma versão: uma amostra basta.
-            "for p in /opt/andrisoft/bin/WANsupervisor "
-            "/opt/andrisoft/bin/WANflow /opt/andrisoft/bin/WANfilter "
-            "/opt/andrisoft/bin/WANsensor; do [ -x \"$p\" ] && "
-            "{ echo \"===== $(basename \"$p\")\"; "
-            "timeout 5 \"$p\" -v 2>&1 | head -n 3; }; done",
-            "for f in /opt/andrisoft/etc/license* /opt/andrisoft/etc/*.lic "
-            "/etc/wanguard*licen*; do [ -f \"$f\" ] && "
-            "{ echo \"===== $f\"; {S}head -n 25 \"$f\"; }; done",
-            "(dpkg -l 2>/dev/null | grep -i -E 'wanguard|andrisoft') "
-            "|| (rpm -qa 2>/dev/null | grep -i -E 'wanguard|andrisoft')",
+            "{S}ls -la --time-style=long-iso /opt/andrisoft/bin/WAN* 2>/dev/null",
+            # Todos os componentes reportam a mesma versão; o WANflow não
+            # aceita -v ("Verbose argument requires a number").
+            "[ -x /opt/andrisoft/bin/WANsupervisor ] && "
+            "timeout 5 /opt/andrisoft/bin/WANsupervisor -v 2>&1 | head -n 3",
+            # Pacotes do Wanguard 9 (wanbgp, wanconsole, wanfilter,
+            # wanrestapi, wansensor, wansupervisor) e das dependências
+            "if command -v dpkg-query >/dev/null 2>&1; then "
+            "dpkg-query -W -f '${db:Status-Abbrev} ${Package}\\t${Version}\\n' "
+            "'wan*' exabgp gobgpd frr influxdb clickhouse-server "
+            "clickhouse-common-static mariadb-server mysql-server 2>/dev/null "
+            "| grep '^ii' | cut -c5-; else rpm -qa 2>/dev/null | grep -E "
+            "'^(wan[a-z]+|exabgp|gobgp|frr|influxdb|clickhouse|mariadb-server|"
+            "mysql-server)'; fi",
+            # Versões fora do gerenciador de pacotes (ExaBGP pelo GitHub,
+            # GoBGP em binário)
+            "for b in /opt/exabgp/bin/exabgp /usr/sbin/exabgp /usr/bin/exabgp "
+            "/usr/local/bin/exabgp; do [ -x \"$b\" ] && "
+            "{ echo \"===== $b\"; timeout 5 \"$b\" --version 2>&1 | head -n 2; }; "
+            "done; command -v gobgpd >/dev/null 2>&1 && "
+            "timeout 5 gobgpd --version 2>&1 | head -n 1; "
+            "command -v vtysh >/dev/null 2>&1 && "
+            "{S}vtysh -c 'show version' 2>&1 | head -n 2; "
+            "command -v influxd >/dev/null 2>&1 && timeout 5 influxd version 2>&1; "
+            "command -v clickhouse-server >/dev/null 2>&1 && "
+            "timeout 5 clickhouse-server --version 2>&1 | head -n 1; true",
         ],
         # A configuração operacional do Wanguard 9 (sensores, grupos de IP,
         # filtros, respostas, anomalias e licença) fica integralmente no
@@ -1356,29 +1447,69 @@ APPS_LINUX = {
                 "WT active_fw_rules \"LIMIT 500\"",
                 "echo '===== squeue / squeue_archive (fila de filtros)'; "
                 "WT squeue \"LIMIT 100\"; "
-                "WT squeue_archive \"ORDER BY 1 DESC LIMIT 100\"",
-                # ----- Últimas anomalias detectadas -----
-                # A tabela 'attacks' chega a milhões de registros; o recorte
-                # por colunas mantém o volume compatível com leitura por
-                # modelo de linguagem sem perder o que caracteriza o evento.
-                "echo '===== attacks (1000 mais recentes)'; "
-                "WT attacks \"ORDER BY attack_id DESC LIMIT 1000\" "
+                "WT squeue_archive \"ORDER BY 1 DESC LIMIT 30\"",
+                # ----- Eventos da plataforma (o "Ctrl+E" da Console) -----
+                # O Wanguard não escreve log de aplicação em arquivo: falhas
+                # de sensor, de BGP e de licença ficam nestas tabelas.
+                "for t in events console_events; do echo \"===== $t (100 mais "
+                "recentes)\"; WT $t \"ORDER BY 1 DESC LIMIT 100\"; done",
+                # ----- Anomalias -----
+                # A tabela 'attacks' chega a milhões de registros. Os
+                # agregados olham as últimas 100 mil anomalias (faixa da chave
+                # primária, sem varrer a tabela) dentro de 30 dias: alvos,
+                # regras que mais disparam (calibração de threshold) e
+                # sensores. A lista crua fica nas 200 mais recentes.
+                "echo '===== attacks (200 mais recentes)'; "
+                "WT attacks \"ORDER BY attack_id DESC LIMIT 200\" "
                 "\"^(attack_id|attack_type|status|ip|mask|first|last|"
-                "rule_|value$|computed_value|latest_value|sum_value|"
-                "anomaly_|total_|sensor|ipgroup|prefix|comment|action|"
-                "duration|packets|bytes|direction|protocol|port)\"",
-                # Restrito aos últimos 90 dias: sem a janela, o agrupamento
-                # varre os 2,6 milhões de registros da tabela e leva 12 s.
-                "echo '===== attacks: distribuicao por tipo (90 dias)'; "
-                "W \"SELECT attack_type, COUNT(*) AS ocorrencias, "
-                "MAX(FROM_UNIXTIME(last)) AS mais_recente FROM attacks "
-                "WHERE first > UNIX_TIMESTAMP() - 7776000 "
-                "GROUP BY attack_type ORDER BY ocorrencias DESC LIMIT 40\"",
+                "rule_|value$|anomaly_|sensor_type|sensor_id|sensor_interface|"
+                "action_id|ipaddr_id|direction|protocol|port)\"",
+                "echo '===== attacks: alvos mais frequentes (30 dias)'; "
+                "W \"SELECT INET6_NTOA(ip) AS ip, mask, COUNT(*) AS anomalias, "
+                "MAX(anomaly_bps) AS pico_bps, MAX(anomaly_pps) AS pico_pps, "
+                "ROUND(AVG(last-first)) AS duracao_media_s, "
+                "GROUP_CONCAT(DISTINCT action_id) AS response_ids, "
+                "FROM_UNIXTIME(MAX(last)) AS ultima FROM attacks "
+                "WHERE attack_id > (SELECT MAX(attack_id) FROM attacks) - 100000 "
+                "AND first > UNIX_TIMESTAMP() - 2592000 "
+                "GROUP BY ip, mask ORDER BY anomalias DESC LIMIT 25\"",
+                "echo '===== attacks: regras que mais disparam (30 dias)'; "
+                "W \"SELECT attack_type, rule_direction, rule_protocol, rule_unit, "
+                "rule_value, COUNT(*) AS anomalias, COUNT(DISTINCT ip) AS alvos, "
+                "ROUND(AVG(anomaly_bps)) AS media_bps, MAX(anomaly_bps) AS pico_bps, "
+                "ROUND(AVG(last-first)) AS duracao_media_s FROM attacks "
+                "WHERE attack_id > (SELECT MAX(attack_id) FROM attacks) - 100000 "
+                "AND first > UNIX_TIMESTAMP() - 2592000 GROUP BY attack_type, "
+                "rule_direction, rule_protocol, rule_unit, rule_value "
+                "ORDER BY anomalias DESC LIMIT 30\"",
+                "echo '===== attacks: por sensor e interface (30 dias)'; "
+                "W \"SELECT sensor_type, sensor_id, sensor_interface, "
+                "COUNT(*) AS anomalias, MAX(anomaly_bps) AS pico_bps, "
+                "FROM_UNIXTIME(MAX(last)) AS ultima FROM attacks "
+                "WHERE attack_id > (SELECT MAX(attack_id) FROM attacks) - 100000 "
+                "AND first > UNIX_TIMESTAMP() - 2592000 "
+                "GROUP BY sensor_type, sensor_id, sensor_interface "
+                "ORDER BY anomalias DESC LIMIT 30\"",
+                "echo '===== attacks: por dia (30 dias)'; "
                 "W \"SELECT DATE(FROM_UNIXTIME(first)) AS dia, "
-                "COUNT(*) AS anomalias FROM attacks WHERE first > "
-                "UNIX_TIMESTAMP() - 2592000 GROUP BY dia ORDER BY dia DESC\"",
+                "COUNT(*) AS anomalias, COUNT(DISTINCT ip) AS alvos FROM attacks "
+                "WHERE attack_id > (SELECT MAX(attack_id) FROM attacks) - 100000 "
+                "AND first > UNIX_TIMESTAMP() - 2592000 GROUP BY dia ORDER BY dia DESC\"",
                 "echo '===== attacks_logs (100 mais recentes)'; "
                 "WT attacks_logs \"ORDER BY 1 DESC LIMIT 100\"",
+                # ----- Banco da Console -----
+                # bind_address 0.0.0.0 só se justifica com sensores remotos;
+                # réplica para o HA ativo/standby aparece no SHOW SLAVE STATUS.
+                "echo '===== MariaDB'; W \"SHOW GLOBAL VARIABLES WHERE "
+                "Variable_name IN ('version','bind_address','datadir',"
+                "'innodb_buffer_pool_size','max_connections','time_zone',"
+                "'system_time_zone','log_bin','server_id','read_only')\"; "
+                "R=$(W 'SHOW SLAVE STATUS\\G' 2>&1); case \"$R\" in "
+                "'') echo '(sem replicacao configurada)';; "
+                "*'ERROR 1227'*) echo '(replicacao nao verificada: o usuario do "
+                "Wanguard nao tem o privilegio SLAVE MONITOR)';; "
+                "*) printf '%s\\n' \"$R\" | grep -E 'Master_Host|Slave_(IO|SQL)_Running|"
+                "Seconds_Behind|Last_.*Error:' || printf '%s\\n' \"$R\" | head -n 3;; esac",
                 # ----- Agendamentos e saúde -----
                 "for t in schedule_reports wanhealth_check chronos; "
                 "do echo \"===== $t\"; WT $t \"LIMIT 200\"; done",
@@ -1405,7 +1536,7 @@ APPS_LINUX = {
                 "'^(attacks|events|sensorstats|as_numbers|squeue|ipacct|"
                 "ports|protocols|tops_|company_staff|httpauth|ldapauth|"
                 "radiusauth|samlauth|ldap|email|telco|country_code|"
-                "ip_protocols|graphs|allstats|bookmark|baseline|"
+                "ip_protocols|graphs|allstats|bookmark|baseline|console_events|"
                 "wan|ipaddr|action|profiling|template|"
                 "router|quagga|scrubber|whitelist|exception|blacklist|fr_|"
                 "fw_|active_fw|anomalies|license|version|maintenance|"
@@ -2388,16 +2519,21 @@ def sem_saida_util(saida: str) -> bool:
 # Serviços com falha recorrente repetem a mesma mensagem centenas de vezes:
 # num servidor WANGuard, 285 das 300 linhas coletadas eram o mesmo erro de
 # conexão, cada uma arrastando o comando SQL inteiro — 97 KB para dizer uma
-# coisa só. O filtro trunca linhas muito longas, agrupa as que têm a mesma
-# assinatura (dígitos normalizados) e informa quantas foram omitidas, de
-# modo que a repetição continue visível sem dominar o documento.
+# coisa só. O filtro trunca linhas muito longas e agrupa as que têm a mesma
+# assinatura (dígitos normalizados), mesmo intercaladas com outras: cada
+# mensagem aparece uma vez, na posição da primeira ocorrência, com a
+# contagem e o horário da última. Acima de 200 assinaturas ficam as mais
+# recentes.
 FILTRO_LOG = (
     r" | cut -c1-400 | awk "
     '\'{ k=$0; gsub(/[0-9]+/,"#",k); gsub(/#[.:,-]#/,"#",k); k=substr(k,1,110); '
-    r"if (k==p) { c++; next } "
-    r'if (c>1) printf "    [+%d linha(s) semelhante(s) omitida(s)]\n", c-1; '
-    r"c=1; p=k; print } "
-    'END { if (c>1) printf "    [+%d linha(s) semelhante(s) omitida(s)]\\n", c-1 }\''
+    r"if (!(k in n)) { o[++m]=k; l[k]=$0 } n[k]++; "
+    r'u[k] = ($1 ~ /^[0-9][0-9][0-9][0-9]-/) ? $1 : $1 " " $2 " " $3 } '
+    r"END { i0 = (m > 200) ? m - 199 : 1; "
+    r'if (i0 > 1) printf "    [%d mensagem(ns) mais antiga(s) omitida(s)]\n", i0 - 1; '
+    r"for (i = i0; i <= m; i++) { k = o[i]; print l[k]; "
+    r'if (n[k] > 1) printf "    [+%d linha(s) semelhante(s) omitida(s); a última em %s]\n", '
+    "n[k] - 1, u[k] } }\'"
 )
 
 # ---------------------------------------------------------------------------

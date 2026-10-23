@@ -222,6 +222,31 @@ class TesteIA(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, "fora.md")))
         self.assertTrue(base.startswith(self.dir))
 
+    def test_contexto_do_modulo_de_aplicacao(self):
+        texto, usados, _ = ia.montar_contexto(
+            "linux", None, ["WANGuard (detecção e mitigação DDoS)", "Zabbix"])
+        self.assertTrue(any(u.endswith("wanguard.md") for u in usados))
+        self.assertIn("Wanguard 9", texto)
+        _, usados, _ = ia.montar_contexto("linux", None, [])
+        self.assertFalse(any(u.endswith("wanguard.md") for u in usados))
+
+    def test_corte_justo_preserva_saidas_pequenas_no_fim(self):
+        caminho = os.path.join(self.snaps, "MX-LAB-A_192.0.2.10_20261022_100000.md")
+        grande = SNAP.format(sens="redacted").replace(
+            "set protocols bgp group TRANSITO type external",
+            "\n".join(f"set interfaces ae0 unit {i} vlan-id {i}" for i in range(20000)))
+        # Saída curta depois da grande, como um módulo de aplicação
+        grande = grande.replace("## Logs", "### `show version`\n\n```text\n"
+                                "Junos: 23.4R2-S5\n```\n\n## Logs")
+        with open(caminho, "w", encoding="utf-8") as f:
+            f.write(grande)
+        _, texto, cortes = ia.texto_do_snapshot(caminho, limite=50_000)
+        self.assertIn("config", cortes)
+        self.assertIn("Junos: 23.4R2-S5", texto)
+        self.assertIn("saída cortada", texto)
+        self.assertEqual(ia._cotas_justas([10, 500, 1000], 410), [10, 200, 200])
+        self.assertEqual(ia._cotas_justas([10, 20], 100), [10, 20])
+
     def test_corte_proporcional_do_snapshot(self):
         caminho = os.path.join(self.snaps, "MX-LAB-A_192.0.2.10_20261022_100000.md")
         grande = SNAP.format(sens="redacted").replace(
