@@ -13,7 +13,8 @@ engenheiro) precisa para avaliar o parque:
   snapshots/          os snapshots desta execução (já sem segredos)
   mudancas/           diferença da configuração desde a coleta anterior
 
-Por equipamento, resumo.json traz: plataforma, modelo, versões, apontamentos
+Por equipamento, resumo.json traz: plataforma, modelo, versões, falhas graves
+do catálogo do netcve (PHP2Shell, MikroTrick...), apontamentos
 de configuração das heurísticas do netcve, contagem de mensagens de log por
 gravidade com as mais repetidas, linhas de contadores de erro diferentes de
 zero (candidatas, para a IA confirmar), seções vazias, sessão interrompida e
@@ -177,6 +178,11 @@ def resumir_host(caminho, pasta):
     texto = open(caminho, encoding="utf-8", errors="replace").read()
     vazios = [c["comando"] for s in snap["secoes"] for c in s["comandos"]
               if c["vazio"] or not c["saida"]]
+    versoes_brutas = netcve.extrair_versoes(meta, texto)
+    # Sem consulta ao OSV aqui (o pacote é gerado offline): para PHP de
+    # pacote da distribuição a avaliação é pela versão upstream e o próprio
+    # achado avisa disso. A triagem completa é o netcve com rede.
+    graves = netcve.avaliar_catalogo(meta, texto, versoes_brutas, None)
     resumo = {
         "arquivo": os.path.basename(caminho),
         "host": meta.get("host"),
@@ -187,7 +193,10 @@ def resumir_host(caminho, pasta):
         "coletado_em": meta.get("collected_at"),
         "sessao_interrompida": bool(meta.get("session_lost")),
         "versoes": [{"produto": v["rotulo"], "versao": v["versao"]}
-                    for v in netcve.extrair_versoes(meta, texto)],
+                    for v in versoes_brutas],
+        "falhas_graves": [{k: a[k] for k in ("id", "titulo", "cves", "situacao",
+                                             "base", "exposicao", "mitigacoes",
+                                             "correcao")} for a in graves],
         "apontamentos_config": netcve.avaliar_config(meta, texto),
         "logs": contar_logs(_texto_da_secao(snap, "logs")),
         "contadores_de_erro_candidatos": linhas_com_erros(
@@ -213,7 +222,9 @@ Você é um engenheiro de redes sênior de provedor (ISP) revisando a coleta
 automática do netsnap. Os arquivos deste pacote:
 
 - `manifesto.json`: execução, hosts coletados, falhas de coleta e motivo.
-- `resumo.json`: por equipamento, versões, apontamentos de configuração
+- `resumo.json`: por equipamento, versões, falhas graves do catálogo
+  (versão + condição de exposição; PHP de distribuição avaliado pela versão
+  upstream, confirme no pacote), apontamentos de configuração
   (heurísticas locais), contagem de logs por gravidade, linhas de contadores
   de erro diferentes de zero (candidatas: confirme no snapshot antes de
   usar), comandos sem saída e tamanho da mudança de configuração.
