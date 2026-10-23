@@ -27,7 +27,7 @@ mkdir -p "$DEST/app/web" "$DEST/testes"
 
 for f in $NUCLEO; do cp "$REPO/$f" "$DEST/app/"; done
 cp "$REPO/LICENSE" "$DEST/app/"
-cp "$REPO"/web/index.html "$REPO"/web/app.js "$REPO"/web/app.css "$DEST/app/web/"
+cp "$REPO"/web/index.html "$REPO"/web/app.js "$REPO"/web/app.css "$REPO"/web/tema.js "$DEST/app/web/"
 mkdir -p "$DEST/app/contextos"
 cp "$REPO"/contextos/*.md "$DEST/app/contextos/"
 cp "$AQUI"/*.py "$DEST/app/"

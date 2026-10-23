@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.0**, painel netsnap_web 0.3.1, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap_ia 0.1.0**, **netsnap servidor 1.0.1**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.0**, **painel netsnap_web 0.4.0**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap_ia 0.1.0**, **netsnap servidor 1.0.1**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -286,7 +286,7 @@ Um pedido por equipamento: instruções fixas + contexto da plataforma (`geral` 
 python3 netsnap_web.py [--porta 8765] [--sem-navegador]
 ```
 
-Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia (desenho dos enlaces confirmados em PNG e PDF, equipamentos sem vizinhança com o comando de ativação), vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `topologia/desenho`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta.
+Servidor HTTP só em `127.0.0.1`, com token por execução exigido em toda chamada à API (`X-Netsnap-Token`) e conferência do cabeçalho `Host`. Cada coleta, netdiag ou netcve roda num processo separado; a senha chega ao processo pela entrada padrão e não é gravada. Telas: visão geral, nova coleta, execuções (estado por equipamento ao vivo, resolução de não identificados), snapshots (leitura por seção e busca), inventário (modelo, versões, CVEs, CSV), comparar coletas (diff comando a comando), topologia (desenho dos enlaces confirmados em PNG e PDF, equipamentos sem vizinhança com o comando de ativação), vulnerabilidades, diagnóstico e agendamentos (diário ou a cada N horas, salvos sem senha; a senha vive só na memória do painel). API JSON em `/api/*` (`info`, `painel`, `coletas`, `jobs`, `snapshots`, `inventario`, `comparar`, `topologia`, `topologia/desenho`, `netcve`, `netdiag`, `agendamentos`, `relatorios`, `arquivo`). Sem Netmiko, abre em modo consulta. Tema escuro por padrão, com alternância para o claro salva no navegador (também no servidor).
 
 ### Servidor (`servidor/`)
 

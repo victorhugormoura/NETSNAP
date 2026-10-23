@@ -6,7 +6,52 @@
    Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
    Licenciado sob a licença MIT. */
 
+/* Tema escuro é o padrão; o claro vale com data-tema="claro" no <html>
+   (tema.js aplica a escolha salva antes do primeiro desenho). */
 :root {
+  --papel: #10161d;
+  --superficie: #18212b;
+  --superficie-2: #1d2833;
+  --tinta: #e3e8ee;
+  --suave: #93a1b0;
+  --linha: #2b3744;
+  --linha-forte: #3c4a59;
+  --acao: #6ea0f5;
+  --acao-tinta: #0d1520;
+  --acao-suave: #1e3150;
+  --ok: #5cc48d;
+  --ok-fundo: #173527;
+  --alerta: #f0b54d;
+  --alerta-fundo: #3a2c12;
+  --falha: #f2827a;
+  --falha-fundo: #3d1d1b;
+  --neutro: #8c99a7;
+  --console: #121a22;
+  --diff-mais: #16301f;
+  --diff-menos: #3a1c1a;
+  --marca-texto: #ffe58a;
+
+  /* TIA-598 */
+  --f-azul: #2563c9;
+  --f-laranja: #e07b1f;
+  --f-verde: #2e9a4e;
+  --f-marrom: #8a5a2b;
+  --f-ardosia: #6f7c88;
+  --f-branco: #f4f4f2;
+  --f-vermelho: #c8372d;
+  --f-preto: #0b0d0f;
+  --f-amarelo: #e2b714;
+  --f-violeta: #7b4fc4;
+
+  --fonte: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Code", "Cascadia Mono", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --raio: 6px;
+  color-scheme: dark;
+}
+
+:root[data-tema="claro"] {
   --papel: #eef1f3;
   --superficie: #ffffff;
   --superficie-2: #f6f8f9;
@@ -27,52 +72,8 @@
   --console: #f3f5f7;
   --diff-mais: #e3f3e8;
   --diff-menos: #fbe7e4;
-
-  /* TIA-598 */
-  --f-azul: #2563c9;
-  --f-laranja: #e07b1f;
-  --f-verde: #2e9a4e;
-  --f-marrom: #8a5a2b;
-  --f-ardosia: #6f7c88;
-  --f-branco: #f4f4f2;
-  --f-vermelho: #c8372d;
   --f-preto: #23262a;
-  --f-amarelo: #e2b714;
-  --f-violeta: #7b4fc4;
-
-  --fonte: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
-    "Helvetica Neue", Arial, sans-serif;
-  --mono: "Cascadia Code", "Cascadia Mono", "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
-  --raio: 6px;
   color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --papel: #10161d;
-    --superficie: #18212b;
-    --superficie-2: #1d2833;
-    --tinta: #e3e8ee;
-    --suave: #93a1b0;
-    --linha: #2b3744;
-    --linha-forte: #3c4a59;
-    --acao: #6ea0f5;
-    --acao-tinta: #0d1520;
-    --acao-suave: #1e3150;
-    --ok: #5cc48d;
-    --ok-fundo: #173527;
-    --alerta: #f0b54d;
-    --alerta-fundo: #3a2c12;
-    --falha: #f2827a;
-    --falha-fundo: #3d1d1b;
-    --neutro: #8c99a7;
-    --console: #121a22;
-    --diff-mais: #16301f;
-    --diff-menos: #3a1c1a;
-    --f-preto: #0b0d0f;
-    color-scheme: dark;
-  }
 }
 
 * { box-sizing: border-box; }
@@ -117,7 +118,17 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 }
 #menu a:hover { background: var(--superficie-2); }
 #menu a.ativo { background: var(--acao-suave); color: var(--acao); font-weight: 600; }
-.trilho-rodape { margin: auto 20px 0; color: var(--suave); font-size: 12px; }
+.tema-botao {
+  margin: auto 20px 0; align-self: flex-start;
+  padding: 4px 10px; font-size: 12.5px; font-weight: 600;
+  border: 1px solid var(--linha-forte); background: var(--superficie-2); color: var(--tinta);
+}
+.tema-botao::before {
+  content: ""; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--tinta); box-shadow: inset -4px 0 0 0 var(--superficie-2);
+}
+:root[data-tema="claro"] .tema-botao::before { box-shadow: none; background: var(--alerta); }
+.trilho-rodape { margin: 12px 20px 0; color: var(--suave); font-size: 12px; }
 .trilho-rodape .credito { display: inline-block; margin-top: 6px; }
 
 main { padding: 28px 36px 64px; max-width: 1280px; width: 100%; min-width: 0; }
@@ -307,7 +318,7 @@ textarea.curto { min-height: 115px; }
 }
 .comando .sem-saida { color: var(--suave); font-style: italic; margin: 0; }
 .secao-titulo { margin: 28px 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--linha-forte); }
-mark { background: #ffe58a; color: #17212b; border-radius: 2px; }
+mark { background: var(--marca-texto); color: #17212b; border-radius: 2px; }
 .metadados { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px 24px; margin: 0 0 6px; }
 .metadados div dt { color: var(--suave); font-size: 12.5px; }
 .metadados div dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
@@ -360,6 +371,7 @@ details.item > .diff { margin-top: 8px; }
   #menu { display: flex; padding: 0 8px; }
   #menu a { white-space: nowrap; }
   .trilho-rodape { display: none; }
+  .tema-botao { margin: 0 14px 0 auto; flex: none; }
   main { padding: 20px 16px 48px; }
   form.grade, .colunas, .leitor { grid-template-columns: 1fr; }
   .leitor-indice { position: static; max-height: 260px; }
