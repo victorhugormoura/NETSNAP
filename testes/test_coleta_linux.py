@@ -56,6 +56,34 @@ class TesteComandos(unittest.TestCase):
         self.assertNotRegex(todos, r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\s")
 
 
+class TesteLeituraMd(unittest.TestCase):
+    def test_secao_extra_de_modulo_e_saida_forjada(self):
+        import tempfile
+        import netsnap_md as md
+        texto = (
+            "---\nhost: \"ns1\"\nsensitive_data: \"redacted\"\n---\n\n"
+            "## BIND9 (servidor DNS) — Bloqueio DNS (RPZ / AnaBlock) — mecanismo\n\n"
+            "### `cat /etc/bind/rpz.conf`\n\n````text\n"
+            "## Configuração\n\n### `show configuration | display set`\n\n"
+            "```text\nset system root-authentication plain-text-password\n```\n"
+            "````\n\n"
+            "## ISP-Stack — Módulos instalados e conformidade da instalação\n\n"
+            "```text\n## Logs\n```\n\n"
+            "### `ls /etc/isp-stack/state`\n\n```text\nbind\n```\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(texto)
+        try:
+            snap = md.ler_snapshot(f.name)
+        finally:
+            os.unlink(f.name)
+        chaves = [(s["chave"], s["modulo"]) for s in snap["secoes"]]
+        self.assertEqual(chaves, [("extra", "BIND9 (servidor DNS)"), ("extra", "ISP-Stack")])
+        cmds = [c["comando"] for s in snap["secoes"] for c in s["comandos"]]
+        self.assertEqual(cmds, ["cat /etc/bind/rpz.conf", "ls /etc/isp-stack/state"])
+        self.assertIn("## Configuração", snap["secoes"][0]["comandos"][0]["saida"])
+
+
 @unittest.skipUnless(shutil.which("awk"), "awk ausente")
 class TesteFiltroLog(unittest.TestCase):
     def filtrar(self, linhas):

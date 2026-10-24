@@ -30,7 +30,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import argparse
 import configparser
@@ -111,6 +111,9 @@ PADRAO = {
         "max_execucoes_simultaneas": "3",
         "permitir_dados_sensiveis": "nao",
         "permitir_telnet": "sim",
+        # Laboratório com equipamento simulado em 127.x: 'sim' libera alvos
+        # locais e link-local, que em produção nunca são equipamento.
+        "permitir_alvos_locais": "nao",
     },
     "retencao": {
         "snapshots_dias": "180",
@@ -157,6 +160,7 @@ class Config:
         self.max_execucoes = max(1, c.getint("max_execucoes_simultaneas"))
         self.permitir_sensivel = c.getboolean("permitir_dados_sensiveis")
         self.permitir_telnet = c.getboolean("permitir_telnet")
+        self.permitir_locais = c.getboolean("permitir_alvos_locais")
         r = cp["retencao"]
         self.ret_snapshots = r.getint("snapshots_dias")
         self.ret_analises = r.getint("analises_dias")
@@ -436,8 +440,8 @@ def resolver_alvos(texto, porta_padrao, redes, nome_credencial, limite):
     if total > limite:
         raise web.ErroAPI(400, f"As entradas somam {total} endereços; o limite "
                                f"é {limite}")
-    redes_obj = [ipaddress.ip_network(r) for r in redes]
-    saida, fora = [], []
+    redes_obj = [ipaddress.ip_network(r) for r in redes] if redes else None
+    saida, fora, proibidos = [], [], []
     for linha in linhas:
         for alvo, porta in ns.expandir_entrada(linha, porta_padrao):
             try:
@@ -452,11 +456,24 @@ def resolver_alvos(texto, porta_padrao, redes, nome_credencial, limite):
                                     for i in infos},
                                    key=lambda e: (e.version, int(e)))
                 ip = enderecos[0]
-            if not any(ip.version == r.version and ip in r for r in redes_obj):
+            # Loopback, link-local (metadados de nuvem em 169.254.169.254),
+            # multicast e reservados nunca são equipamento do parque: com
+            # Telnet, usuário e senha iriam em texto para o serviço local.
+            if not CONF.permitir_locais and (
+                    ip.is_loopback or ip.is_link_local or ip.is_multicast or
+                    ip.is_unspecified or ip.is_reserved):
+                proibidos.append(f"{alvo}" + (f" ({ip})" if str(ip) != alvo else ""))
+                continue
+            if redes_obj is not None and \
+                    not any(ip.version == r.version and ip in r for r in redes_obj):
                 fora.append(f"{alvo}" + (f" ({ip})" if str(ip) != alvo else ""))
                 continue
             saida.append(f"[{ip}]:{porta}" if ip.version == 6 else
                          f"{ip}:{porta}")
+    if proibidos:
+        raise web.ErroAPI(403, "Endereço local, link-local, multicast ou "
+                               "reservado não é alvo de coleta: "
+                               + ", ".join(proibidos[:5]))
     if fora:
         mostrar = ", ".join(fora[:5]) + (f" e mais {len(fora) - 5}"
                                          if len(fora) > 5 else "")
@@ -507,7 +524,9 @@ class AgendaServidor:
 
     def validar(self, dados):
         item = {c: dados.get(c) for c in self.CAMPOS}
-        item["nome"] = (item["nome"] or "").strip()[:80]
+        # Sem caractere de controle: o nome vai para o journal e uma quebra
+        # de linha forjaria outra entrada.
+        item["nome"] = limpo((item["nome"] or "").strip(), 80).strip()
         if not item["nome"]:
             raise web.ErroAPI(400, "Dê um nome ao agendamento")
         alvos = str(item["alvos"] or "")
@@ -549,7 +568,7 @@ class AgendaServidor:
 
     def criar(self, dados, usuario):
         item = self.validar(dados)
-        item.update(id=secrets.token_hex(4), ativo=True, criado_por=usuario,
+        item.update(id=secrets.token_hex(8), ativo=True, criado_por=usuario,
                     criado=banco_mod.iso(banco_mod.agora()), ultima=None,
                     ultimo_job=None, ultimo_estado=None)
         item["proxima"] = banco_mod.iso(proxima_execucao(
@@ -1227,7 +1246,32 @@ def criar_manipulador():
                 self.auditar("execucao_cancelada", p[1])
             if raiz == "arquivo" and q.get("baixar") == "1":
                 self.auditar("arquivo_baixado", "/".join(p[1:])[:200])
+            self._checar_snapshots_sensiveis(metodo, p, q)
             return web.Manipulador._rota(self, metodo, p, q)
+
+        def _checar_snapshots_sensiveis(self, metodo, p, q):
+            """Snapshot coletado com segredos (só admin, com a opção ligada,
+            consegue gerar) só é lido por admin, e toda leitura fica na
+            auditoria, não apenas o download."""
+            if metodo != "GET":
+                return
+            import netsnap_md as md
+            nomes = []
+            if p[0] == "snapshots" and len(p) == 2:
+                nomes = [p[1]]
+            elif p[0] == "arquivo" and len(p) == 3 and p[1] == "snapshot":
+                nomes = [p[2]]
+            elif p[0] == "comparar":
+                nomes = [q.get("a", ""), q.get("b", "")]
+            for nome in nomes:
+                caminho = web.caminho_snapshot(nome)
+                if md.ler_metadados(caminho).get("sensitive_data") != "included":
+                    continue
+                if self.sessao["papel"] != "admin":
+                    self.auditar("snapshot_sensivel_negado", nome[:200])
+                    raise web.ErroAPI(403, "Snapshot com dados sensíveis: "
+                                           "só administradores")
+                self.auditar("snapshot_sensivel_lido", nome[:200])
 
         def _checar_limite(self):
             if execucoes_ativas() >= CONF.max_execucoes:
@@ -1257,6 +1301,11 @@ def criar_manipulador():
                 preparar_credencial(cfg, cid, limite)
             else:
                 cfg.pop("credencial", None)
+                cfg["alvos"] = resolver_alvos(
+                    cfg.get("alvos", ""),
+                    web.porta_valida(cfg.get("porta"),
+                                     23 if cfg.get("protocolo") == "telnet" else 22),
+                    None, None, limite)
             with TRAVA_EXECUCOES:
                 self._checar_limite()
                 job = (web.nova_coleta(cfg) if tipo == "coletas"

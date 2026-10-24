@@ -32,7 +32,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import os
 import re
@@ -169,7 +169,8 @@ COBERTO_PELO_OSV = {
     "FRRouting": r"^frr$",
     # O OSV avalia o pacote do kernel instalado; o kernel em execução pode
     # ser mais antigo se falta reiniciar.
-    "Kernel Linux": r"^(linux|linux-signed(-\w+)?|kernel)$",
+    # Inclui os fontes HWE/OEM do Ubuntu (linux-signed-hwe-6.8, linux-hwe-6.8).
+    "Kernel Linux": r"^(linux|linux-(?:signed|meta|hwe|oem)(?:-[\w.]+)*|kernel)$",
 }
 
 # ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ REGRAS_CONFIG = [
         "plataformas": None,
         "padrao": r"(?im)^[ \t]*(?:set\s+system\s+services\s+telnet|"
                   r"telnet\s+server\s+enable|"
-                  r"transport\s+input\s+(?:all|telnet))",
+                  r"transport\s+input\s+(?:\S+[ \t]+)*?(?:all|telnet)\b)",
         "recomendacao": "Desabilitar Telnet e usar exclusivamente SSHv2.",
     },
     {
@@ -196,7 +197,11 @@ REGRAS_CONFIG = [
         "padrao": r"(?im)(?:snmp-server\s+community|snmp-agent\s+community"
                   r"(?:\s+(?:read|write))?(?:\s+cipher)?|"
                   r"set\s+snmp\s+community|^\s*r[ow]community6?)"
-                  r"\s+[\"']?(public|private|cisco|admin)[\"']?(?![\w-])",
+                  r"\s+(?:[\"']?(public|private|cisco|admin)[\"']?(?![\w-])|"
+                  # Marcador do netsnap 1.17.2+ para comunidade trivial já
+                  # mascarada (o snapshot não traz mais o valor).
+                  r"\*\*\*REMOVIDO-TRIVIAL\*\*\*)|"
+                  r"^/snmp community\s*$(?:\n(?!/).*)*?\bname=\*\*\*REMOVIDO-TRIVIAL",
         "recomendacao": "Substituir a community e restringir por ACL; "
                         "migrar para SNMPv3 com autenticação e criptografia.",
     },
@@ -205,8 +210,12 @@ REGRAS_CONFIG = [
         "titulo": "SNMP v1/v2c em uso (sem autenticação nem criptografia)",
         "severidade": "MEDIA",
         "plataformas": None,
-        "padrao": r"(?im)(snmp-server\s+community|snmp-agent\s+community|"
-                  r"set\s+snmp\s+community|/snmp\s+community)",
+        # No RouterOS o bloco /snmp community também guarda os usuários
+        # SNMPv3 (security=authorized|private); só a entrada sem isso é v1/v2c.
+        "padrao": r"(?im)^[ \t]*(?:snmp-server\s+community|snmp-agent\s+community|"
+                  r"set\s+snmp\s+community)|"
+                  r"^/snmp community\s*$(?:\n(?!/).*)*?\n(?:add|set)\b"
+                  r"(?![^\n]*(?:security=(?:authorized|private)|disabled=yes))[^\n]*",
         "recomendacao": "Migrar para SNMPv3 (authPriv) e restringir origens.",
     },
     {
@@ -222,6 +231,7 @@ REGRAS_CONFIG = [
     },
     {
         "id": "CFG-MIKROTIK-SERVICOS",
+        "secoes": "todas",
         "titulo": "Serviços legados do RouterOS expostos (api/ftp/telnet/www)",
         "severidade": "ALTA",
         "plataformas": ["mikrotik_routeros"],
@@ -247,6 +257,7 @@ REGRAS_CONFIG = [
         "severidade": "ALTA",
         "plataformas": ["linux"],
         "padrao": r"(?is)recursion\s+yes.*?allow-recursion\s*\{\s*any\s*;",
+        "sem_comentarios": True,
         "recomendacao": "Restringir allow-recursion às redes do provedor; "
                         "recursor aberto é usado em ataques de amplificação.",
     },
@@ -262,6 +273,7 @@ REGRAS_CONFIG = [
     },
     {
         "id": "CFG-BANCO-EXPOSTO",
+        "secoes": "todas",
         "titulo": "Banco de dados escutando em todas as interfaces",
         "severidade": "MEDIA",
         "plataformas": ["linux"],
@@ -276,6 +288,7 @@ REGRAS_CONFIG = [
     },
     {
         "id": "CFG-WG-PIPE-EXABGP",
+        "secoes": "todas",
         "titulo": "Pipe do ExaBGP gravável por qualquer usuário local",
         "severidade": "ALTA",
         "plataformas": ["linux"],
@@ -288,6 +301,7 @@ REGRAS_CONFIG = [
     },
     {
         "id": "CFG-WG-SERVER-COMMANDS",
+        "secoes": "todas",
         "titulo": "WANsupervisor sem -n: comandos de shell pela Console "
                   "(Server Commands) habilitados",
         "severidade": "MEDIA",
@@ -302,6 +316,7 @@ REGRAS_CONFIG = [
     },
     {
         "id": "CFG-WG-GRAFICOS-SEM-BANCO",
+        "secoes": "todas",
         "titulo": "Wanguard sem gravar gráficos: banco de séries inacessível",
         "severidade": "MEDIA",
         "plataformas": ["linux"],
@@ -316,10 +331,16 @@ REGRAS_CONFIG = [
         "titulo": "NTP sem autenticação configurada",
         "severidade": "BAIXA",
         "plataformas": None,
-        "padrao": r"(?im)^[ \t]*(?:ntp\s+server\s+(?!disable\b|enable\b|"
+        # Servidor NTP declarado e nenhuma linha de autenticação NTP na
+        # configuração inteira (antes, qualquer "authentication" a até 400
+        # caracteres, de login por exemplo, escondia o achado).
+        "padrao": r"(?ims)\A(?!.*(?:ntp\s+authenticate\b|ntp\s+authentication-key|"
+                  r"ntp\s+trusted-key|set\s+system\s+ntp\s+(?:authentication-key|"
+                  r"trusted-key)|ntp-service\s+authentication\s+enable|"
+                  r"ntp\s+server\s+\S+[^\n]*\bkey\b)).*?"
+                  r"(?P<ev>^[ \t]*(?:ntp\s+server\s+(?!disable\b|enable\b|"
                   r"source-interface\b)\S|set\s+system\s+ntp\s+server|"
-                  r"ntp(?:-service)?\s+unicast-server)"
-                  r"(?![\s\S]{0,400}?(?:key|authentication))",
+                  r"ntp(?:-service)?\s+unicast-server)[^\n]*)",
         "recomendacao": "Habilitar autenticação NTP quando suportada.",
     },
 ]
@@ -410,7 +431,15 @@ def extrair_versoes(meta, texto):
             chave = (rotulo, versao)
             if chave in vistos:
                 continue
+            # Um produto consultável, uma versão: a primeira regra é a mais
+            # confiável (no Junos, o 'Junos:' do show version vem antes do
+            # 'set version' da configuração, que fica velho depois de um
+            # upgrade sem commit).
+            if fornecedor and produto and (fornecedor, produto) in vistos:
+                break
             vistos.add(chave)
+            if fornecedor and produto:
+                vistos.add((fornecedor, produto))
             achados.append({
                 "rotulo": rotulo,
                 "versao": versao,
@@ -420,6 +449,12 @@ def extrair_versoes(meta, texto):
             })
             break  # primeira ocorrência por regra basta
 
+    # Junos OS Evolved tem CPE próprio na NVD.
+    if re.search(r"(?i)Junos OS Evolved|JUNOS EVO|-EVO\b", texto):
+        for a in achados:
+            if a["cpe_produto"] == "junos":
+                a["cpe_produto"] = "junos_os_evolved"
+                a["versao"] = re.sub(r"(?i)-EVO$", "", a["versao"])
     # No IOS-XE o 'show version' também traz a linha "Cisco IOS Software
     # ... Version 17.x", que casaria a regra do IOS clássico e geraria uma
     # consulta a cisco:ios, produto que não tem versões 17.x.
@@ -443,7 +478,7 @@ def cpe_versao(produto, versao):
     que o 'show version' imprime (17.03.04a -> 17.3.4a). Os valores do
     dicionário CPE são minúsculos."""
     atualizacao = ""
-    if produto == "junos":
+    if produto in ("junos", "junos_os_evolved"):
         m = re.match(r"(?i)(\d+\.\d+)([RXD]\d+(?:-S\d+)?)?", versao)
         if m:
             versao, atualizacao = m.group(1), (m.group(2) or "")
@@ -452,17 +487,36 @@ def cpe_versao(produto, versao):
     return versao.lower(), atualizacao.lower()
 
 
+def _texto_de_configuracao(texto):
+    """Só as seções de configuração do snapshot (do sistema e dos módulos).
+    Logs e vizinhança trazem comandos digitados e textos de terceiros que
+    imitam linhas de configuração (UI_CMDLINE do Junos, por exemplo)."""
+    partes = re.split(r"(?m)^(?=## )", texto)
+    config = [p for p in partes
+              if re.match(r"## (?:[^\n]* — )?Configuração", p)]
+    return "\n".join(config) if config else texto
+
+
+def _sem_comentarios(texto):
+    return re.sub(r"(?m)^[ \t]*(?://|#|;).*$", "", texto)
+
+
 def avaliar_config(meta, texto):
     """Aplica as heurísticas locais de configuração insegura."""
     plataforma = meta.get("platform_key", "")
+    so_config = _texto_de_configuracao(texto)
     achados = []
     for regra in REGRAS_CONFIG:
         if regra["plataformas"] and plataforma not in regra["plataformas"]:
             continue
-        m = re.search(regra["padrao"], texto)
+        alvo = texto if regra.get("secoes") == "todas" else so_config
+        if regra.get("sem_comentarios"):
+            alvo = _sem_comentarios(alvo)
+        m = re.search(regra["padrao"], alvo)
         if not m:
             continue
-        trecho = " ".join(m.group(0).split())[:120].replace("|", "/").replace("`", "'")
+        ev = m.group("ev") if "ev" in m.re.groupindex else m.group(0)
+        trecho = " ".join(ev.split())[:120].replace("|", "/").replace("`", "'")
         achados.append({
             "id": regra["id"],
             "titulo": regra["titulo"],
@@ -667,7 +721,10 @@ def consultar_nvd(fornecedor, produto, versao, chave_api, cache):
                 break
         nota, severidade, vetor = None, "DESCONHECIDA", ""
         metricas = cve.get("metrics", {})
-        for campo in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        # CVSS 4 antes do 2: vários CNAs (Juniper entre eles) já publicam só
+        # a v4, e sem ela a CVE virava "DESCONHECIDA" e caía no corte.
+        for campo in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40",
+                      "cvssMetricV2"):
             if metricas.get(campo):
                 dado = metricas[campo][0].get("cvssData", {})
                 nota = dado.get("baseScore")
@@ -901,10 +958,12 @@ def resumir_vuln_osv(dados, ecossistema, pacote):
             if a.startswith("CVE-")]
     if dados.get("id", "").startswith("CVE-"):
         cves.insert(0, dados["id"])
-    vetor, prioridade_ubuntu = "", ""
+    vetor, vetor_v4, prioridade_ubuntu = "", "", ""
     for sev in dados.get("severity") or []:
         if sev.get("type", "").startswith("CVSS_V3") and not vetor:
             vetor = sev.get("score", "")
+        elif sev.get("type") == "CVSS_V4" and not vetor_v4:
+            vetor_v4 = sev.get("score", "")
         elif sev.get("type") == "Ubuntu":
             prioridade_ubuntu = sev.get("score", "")
     corrigida, urgencia = None, ""
@@ -929,6 +988,7 @@ def resumir_vuln_osv(dados, ecossistema, pacote):
         "nota": nota,
         "severidade": severidade,
         "vetor": vetor,
+        "vetor_v4": vetor_v4,
         "prioridade_ubuntu": prioridade_ubuntu,
         "urgencia_debian": urgencia,
         "corrigida": corrigida,
@@ -1171,8 +1231,13 @@ CATALOGO = [
 
 
 def _tupla_versao(texto):
+    """Tupla de 4 números, completada com zero: o RouterOS mostra a versão
+    .0 sem o último número ("7.24"), e (7, 24) < (7, 24, 0) a deixaria
+    abaixo do limite inferior da faixa vulnerável."""
     partes = re.findall(r"\d+", texto or "")
-    return tuple(int(p) for p in partes[:4]) or None
+    if not partes:
+        return None
+    return tuple(int(p) for p in (partes[:4] + ["0"] * 4)[:4])
 
 
 def situacao_por_faixa(versao, faixas):
@@ -1273,12 +1338,25 @@ def marcar_cobertura_osv(versoes, texto, pacotes):
 
 
 def _kernel_e_do_pacote(texto, pacotes, padrao_fonte):
-    """O kernel do 'uname -a' é o de algum pacote linux instalado?"""
-    m = re.search(r"(?m)^Linux \S+ (\d+\.\d+\.\d+-\d+)", texto)
+    """O kernel do 'uname -a' é o de algum pacote linux instalado?
+
+    Debian e Ubuntu: existe o binário linux-image-<uname -r> (a versão-fonte
+    do Debian, 6.1.76-1, não traz a ABI 6.1.0-18). RHEL e derivados: a
+    versão do pacote kernel/kernel-core começa pelo 'uname -r' sem a
+    arquitetura. A comparação é exata: 6.8.0-14 não casa 6.8.0-146."""
+    m = re.search(r"(?m)^Linux \S+ (\d+\.\d+\.\d+-\S+)", texto)
     if not m:
         return False
-    return any(re.match(padrao_fonte, p["fonte"]) and
-               p["versao_fonte"].startswith(m.group(1)) for p in pacotes)
+    release = m.group(1)
+    sem_arq = re.sub(r"\.(x86_64|aarch64|ppc64le|s390x|i686)$", "", release)
+    for p in pacotes:
+        if p["binario"] in (f"linux-image-{release}",
+                            f"linux-image-unsigned-{release}"):
+            return True
+        if p["binario"] in ("kernel", "kernel-core") and \
+                re.match(padrao_fonte, p["fonte"]) and p["versao"] == sem_arq:
+            return True
+    return False
 
 
 def _kernel_de_distribuicao(texto):
@@ -1337,6 +1415,9 @@ def _relevante_osv(v, kev, epss):
     if any(c in kev for c in v["cves"]):
         return True
     if v["severidade"] in ("CRITICAL", "HIGH"):
+        return True
+    # Só CVSS 4 (a nota não é calculada aqui): fica na tabela para conferir.
+    if v["severidade"] == "DESCONHECIDA" and v.get("vetor_v4"):
         return True
     return any((epss.get(c) or 0) >= 0.10 for c in v["cves"])
 
@@ -1807,7 +1888,8 @@ def main():
                 osv = {"ecossistema": eco, "precisao": precisao,
                        "pacotes_total": len(pacotes), "resultado": None,
                        "_pacotes": pacotes}
-                marcar_cobertura_osv(versoes, texto, pacotes)
+                marcar_cobertura_osv(versoes, texto,
+                                     [] if args.sem_osv or args.sem_rede else pacotes)
             else:
                 osv = {"motivo": f"{len(pacotes)} pacotes, mas a distribuição "
                                  "não tem base no OSV suportada aqui (Debian, "
@@ -1844,14 +1926,46 @@ def main():
     epss = {}
     cache = {}
     if not args.sem_rede:
-        print(f"\n[+] {len(consultas)} consulta(s) única(s) à NVD "
-              f"(versões repetidas são consultadas uma só vez)")
         cache = carregar_cache()
         delay = DELAY_COM_CHAVE if args.api_key else DELAY_SEM_CHAVE
         print("[+] Obtendo catálogo CISA KEV ...")
         kev = baixar_kev()
         print(f"    {len(kev)} CVEs com exploração confirmada")
 
+        # Pacotes de servidores Linux: uma consulta por servidor ao OSV,
+        # mais o detalhe de cada vulnerabilidade (em cache por 7 dias).
+        com_osv = [h for h in hosts if h["osv"] and h["osv"].get("ecossistema")]
+        if com_osv and not args.sem_osv:
+            print(f"\n[+] OSV: pacotes de {len(com_osv)} servidor(es) Linux")
+            for h in com_osv:
+                o = h["osv"]
+                try:
+                    o["resultado"] = consultar_osv(o["ecossistema"], o["_pacotes"], cache)
+                    n = sum(len(p["vulns"]) for p in o["resultado"])
+                    print(f"    {str(h['host']):22} {o['ecossistema']}: "
+                          f"{len(o['resultado'])} pacote(s) afetado(s), {n} vulnerabilidade(s)")
+                except Exception as e:
+                    o["erro"] = f"falha na consulta ao OSV: {e}"
+                    print(f"    [!] {h['host']}: {o['erro']}")
+                salvar_cache(cache)
+        elif com_osv:
+            for h in com_osv:
+                h["osv"]["erro"] = "consulta ao OSV desativada (--sem-osv)"
+
+        # Sem resultado do OSV (falha ou --sem-osv), o software de pacote
+        # volta para a NVD pela versão upstream: melhor superestimar do que
+        # dizer "avaliado pelo OSV" sem ter avaliado.
+        for h in com_osv:
+            if h["osv"].get("resultado") is not None:
+                continue
+            for v in h["versoes"]:
+                if v.pop("coberto_osv", False):
+                    v["consultavel"] = True
+                    consultas.setdefault(
+                        (v["cpe_fornecedor"], v["cpe_produto"], v["versao"]), [])
+
+        print(f"\n[+] {len(consultas)} consulta(s) única(s) à NVD "
+              f"(versões repetidas são consultadas uma só vez)")
         for i, (fornecedor, produto, versao) in enumerate(consultas, 1):
             rotulo = f"{fornecedor}:{produto}:{versao}"
             print(f"    [{i}/{len(consultas)}] {rotulo}")
@@ -1884,26 +1998,6 @@ def main():
                 if v["consultavel"]:
                     v["cves"] = consultas.get(
                         (v["cpe_fornecedor"], v["cpe_produto"], v["versao"]))
-
-        # Pacotes de servidores Linux: uma consulta por servidor ao OSV,
-        # mais o detalhe de cada vulnerabilidade (em cache por 7 dias).
-        com_osv = [h for h in hosts if h["osv"] and h["osv"].get("ecossistema")]
-        if com_osv and not args.sem_osv:
-            print(f"\n[+] OSV: pacotes de {len(com_osv)} servidor(es) Linux")
-            for h in com_osv:
-                o = h["osv"]
-                try:
-                    o["resultado"] = consultar_osv(o["ecossistema"], o["_pacotes"], cache)
-                    n = sum(len(p["vulns"]) for p in o["resultado"])
-                    print(f"    {str(h['host']):22} {o['ecossistema']}: "
-                          f"{len(o['resultado'])} pacote(s) afetado(s), {n} vulnerabilidade(s)")
-                except Exception as e:
-                    o["erro"] = f"falha na consulta ao OSV: {e}"
-                    print(f"    [!] {h['host']}: {o['erro']}")
-                salvar_cache(cache)
-        elif com_osv:
-            for h in com_osv:
-                h["osv"]["erro"] = "consulta ao OSV desativada (--sem-osv)"
 
         if not args.sem_epss:
             todas = {c["id"] for h in hosts for v in h["versoes"] for c in (v["cves"] or [])}

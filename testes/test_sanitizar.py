@@ -410,7 +410,18 @@ SEGREDOS = [('J01',
   '===== /opt/andrisoft/etc/dbhost.conf\n'
   '127.0.0.1',
   ['LxWgDbPassA01']),
- ('A02', '===== /etc/ppp/chap-secrets\ncli1 * LxChapA02 *', ['LxChapA02'])]
+ ('A02', '===== /etc/ppp/chap-secrets\ncli1 * LxChapA02 *', ['LxChapA02']),
+ ('R01', '*/5 * * * * snmpwalk -v2c -c LxCronComR01 192.0.2.1 ifTable', ['LxCronComR01']),
+ ('R02', 'private_key = LxPrivKeyR02xx', ['LxPrivKeyR02xx']),
+ ('R03', 'private_key: "LxPrivKeyR03yy"', ['LxPrivKeyR03yy']),
+ ('R04', 'WG_PSK=LxWgPskR04zz', ['LxWgPskR04zz']),
+ ('R05', 'psk="LxWifiPskR05ww"', ['LxWifiPskR05ww']),
+ ('R06', 'requirepass LxRedisR06pass', ['LxRedisR06pass']),
+ ('R07', 'masterauth LxRedisR07auth', ['LxRedisR07auth']),
+ ('R08', 'olcRootPW: {SSHA}LxLdapR08hash', ['LxLdapR08hash']),
+ ('R09', 'user_key: LxPushoverR09key', ['LxPushoverR09key']),
+ ('R10', 'terminal user name buildrun_new_password root "LxSmartaxR10Hash" 1 2 3',
+  ['LxSmartaxR10Hash'])]
 
 # (id, texto, trechos que PRECISAM sobreviver)
 PRESERVAR = [('P01',

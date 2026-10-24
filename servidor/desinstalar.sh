@@ -32,8 +32,11 @@ if [ -f /etc/netsnap/instalacao.conf ]; then
   WEB=$(sed -n 's/^servidor_web *= *//p' /etc/netsnap/instalacao.conf | head -1)
 fi
 
-systemctl disable --now netsnap-servidor.service netsnap-certificado.timer 2>/dev/null || true
-rm -f /etc/systemd/system/netsnap-servidor.service \
+# O socket primeiro: ativo, ele tentaria subir o serviço de novo.
+systemctl disable --now netsnap-servidor.socket netsnap-servidor.service \
+  netsnap-certificado.timer 2>/dev/null || true
+rm -f /etc/systemd/system/netsnap-servidor.socket \
+      /etc/systemd/system/netsnap-servidor.service \
       /etc/systemd/system/netsnap-certificado.service \
       /etc/systemd/system/netsnap-certificado.timer
 systemctl daemon-reload

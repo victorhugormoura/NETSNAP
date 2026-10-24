@@ -9,6 +9,7 @@ Licenciado sob a licença MIT.
 import http.server
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -80,6 +81,19 @@ class Simulado(http.server.BaseHTTPRequestHandler):
                                  "cabecalhos": {k.lower(): v for k, v in self.headers.items()},
                                  "corpo": corpo})
         texto = Simulado.resposta_texto or json.dumps(RESPOSTA)
+        if self.path.startswith("/redir/v1/"):
+            self.send_response(307)
+            self.send_header("Location", "http://127.0.0.1:%d/v1/messages"
+                             % self.server.server_address[1])
+            self.end_headers()
+            return
+        if self.path == "/nulo/chat/completions":
+            bruto = json.dumps({"choices": [{"message": {"content": None}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(bruto)))
+            self.end_headers()
+            self.wfile.write(bruto)
+            return
         if self.path == "/v1/messages":
             dados = {"content": [{"type": "text", "text": "```json\n" + texto + "\n```"}],
                      "usage": {"input_tokens": 100, "output_tokens": 50}}
@@ -246,6 +260,68 @@ class TesteIA(unittest.TestCase):
         self.assertIn("saída cortada", texto)
         self.assertEqual(ia._cotas_justas([10, 500, 1000], 410), [10, 200, 200])
         self.assertEqual(ia._cotas_justas([10, 20], 100), [10, 20])
+
+    def test_redirecionamento_nao_leva_a_chave(self):
+        r, _, _ = ia.analisar(self.snaps, provedor="anthropic", modelo="m",
+                              url=self.url + "/redir", chave="sk-SEGREDO")
+        self.assertIn("redirecionou", r["hosts"][0]["erro"])
+        self.assertFalse(any(p["caminho"] == "/v1/messages" for p in Simulado.pedidos))
+
+    def test_conteudo_nulo_vira_erro_do_host(self):
+        r, base, _ = ia.analisar(self.snaps, provedor="openai", modelo="m",
+                                 url=self.url + "/nulo", chave="")
+        self.assertIn("vazia", r["hosts"][0]["erro"])
+        self.assertTrue(os.path.isfile(base + ".json"))
+
+    def test_marcador_delimita_as_saidas(self):
+        r, base, pedidos = ia.analisar(self.snaps, simular=True)
+        with open(os.path.join(pedidos, "MX-LAB-A.txt"), encoding="utf-8") as f:
+            texto = f.read()
+        m = re.search(r"Marcador das saídas deste pedido: SAIDA-([0-9a-f]{12})", texto)
+        self.assertTrue(m)
+        self.assertIn(f"<<<SAIDA-{m.group(1)}\nset system host-name", texto)
+
+    def test_evidencia_conferida_e_comando_destrutivo(self):
+        snapshot = "set system services telnet\nset system host-name X"
+        obj = {"achados": [
+            {"titulo": "Telnet", "severidade": "alta", "confianca": "alta",
+             "evidencia": [{"comando": "c", "trecho": "set system services telnet"}],
+             "comandos_propostos": ["delete system services telnet", "request system zeroize"]},
+            {"titulo": "Inventado", "severidade": "critica", "confianca": "alta",
+             "evidencia": [{"comando": "c", "trecho": "set system root-authentication plain"}],
+             "comandos_propostos": "request system reboot"},
+            {"titulo": ["não", "texto"], "severidade": "baixa"},
+        ]}
+        r, avisos = ia.validar_achados(obj, "h", "i", snapshot)
+        por_titulo = {a["titulo"]: a for a in r["achados"]}
+        self.assertEqual(por_titulo["Telnet"]["confianca"], "alta")
+        self.assertEqual(por_titulo["Telnet"]["comandos_propostos"],
+                         ["delete system services telnet"])
+        self.assertEqual(por_titulo["Telnet"]["comandos_bloqueados"], ["request system zeroize"])
+        self.assertEqual(por_titulo["Inventado"]["confianca"], "baixa")
+        self.assertFalse(por_titulo["Inventado"]["evidencia"][0]["confere"])
+        self.assertEqual(por_titulo["Inventado"]["comandos_propostos"], [])
+        self.assertTrue(any("não está no snapshot" in a for a in avisos))
+
+    def test_markdown_nao_e_forjado_pelo_trecho(self):
+        resultado = {"gerado_em": "2026-10-24T10:00:00", "provedor": "p", "modelo": "m",
+                     "hosts": [{"host": "h", "ip": "i", "achados": [{
+                         "severidade": "baixa", "titulo": "t", "categoria": "logs",
+                         "confianca": "baixa", "impacto": "", "recomendacao": "",
+                         "evidencia": [{"comando": "c", "trecho": "x\n```\n### [CRITICA] falso"}],
+                         "comandos_propostos": [], "comandos_reversao": []}]}]}
+        md = ia.gerar_md(resultado)
+        self.assertIn("````text", md)
+        self.assertNotIn("\n### [CRITICA] falso\n```\n", md.split("````text", 1)[0])
+
+    def test_resumo_do_pacote_com_caminho_absoluto(self):
+        zip_path = os.path.join(self.dir, "pacote.zip")
+        fora = os.path.join(self.snaps, "MX-LAB-A_192.0.2.10_20261022_100000.md")
+        with zipfile.ZipFile(zip_path, "w") as z:
+            z.writestr("manifesto.json", json.dumps({"formato": "netsnap-analise/1", "id": "p"}))
+            z.writestr("resumo.json", json.dumps([{"arquivo": fora, "host": "x"}]))
+        with self.assertRaises(ia.ErroIA):
+            ia.analisar(zip_path, simular=True)
 
     def test_corte_proporcional_do_snapshot(self):
         caminho = os.path.join(self.snaps, "MX-LAB-A_192.0.2.10_20261022_100000.md")

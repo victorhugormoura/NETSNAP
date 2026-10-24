@@ -444,14 +444,26 @@ async function vExecucao(id) {
   const m = tela(`<p class="carregando">Carregando execução…</p>`);
   let montado = false;
 
+  let falhas = 0;
   const atualizar = async () => {
     let d;
     try { d = await api("GET", `jobs/${id}?desde=${linhas}`); } catch (e) {
       if (geracao !== S.geracao) return;
-      if (!montado) tela(`<h1>Execução não encontrada</h1><p class="lead">Execuções ficam em memória e somem quando o painel é reiniciado. <a href="#/execucoes">Ver execuções</a></p>`);
+      if (!montado) {
+        tela(`<h1>Execução não encontrada</h1><p class="lead">Execuções ficam em memória e somem quando o painel é reiniciado. <a href="#/execucoes">Ver execuções</a></p>`);
+        return;
+      }
+      if (e.status === 401) return;  // api() já levou ao login
+      // Falha passageira (rede, 429, painel reiniciando): avisa e tenta de
+      // novo com espera crescente, em vez de congelar a tela.
+      falhas += 1;
+      const espera = Math.min(30, 2 ** falhas);
+      $("#ex-erro").innerHTML = `<p class="alerta-campo">Sem resposta do painel (${esc(e.message)}). Nova tentativa em ${espera} s.</p>`;
+      S.timer = setTimeout(atualizar, espera * 1000);
       return;
     }
     if (geracao !== S.geracao) return;
+    if (falhas) { falhas = 0; $("#ex-erro").innerHTML = ""; }
     if (!montado) { montar(d); montado = true; }
     $("#ex-estado").innerHTML = estado(d.estado);
     $("#ex-fim").textContent = d.terminado ? fmtData(d.terminado) : "em andamento";
@@ -475,7 +487,7 @@ async function vExecucao(id) {
     m.innerHTML = `<p class="pequeno"><a href="#/execucoes">Execuções</a></p>
       <div class="cabecalho-linha"><div><h1>${esc(d.titulo)}</h1>
         <p class="lead">Início ${fmtData(d.criado)} · término <span id="ex-fim"></span> · <span id="ex-estado"></span></p></div>
-        <button class="perigo" id="ex-cancelar" type="button">Cancelar execução</button></div>
+        <button class="perigo so-tecnico" id="ex-cancelar" type="button">Cancelar execução</button></div>
       <div id="ex-erro"></div>
       <div id="ex-hosts"></div>
       <div id="ex-resultado"></div>
@@ -511,19 +523,20 @@ async function vExecucao(id) {
       const plataformas = S.info.capacidades.plataformas;
       html += `<h2>Não identificados automaticamente</h2>
         <p class="suave">Responderam, mas a plataforma não foi reconhecida. Escolha o tipo para coletar com o perfil certo.</p>
-        <form id="f-pendentes" class="bloco" autocomplete="off">
+        <form id="f-pendentes" class="bloco so-tecnico" autocomplete="off">
         ${r.pendentes.map((p, n) => `<div class="lado-a-lado campo"><label class="mono" for="pend-${n}">${esc(p)}</label>
           <select id="pend-${n}" data-alvo="${esc(p)}"><option value="">Pular</option>
           ${plataformas.map((x) => `<option value="${esc(x.chave)}">${esc(x.nome)}</option>`).join("")}</select></div>`).join("")}
-        <div class="lado-a-lado"><div class="campo"><label for="pend-senha">Senha de ${esc(d.config.usuario || "")}</label>
-          <input id="pend-senha" type="password" autocomplete="new-password" required></div></div>
+        ${d.config.credencial ? `<p class="suave">Usa a mesma credencial do cofre da execução original.</p>` :
+          `<div class="lado-a-lado"><div class="campo"><label for="pend-senha">Senha de ${esc(d.config.usuario || "")}</label>
+          <input id="pend-senha" type="password" autocomplete="new-password" required></div></div>`}
         <button class="principal" type="submit">Coletar selecionados</button></form>`;
     }
     $("#ex-resultado").innerHTML = html;
     const fp = $("#f-pendentes");
     if (fp) fp.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const senha = $("#pend-senha").value;
+      const senha = $("#pend-senha") ? $("#pend-senha").value : undefined;
       const porTipo = {};
       $$("select[data-alvo]", fp).forEach((s) => { if (s.value) (porTipo[s.value] = porTipo[s.value] || []).push(s.dataset.alvo); });
       const tipos = Object.keys(porTipo);
@@ -687,7 +700,13 @@ async function vInventario() {
     desenhar();
   });
   $("#inv-csv").addEventListener("click", () => {
-    const q = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+    // Célula começando com = + - @ vira fórmula no Excel/LibreOffice: o
+    // apóstrofo a mantém como texto (nome de host vem do equipamento).
+    const q = (v) => {
+      let t = String(v == null ? "" : v);
+      if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+      return `"${t.replace(/"/g, '""')}"`;
+    };
     const linhas = [["host", "ip", "plataforma", "modelo", "versoes", "cves", "coletas", "ultima_coleta", "arquivo"].join(";")]
       .concat(d.hosts.map((h) => [h.host, h.ip, h.plataforma_nome, h.modelo, h.versoes.join(" | "),
         h.cves == null ? "" : h.cves, h.coletas, h.coletado_em, h.arquivo].map(q).join(";")));
@@ -821,7 +840,7 @@ async function vTopologia() {
   const confirmados = g.enlaces.filter((e) => e.confirmado);
   tela(`<div class="cabecalho-linha"><div><h1>Topologia</h1>
       <p class="lead">Enlaces lidos do LLDP/CDP e do endereçamento ponto a ponto das configurações, no snapshot mais recente de cada equipamento.</p></div>
-      <div class="acoes"><button type="button" id="topo-salvar">Salvar JSON</button></div></div>
+      <div class="acoes"><button type="button" class="so-tecnico" id="topo-salvar">Salvar JSON</button></div></div>
     <div class="faixa">
       <div><strong>${g.nos.filter((n) => n.coletado).length}</strong><span>coletados</span></div>
       <div><strong>${naoColetados.length}</strong><span>vizinhos ainda não coletados</span></div>
@@ -852,7 +871,7 @@ async function vTopologia() {
       <div class="tabela-rolagem"><table><thead><tr><th>Nome anunciado</th><th>Endereço de gerência</th></tr></thead><tbody>
       ${naoColetados.map((n) => `<tr><td>${esc(n.rotulo)}</td><td class="mono">${esc(n.ips_gerencia.join(", ") || "—")}</td></tr>`).join("")}
       </tbody></table></div>
-      ${comIp.length && S.info.capacidades.coleta ? `<div class="acoes"><button class="principal" type="button" id="topo-coletar">Coletar os ${comIp.length} com endereço</button></div>` : ""}` : ""}`);
+      ${comIp.length && S.info.capacidades.coleta ? `<div class="acoes"><button class="principal so-tecnico" type="button" id="topo-coletar">Coletar os ${comIp.length} com endereço</button></div>` : ""}` : ""}`);
 
   const geracao = S.geracao;
   let svgAtual = "", pedido = 0;
@@ -934,7 +953,7 @@ async function vVulnerabilidades() {
   tela(`<h1>Vulnerabilidades</h1>
     <p class="lead">Lê os snapshots, identifica versões, pacotes e configuração insegura, e cruza com a NVD, o OSV (pacotes de servidores Linux), o catálogo CISA KEV, o EPSS e o catálogo de falhas graves (PHP2Shell, MikroTrick).
       Resultado é triagem para priorizar investigação, não laudo: o boletim do fabricante é a fonte final.</p>
-    <form class="bloco" id="f-cve" autocomplete="off">
+    <form class="bloco so-tecnico" id="f-cve" autocomplete="off">
       <label class="marcar"><input type="checkbox" name="sem_rede"> <span>Sem internet: só as verificações de configuração</span></label>
       <label class="marcar"><input type="checkbox" name="todos"> <span>Incluir coletas antigas do mesmo equipamento</span></label>
       <div class="lado-a-lado espaco-acima">
@@ -1060,7 +1079,8 @@ async function vAgendamentos() {
         if (!confirm("Remover este agendamento?")) return;
         await api("DELETE", `agendamentos/${id}`);
       } else if (acao === "senha") {
-        const senha = prompt("Senha do equipamento para este agendamento (fica só na memória):");
+        const senha = await pedirSenha("Senha do equipamento para este agendamento",
+          "Fica só na memória do painel; não é gravada em disco.");
         if (!senha) return;
         await api("POST", `agendamentos/${id}/senha`, { senha });
         aviso("Senha registrada; o agendamento está ativo");
@@ -1106,7 +1126,39 @@ async function vAgendamentos() {
   });
 }
 
+/* ------------------------------------------------------------ diálogo de senha */
+// Substitui o prompt(), que mostra a senha digitada em claro.
+function pedirSenha(titulo, explicacao) {
+  return new Promise((resolver) => {
+    const d = document.createElement("dialog");
+    d.className = "dialogo";
+    d.innerHTML = `<form method="dialog"><h2>${esc(titulo)}</h2>
+      <p class="suave">${esc(explicacao || "")}</p>
+      <div class="campo"><label for="dlg-senha">Senha</label>
+        <input id="dlg-senha" type="password" autocomplete="new-password" required></div>
+      <div class="acoes"><button class="principal" value="ok">Confirmar</button>
+        <button type="button" value="" id="dlg-cancelar">Cancelar</button></div></form>`;
+    document.body.appendChild(d);
+    const fechar = (v) => { d.close(); d.remove(); resolver(v); };
+    d.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      fechar(d.querySelector("#dlg-senha").value || null);
+    });
+    d.querySelector("#dlg-cancelar").addEventListener("click", () => fechar(null));
+    d.addEventListener("cancel", (e) => { e.preventDefault(); fechar(null); });
+    d.showModal();
+    d.querySelector("#dlg-senha").focus();
+  });
+}
+
 /* ------------------------------------------------------------ eventos globais */
+// Linhas clicáveis também pelo teclado: recebem foco e papel de link.
+new MutationObserver(() => {
+  $$("tr[data-ir]:not([tabindex])").forEach((tr) => {
+    tr.tabIndex = 0;
+    tr.setAttribute("role", "link");
+  });
+}).observe(document.getElementById("conteudo"), { childList: true, subtree: true });
 document.addEventListener("click", (e) => {
   const baixa = e.target.closest("[data-baixar]");
   if (baixa) { e.preventDefault(); baixar(baixa.dataset.baixar, baixa.dataset.nome); return; }

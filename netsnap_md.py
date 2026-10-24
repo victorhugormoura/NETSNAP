@@ -15,7 +15,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import json
 import os
@@ -45,6 +45,10 @@ def chave_da_secao(titulo: str):
     for prefixo, chave in TITULO_PARA_CHAVE:
         if base.startswith(prefixo):
             return chave, modulo
+    # Seção própria de um módulo de aplicação ("Conteúdo do Grafana",
+    # "Módulos instalados", "Bloqueio DNS"): é coleta, não cabeçalho.
+    if modulo:
+        return "extra", modulo
     return None, None
 
 
@@ -113,7 +117,10 @@ def ler_snapshot(caminho: str) -> dict:
                 continue
             buffer.append(linha)
             continue
-        if linha.startswith("```") and comando is not None:
+        # Todo bloco cercado é consumido como bloco, haja ou não comando
+        # aberto: o conteúdo é saída de equipamento e não pode virar título
+        # de seção ou de comando.
+        if linha.startswith("```"):
             cerca, buffer = re.match(r"`+", linha).group(0), []
             continue
         if linha.startswith("## "):
