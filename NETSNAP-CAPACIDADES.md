@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.0**, **painel netsnap_web 0.4.0**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.1, **netsnap_ia 0.1.0**, **netsnap servidor 1.0.1**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.2**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.1**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netsnap servidor 1.0.2**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -205,7 +205,7 @@ Convenções:
 
 - Cada valor do front-matter é JSON válido (listas e booleanos incluídos), portanto YAML válido.
 - `##` = seção temática; `###` = comando **exatamente como executado**; bloco ```` ```text ```` = saída bruta. Quando a própria saída contém crases, a cerca do bloco fica uma crase mais longa que a maior sequência delas, para que o bloco não termine antes da hora.
-- `***REMOVIDO***` = valor sensível suprimido; `***CERTIFICADO/CHAVE REMOVIDO***` = bloco PEM; `***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***` = arquivo que é integralmente segredo.
+- `***REMOVIDO***` = valor sensível suprimido; `***REMOVIDO-TRIVIAL***` = comunidade SNMP padrão ou óbvia (public, private...) suprimida, para a triagem ainda apontar o risco; `***CERTIFICADO/CHAVE REMOVIDO***` = bloco PEM; `***CONTEÚDO DE ARQUIVO SENSÍVEL REMOVIDO***` = arquivo que é integralmente segredo.
 - `_(sem saída útil — retorno: ...)_` = comando vazio ou não suportado por aquela plataforma/firmware. **Não** significa recurso desabilitado.
 
 ### Índice da execução

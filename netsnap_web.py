@@ -27,7 +27,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import atexit
@@ -304,7 +304,7 @@ def modo_executor(tipo):
 # ---------------------------------------------------------------------------
 class Job:
     def __init__(self, tipo, titulo, origem="manual"):
-        self.id = secrets.token_hex(4)
+        self.id = secrets.token_hex(8)
         self.tipo = tipo
         self.titulo = titulo
         self.origem = origem
@@ -705,7 +705,7 @@ class Agenda:
         item = self.validar(dados)
         senha = dados.get("senha") or ""
         with self.trava:
-            item.update(id=secrets.token_hex(4), ativo=True,
+            item.update(id=secrets.token_hex(8), ativo=True,
                         criado=datetime.now().isoformat(timespec="seconds"),
                         proxima=self.proxima(item).isoformat(timespec="seconds"),
                         ultima=None, ultimo_job=None, ultimo_estado=None)
@@ -854,6 +854,15 @@ def caminho_seguro(pasta, nome):
     return caminho
 
 
+def caminho_snapshot(nome):
+    """Caminho de um snapshot de host. A pasta também guarda depuração
+    (_debug_*.log), agendamentos e relatórios, que não são snapshots e não
+    saem pelas rotas de snapshot."""
+    if not nome or not nome.endswith(".md") or nome.startswith("_"):
+        raise ErroAPI(400, "Não é um snapshot de equipamento")
+    return caminho_seguro(PASTA_SNAPSHOTS, nome)
+
+
 def _cves_do_json(caminho):
     """Contagem por (host, ip) a partir do JSON do netcve 0.4+: CVEs por
     versão (NVD) mais vulnerabilidades de pacote (OSV)."""
@@ -960,8 +969,8 @@ def inventario():
 
 
 def comparar(nome_a, nome_b, so_estaveis=False):
-    a = md.ler_snapshot(caminho_seguro(PASTA_SNAPSHOTS, nome_a))
-    b = md.ler_snapshot(caminho_seguro(PASTA_SNAPSHOTS, nome_b))
+    a = md.ler_snapshot(caminho_snapshot(nome_a))
+    b = md.ler_snapshot(caminho_snapshot(nome_b))
 
     def itens(snap):
         d = {}
@@ -1058,7 +1067,7 @@ def listar_relatorios():
 
 def caminho_relatorio(tipo, nome):
     if tipo == "snapshot":
-        return caminho_seguro(PASTA_SNAPSHOTS, nome)
+        return caminho_snapshot(nome)
     if tipo not in TIPOS_RELATORIO:
         raise ErroAPI(404, "Tipo desconhecido")
     pasta, prefixo, ext = TIPOS_RELATORIO[tipo]
@@ -1277,7 +1286,7 @@ class Manipulador(BaseHTTPRequestHandler):
                          md.listar_snapshots(PASTA_SNAPSHOTS)]
                 lista.sort(key=lambda s: s["coletado_em"], reverse=True)
                 return lista
-            snap = md.ler_snapshot(caminho_seguro(PASTA_SNAPSHOTS, p[1]))
+            snap = md.ler_snapshot(caminho_snapshot(p[1]))
             snap["arquivo"] = p[1]
             return snap
 

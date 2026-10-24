@@ -92,5 +92,32 @@ class TesteRetencao(unittest.TestCase):
         self.assertFalse(os.path.exists(indice))
 
 
+class TesteAlvos(unittest.TestCase):
+    """Alvos locais e link-local recusados fora do laboratório."""
+    def setUp(self):
+        class Conf:
+            permitir_locais = False
+        self.antes = getattr(srv, "CONF", None)
+        srv.CONF = Conf()
+        import netsnap_web
+        srv.web = netsnap_web
+
+    def tearDown(self):
+        srv.CONF = self.antes
+
+    def test_loopback_e_metadados(self):
+        for alvo in ("127.0.0.1", "169.254.169.254", "::1", "localhost"):
+            with self.assertRaises(srv.web.ErroAPI) as e:
+                srv.resolver_alvos(alvo, 22, None, None, 10)
+            self.assertEqual(e.exception.status, 403, alvo)
+        self.assertEqual(srv.resolver_alvos("192.0.2.10", 22, None, None, 10),
+                         "192.0.2.10:22")
+
+    def test_laboratorio_libera(self):
+        srv.CONF.permitir_locais = True
+        self.assertEqual(srv.resolver_alvos("127.0.1.18", 22, None, None, 10),
+                         "127.0.1.18:22")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

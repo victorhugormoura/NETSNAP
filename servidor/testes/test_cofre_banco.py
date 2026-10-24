@@ -124,6 +124,14 @@ class TesteBanco(unittest.TestCase):
         self.k = cf.nova_chave_mestra()
         self.b = bd.Banco(self.caminho, cf.Cofre(self.k))
 
+    def test_id_reaproveitado_nao_herda_credencial(self):
+        joao = self.b.criar_usuario("joao", SENHA, "tecnico")
+        cid = self.b.criar_credencial("olts", "u", "s", "", "joao", joao, ["10.0.0.0/8"])
+        self.b.remover_usuario(joao)
+        maria = self.b.criar_usuario("maria", SENHA, "tecnico")
+        self.assertIsNone(self.b.credencial(cid)["criado_por_id"])
+        self.assertNotEqual(self.b.credencial(cid)["criado_por_id"], maria)
+
     def test_chave_errada_recusada(self):
         with self.assertRaises(bd.ErroBanco):
             bd.Banco(self.caminho, cf.Cofre(cf.nova_chave_mestra()))

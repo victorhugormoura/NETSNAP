@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.17.1"
+__version__ = "1.17.2"
 
 import os
 import re
@@ -603,6 +603,8 @@ PERFIS = {
         # A coleta busca o necessário para reconstruir o servidor: identidade,
         # rede completa (endereços, rotas de todas as tabelas, regras, firewall),
         # serviços habilitados, agendamentos, repositórios e usuários.
+        # Os comandos da coleta não vão para o ~/.bash_history do servidor.
+        "prep": ["unset HISTFILE"],
         "config": [
             "cat /etc/os-release",
             "cat /etc/hostname /etc/hosts /etc/resolv.conf 2>/dev/null",
@@ -614,11 +616,17 @@ PERFIS = {
             # sockets em 14 endereços num servidor de 32 núcleos). A remoção
             # do descritor de arquivo colapsa as repetições sem perder
             # nenhuma combinação de endereço, porta e processo.
-            "ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
-            "sort -u | head -n 150",
-            # Firewall: as três implementações possíveis
-            "{S}iptables-save 2>/dev/null | head -n 300",
-            "{S}nft list ruleset 2>/dev/null | head -n 300",
+            # Com sudo: sem ele, o processo dos sockets de outros usuários
+            # não aparece. O corte é anunciado, para a análise não ler regra
+            # ou porta ausente como inexistente.
+            "{S}ss -tulpn 2>/dev/null | tr -s ' ' | sed 's/,fd=[0-9]*//g' | "
+            "sort -u | awk 'NR<=150; NR==151 {print \"[... saída cortada em 150 linhas]\"}'",
+            # Firewall: as três implementações possíveis; ip6tables à parte,
+            # porque no iptables-legacy as regras IPv6 não aparecem no
+            # iptables-save.
+            "{S}iptables-save 2>/dev/null | awk 'NR<=300; NR==301 {print \"[... saída cortada em 300 linhas]\"}'",
+            "{S}ip6tables-save 2>/dev/null | awk 'NR<=200; NR==201 {print \"[... saída cortada em 200 linhas]\"}'",
+            "{S}nft list ruleset 2>/dev/null | awk 'NR<=300; NR==301 {print \"[... saída cortada em 300 linhas]\"}'",
             "{S}ufw status verbose 2>/dev/null",
             # Serviços: habilitados no boot é o que reconstrói o servidor;
             # 'running' mostra o estado atual
@@ -650,7 +658,8 @@ PERFIS = {
             "{S}cat /etc/sysctl.conf /etc/sysctl.d/*.conf 2>/dev/null | "
             "grep -v -E '^[[:space:]]*#|^[[:space:]]*$'",
         ],
-        "logs": ["journalctl -n 300 --no-pager"],
+        # Com sudo: sem ele, só o journal do próprio usuário.
+        "logs": ["{S}journalctl -n 300 --no-pager"],
         "basico": [
             "hostname -f",
             "uname -a",
@@ -687,8 +696,10 @@ PERFIS = {
             "grep -i -E 'err|drop|discard|crc|fail' | grep -v ': 0$'; done",
         ],
         "vizinhanca": [
-            "lldpcli show neighbors detail",
-            "lldpctl",
+            # O socket do lldpd exige o grupo _lldpd ou root: sem sudo, a
+            # vizinhança vinha vazia e o diagnóstico dizia "sem vizinhos".
+            "{S}lldpcli show neighbors detail",
+            "{S}lldpctl",
         ],
         "inventario": [
             "cat /etc/os-release",
@@ -1127,7 +1138,7 @@ DEF_Q_WANGUARD = (
     'return;; "("*) printf "%s\\n" "$D"; return;; esac; '
     r'C=$(printf "%s\n" "$D" | tail -n +2 | '
     'awk -v F="${3:-}" \'{ n=tolower($1); t=tolower($2) } '
-    r"n ~ /pass|secret|_key$|^key$|token|community|credential|hash|salt|^license$|^prev_license$/ { next } "
+    r"n ~ /pass|secret|_key$|^key$|authkey|privkey|apikey|md5|psk|_pw$|^pw$|token|community|credential|hash|salt|^license$|^prev_license$/ { next } "
     r'F != "" && n !~ F { next } '
     r't ~ /binary|blob/ { printf "INET6_NTOA(`%s`) AS `%s`,", $1, $1; next } '
     r"n ~ /^(first|last|sensor_last|update_time|start_time|last_run|expire|expires)$/ && t ~ /int/ "
@@ -1963,8 +1974,15 @@ APPS_LINUX = {
                 "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
                 "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
                 "echo \"install.sh: ${I:-nao localizado}\"",
+                # Só executa como root um script de root que ninguém mais
+                # pode alterar (arquivo e pasta sem escrita de grupo/outros):
+                # senão, quem escreve em /srv ou /opt rodaria código como root
+                # pelo sudo do operador.
                 "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
-                "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
+                "-name install.sh -path '*ISP-Stack*' -user root ! -perm /022 "
+                "2>/dev/null | head -n1); [ -n \"$I\" ] && case \"$({S}stat -c "
+                "'%U %A' \"$(dirname \"$I\")\")\" in 'root '?????w????|"
+                "'root '????????w?) I=;; 'root '*) ;; *) I=;; esac; "
                 # A flag é conferida no próprio script antes da chamada: um
                 # install.sh antigo, sem '--audit', poderia ignorar o
                 # argumento e seguir o fluxo de instalação.
@@ -1974,7 +1992,10 @@ APPS_LINUX = {
                 "tail -n 200; else echo 'install.sh sem modo --audit: nao "
                 "executado'; fi",
                 "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
-                "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
+                "-name install.sh -path '*ISP-Stack*' -user root ! -perm /022 "
+                "2>/dev/null | head -n1); [ -n \"$I\" ] && case \"$({S}stat -c "
+                "'%U %A' \"$(dirname \"$I\")\")\" in 'root '?????w????|"
+                "'root '????????w?) I=;; 'root '*) ;; *) I=;; esac; "
                 "[ -n \"$I\" ] && if {S}grep -q -e '--verify)' -e '\"--verify\"' "
                 "\"$I\"; then echo '===== install.sh --verify'; "
                 "timeout 180 {S}bash \"$I\" --verify </dev/null 2>&1 | "
@@ -2155,8 +2176,8 @@ APPS_LINUX = {
 _CHAVES = (
     r"password|passwd|pwd(?!=/)|secret(?:[_-]?key)?|pre-shared-key|"
     r"authentication-key|auth-key|key-string|hello-password|cipher|"
-    r"irreversible-cipher|shared-secret|wpa2?-pre-shared-key|private-key|"
-    r"privatekey|presharedkey|preshared-key|shared-key|server-key|"
+    r"irreversible-cipher|shared-secret|wpa2?-pre-shared-key|private[_-]?key|"
+    r"presharedkey|requirepass|masterauth|olcrootpw|rootpw|preshared-key|shared-key|server-key|"
     r"message-digest-key|privacy-key|community-name|password-value|"
     r"password-auth|checkcode-auth|auth_pass|tcp-md5-key|bindpw|"
     r"dbpass|db_pass|api[_-]?key|access[_-]?key|auth[_-]?token|token"
@@ -2169,7 +2190,10 @@ _CHAVES = (
 # (passphrase=). 'pass' não vale no meio de palavra (bypass=).
 _CHAVES_ATRIBUICAO = (
     r"community|credentials|service_key|routing_key|integration_?key|"
-    r"webhook_url|httpheadervalue\d*|senha|mailpass|"
+    r"webhook_url|httpheadervalue\d*|senha|mailpass|user_key|app_token|"
+    # Limitado e ancorado no início da palavra: '[a-z]+_' solto era
+    # quadrático numa sequência longa de letras.
+    r"(?<![a-z])(?:[a-z]{1,12}_)?psk|"
     r"pass(?<![a-z]pass)(?:phrase)?"
 )
 # Palavras que, entre a chave e o valor, qualificam o segredo sem sê-lo:
@@ -2217,9 +2241,12 @@ PADROES_SENSIVEIS = [
     # SNMP: a comunidade é a própria credencial.
     re.compile(r"(snmp(?:-server|-agent)?[ \t]+community[ \t]+"
                r"(?:(?:read|write)[ \t]+)?(?:(?:cipher|simple)[ \t]+)?)"
+               # Valor já mascarado não é mascarado de novo, nem o
+               # qualificador que o antecede (idempotência).
+               r"(?!(?:(?:read|write|cipher|simple)[ \t]+)*\*\*\*)"
                r"(\"[^\"\n]*\"|\S+)"),
-    re.compile(r"(?m)^([ \t]*r[ow]community6?[ \t]+)(\S+)"),
-    re.compile(r"(?m)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(\S+)"),
+    re.compile(r"(?m)^([ \t]*r[ow]community6?[ \t]+)(?!\*\*\*)(\S+)"),
+    re.compile(r"(?m)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(?!\*\*\*)(\S+)"),
     # SNMPv3: "auth sha X priv aes 128 Y" (NX-OS: "priv aes-128 Y").
     re.compile(r"((?:auth|priv)(?<!\w....)[ \t]+(?:md5|sha\d*|aes(?:[ \t-]*\d+)?|"
                r"3?des)[ \t]+(?:encrypted[ \t]+)?)(\S+)"),
@@ -2247,6 +2274,8 @@ PADROES_SENSIVEIS = [
                + _VALOR),
     re.compile(r"(ssh-(?:rsa|ed25519|dss)[ \t]+)(\S+)"),
 ]
+# As três declarações de comunidade acima, sem distinção de caixa.
+_PADROES_COMUNIDADE = [re.compile(p.pattern, re.I) for p in PADROES_SENSIVEIS[1:4]]
 # Padrões específicos de plataforma ou de formato. Cada um traz palavras de
 # guarda: sem nenhuma delas no texto, o padrão nem é executado.
 PADROES_ESPECIFICOS = [
@@ -2302,6 +2331,9 @@ PADROES_ESPECIFICOS = [
         r"((?:authentication|privacy)-mode[ \t]+"
         r"(?:md5|sha\S*|des\S*|aes\S*|3des\S*)[ \t]+)"
         r"(?!(?:cipher|plain|simple|usual|nonstandard)\b|\d{1,3}(?:\s|$))(\S+)")),
+    # SmartAX: "terminal user name buildrun_new_password <usuário> "<hash>"".
+    (("buildrun_new_password",), re.compile(
+        r"(buildrun_new_password[ \t]+\S+[ \t]+)(\"[^\"\n]*\"|\S+)")),
     # HSRP e Wi-Fi em texto claro (Cisco).
     (("standby",), re.compile(
         r"(?m)^([ \t]*standby[ \t]+(?:\d+[ \t]+)?authentication[ \t]+"
@@ -2348,6 +2380,11 @@ PADROES_CAIXA = [
     ((":",), re.compile(
         r"(\d{6,12}:)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])([\w-]{30,40})(?![\w-])")),
     (("eyJ",), re.compile(r"(eyJ)(?<![\w-]eyJ)[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}")),
+    # Utilitários net-snmp: "-c" é a comunidade ("-C" é opção de saída),
+    # visível em crontab e na lista de processos.
+    (("snmp",), re.compile(
+        r"(snmp(?:walk|bulkwalk|get|bulkget|getnext|set|table|trap|status|df|"
+        r"netstat|delta|check)\b[^\n]{0,200}?[ \t]-c[ \t]*)(?!-)(\S+)")),
     (("AKIA", "ASIA"), re.compile(r"(AKIA|ASIA)(?<!\w....)[0-9A-Z]{16}\b")),
     (("gh", "glpat-", "xox"), re.compile(
         r"(gh[pousr]_|github_pat_|glpat-|xox[abposr]-)(?=[\w-]{20})[\w-]+")),
@@ -2368,7 +2405,28 @@ PADRAO_BLOCO_SNMP_MIKROTIK = re.compile(
 
 
 def _mascarar_snmp_mikrotik(m):
-    return re.sub(r"(\bname=)(\"[^\"\n]*\"|\S+)", r"\1***REMOVIDO***", m.group(0))
+    def valor(n):
+        trivial = n.group(2).strip("\"'").lower() in _COMUNIDADES_TRIVIAIS
+        return n.group(1) + (_MARCA_TRIVIAL if trivial else _MARCA)
+    return re.sub(r"(\bname=)(?!\*\*\*)(\"[^\"\n]*\"|\S+)", valor, m.group(0))
+
+
+# Comunidade SNMP padrão ou óbvia: o valor some como qualquer segredo, mas o
+# marcador diz que era trivial, para a triagem (netcve) ainda apontar o
+# risco sem que a comunidade apareça no snapshot.
+_COMUNIDADES_TRIVIAIS = {"public", "private", "cisco", "admin", "community",
+                         "snmp", "default", "secret", "manager", "monitor",
+                         "read", "write", "test", "123456"}
+_MARCA_TRIVIAL = "***REMOVIDO-TRIVIAL***"
+
+
+def _marcar_comunidades_triviais(texto):
+    def troca(m):
+        trivial = m.group(2).strip("\"'").lower() in _COMUNIDADES_TRIVIAIS
+        return m.group(1) + (_MARCA_TRIVIAL if trivial else m.group(2))
+    for padrao in _PADROES_COMUNIDADE:
+        texto = padrao.sub(troca, texto)
+    return texto
 
 # Arquivos cujo conteúdo é integralmente um segredo, sem par chave=valor que
 # permita detecção por padrão (ex.: /opt/andrisoft/etc/dbpass.conf contém
@@ -2409,6 +2467,8 @@ def sanitizar(texto: str) -> str:
     texto = PADRAO_CERT_ABERTO.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
     texto = PADRAO_ARQUIVO_SEGREDO.sub(_suprimir_arquivo, texto)
     texto = PADRAO_BLOCO_SNMP_MIKROTIK.sub(_mascarar_snmp_mikrotik, texto)
+    if "ommunity" in texto or "OMMUNITY" in texto:
+        texto = _marcar_comunidades_triviais(texto)
     for guardas, padrao in PADROES_CAIXA:
         if any(g in texto for g in guardas):
             texto = padrao.sub(r"\1" + _MARCA, texto)
@@ -2507,10 +2567,16 @@ def sem_saida_util(saida: str) -> bool:
     linhas = [l for l in texto.splitlines() if l.strip()]
     if not linhas:
         return True
-    if len(linhas) <= 3 and any(
-        PADRAO_ERRO.search(l) or PADRAO_ERRO_LIVRE.search(l) for l in linhas
-    ):
-        return True
+    if len(linhas) <= 3:
+        erros = [l for l in linhas
+                 if PADRAO_ERRO.search(l) or PADRAO_ERRO_LIVRE.search(l)]
+        # Linha que não é erro e tem conteúdo (não só o '^' que aponta o
+        # erro) é saída útil: "Interface does not exist" seguido de uma
+        # interface listada não pode sumir do snapshot.
+        conteudo = [l for l in linhas if l not in erros and
+                    re.search(r"[A-Za-z0-9]", l)]
+        if erros and not conteudo:
+            return True
     return False
 
 
@@ -2829,12 +2895,13 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo,
         # 'VRP' sozinho confirmaria um switch campus como OLT.
         "huawei_smartax": ("display version",
                            r"(?i)[ME]A5[68]\d\d|SmartAX|Integrated Access"),
-        "fiberhome": ("show version", r"(?i)fiberhome|AN[56]\d{3}|version"),
+        # Só casamento positivo: o perfil FiberHome entra em 'enable' e
+        # 'config'. Aceitar qualquer 'version' confirmava OLT de outro
+        # fabricante (ZTE, Datacom, Parks, VSOL, Nokia) e a mandava para o
+        # contexto de configuração. Família que não se identifica fica como
+        # não identificada, para o operador escolher.
+        "fiberhome": ("show version", r"(?i)fiberhome|\bAN[56]\d{3}"),
     }
-    # A confirmação da FiberHome aceita qualquer 'version', porque várias
-    # famílias não se identificam no 'show version'; sem esta recusa, um
-    # Cisco ou Linux seria tomado por OLT e receberia 'enable' e 'config'.
-    outro_fabricante = r"(?i)cisco|nx-os|junos|juniper|huawei|routeros|mikrotik|linux"
     if tipo not in verificacao:
         return False
     cmd, esperado = verificacao[tipo]
@@ -2851,10 +2918,6 @@ def confirmar_plataforma(ip, usuario, senha, porta, tipo,
             else:
                 saida = conn.send_command(cmd, read_timeout=25)
         ok = bool(re.search(esperado, saida or ""))
-        if ok and tipo == "fiberhome" and \
-                not re.search(r"(?i)fiberhome|AN[56]\d{3}", saida) and \
-                re.search(outro_fabricante, saida):
-            ok = False
         depurar(ip, "confirmacao", f"{tipo}: '{cmd}' -> "
                                    f"{'confirmado' if ok else 'nao confere'} "
                                    f"({resumir_saida(saida, 120)})")
@@ -3323,6 +3386,28 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
         parar.set()
 
 
+# Tempo máximo de coleta por equipamento (minutos), ajustável por variável
+# de ambiente. Com dois comandos seguidos sem resposta a coleta do host
+# também termina: depois de um ReadTimeout o canal pode seguir despejando a
+# saída anterior, e cada comando seguinte esperaria os 180 s inteiros.
+TEMPO_MAX_HOST = max(5, int(os.environ.get("NETSNAP_TEMPO_MAX_HOST", "45") or 45)) * 60
+
+
+def ressincronizar(conn, ip):
+    """Depois de um tempo esgotado: Ctrl+C (interrompe a saída em curso nas
+    CLIs de rede e no shell, sem efeito em configuração), Enter e limpeza do
+    que sobrou no canal."""
+    try:
+        conn.write_channel("\x03")
+        time.sleep(1)
+        conn.write_channel(conn.RETURN)
+        time.sleep(2)
+        conn.clear_buffer()
+        depurar(ip, "ressincroniza", "Ctrl+C e limpeza do canal após tempo esgotado")
+    except Exception as e:
+        depurar(ip, "ressincroniza", f"falhou: {type(e).__name__}: {e}")
+
+
 def detectar_apps_linux(conn, prefixo_sudo):
     """Identifica aplicações conhecidas instaladas no servidor Linux."""
     encontrados = []
@@ -3355,6 +3440,25 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
     apps_detectados = []
     contexto_usado = False
     perdeu_sessao = False
+    inicio_host = time.perf_counter()
+    estado_tempo = {"seguidos": 0}
+
+    def tempo_esgotado(saida):
+        """Conta tempos esgotados seguidos e o orçamento do host; devolve
+        True quando a coleta deste equipamento deve parar."""
+        if saida.startswith("[ERRO ao executar comando: ReadTimeout"):
+            estado_tempo["seguidos"] += 1
+            if estado_tempo["seguidos"] >= 2:
+                log(ip, "[ABORTADO] dois comandos seguidos sem resposta")
+                return True
+            ressincronizar(conn, ip)
+        else:
+            estado_tempo["seguidos"] = 0
+        if time.perf_counter() - inicio_host > TEMPO_MAX_HOST:
+            log(ip, f"[ABORTADO] tempo máximo por equipamento "
+                    f"({TEMPO_MAX_HOST // 60} min, NETSNAP_TEMPO_MAX_HOST)")
+            return True
+        return False
 
     log(ip, f"conectando ({perfil['nome']}"
             + (" via TELNET" if protocolo == "telnet" else "") + ") ...")
@@ -3438,6 +3542,9 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                     cmd = "/export"
                     saida = executar_comando(conn, cmd, usa_timing, ip, limite)
                 saidas.append((cmd, saida))
+                if tempo_esgotado(saida):
+                    perdeu_sessao = True
+                    break
                 # Só o retorno de erro do próprio transporte indica queda. O
                 # texto do comando não serve: logs de servidor trazem
                 # "Connection closed by ..." do sshd o tempo todo.
@@ -3466,6 +3573,9 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                 log(ip, f"-> [{chave}] {cmd[:70]}")
                 saida = executar_comando(conn, cmd, False, ip, limite)
                 saidas.append((cmd, saida))
+                if tempo_esgotado(saida):
+                    perdeu_sessao = True
+                    break
                 if saida.startswith("[ERRO ao executar comando:") and \
                         sessao_perdida(saida):
                     perdeu_sessao = True
@@ -3587,6 +3697,8 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         "- Os blocos de código contêm a **saída bruta e não editada** do "
         "comando, na sintaxe nativa da plataforma.\n"
         "- `***REMOVIDO***` indica valor sensível suprimido na coleta; "
+        "`***REMOVIDO-TRIVIAL***`, comunidade SNMP padrão ou óbvia (public, "
+        "private...) suprimida; "
         "`***CERTIFICADO/CHAVE REMOVIDO***` indica bloco PEM suprimido. "
         "Esses marcadores substituem dados reais e não devem ser "
         "interpretados como configuração.\n"

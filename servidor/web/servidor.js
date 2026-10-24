@@ -185,6 +185,9 @@ async function iniciarServidor() {
   S.caInterna = S.info.ca_interna;
   document.body.classList.remove("sem-sessao");
   $$("#menu li[data-papel]").forEach((li) => { li.hidden = !pode(li.dataset.papel); });
+  // Botões de ação (cancelar, triagem, coletar pendentes, salvar topologia)
+  // somem para o papel leitura, em vez de falhar com 403.
+  document.body.classList.toggle("papel-leitura", !pode("tecnico"));
   $("#conta-link").textContent = `${S.sessao.usuario} · ${NOME_PAPEL[S.sessao.papel]}`;
   const c = S.info.capacidades;
   $("#rodape").innerHTML = `servidor ${esc(S.info.servidor)}${c.netsnap ? ` · netsnap ${esc(c.netsnap)}` : ""}<br>${c.coleta ? "coleta disponível" : "modo consulta"}<br><span class="credito">© 2026 Victor Hugo R. Moura · Infinity Consulting</span>`;
@@ -368,6 +371,8 @@ function atualizarFrequencia() {
   const tipo = $("#ag-tipo").value;
   $$("[data-freq]").forEach((el) => { el.hidden = !el.dataset.freq.split(" ").includes(tipo); });
   $("#ag-n-rotulo").textContent = tipo === "horas" ? "A cada quantas horas" : "A cada quantos dias";
+  // Mesmo teto do servidor: 720 horas ou 365 dias.
+  $("#ag-n").max = tipo === "horas" ? 720 : 365;
 }
 
 function lerFrequencia(fd) {

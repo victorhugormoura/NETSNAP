@@ -1,4 +1,4 @@
-# netsnap servidor 1.0.1
+# netsnap servidor 1.0.2
 
 O netsnap como servidor Linux. Os técnicos entram por uma página web, com senha e um código do aplicativo autenticador, e coletam dali, sem instalar nada no próprio computador. As senhas dos equipamentos ficam num cofre cifrado no servidor. O agendador extrai configuração, logs, estado, interfaces, vizinhança e inventário todo dia, em dias da semana escolhidos, a cada N dias ou a cada N horas. Ao fim de cada execução ele gera um **pacote de análise** para a IA do NETANALYTIC.
 
@@ -60,8 +60,8 @@ O pacote `netsnap-servidor-<versão>.zip` fica anexado em cada *release* do repo
 O mesmo commit gera sempre o mesmo zip, então o SHA-256 da release pode ser conferido montando de novo. No servidor:
 
 ```bash
-sha256sum netsnap-servidor-1.0.1.zip   # compare com o publicado
-unzip netsnap-servidor-1.0.1.zip
+sha256sum netsnap-servidor-1.0.2.zip   # compare com o publicado
+unzip netsnap-servidor-1.0.2.zip
 cd netsnap-servidor
 sudo ./instalar.sh
 ```
@@ -273,6 +273,7 @@ emissor_totp = netsnap netsnap.empresa.com.br   ; nome no aplicativo autenticado
 max_execucoes_simultaneas = 3
 permitir_dados_sensiveis = nao   ; sim = administrador pode incluir segredos no snapshot
 permitir_telnet = sim
+permitir_alvos_locais = nao  ; sim só em laboratório (equipamento simulado em 127.x)
 
 [retencao]
 snapshots_dias = 180         ; 0 = para sempre (o último de cada equipamento nunca sai)
