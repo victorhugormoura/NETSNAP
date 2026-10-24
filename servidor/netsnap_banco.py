@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS meta (
     valor TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usuarios (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL UNIQUE,
     nome_completo TEXT NOT NULL DEFAULT '',
     papel TEXT NOT NULL CHECK (papel IN ('admin', 'tecnico', 'leitura')),
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS dispositivos (
     ultimo_uso TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS credenciais (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL UNIQUE,
     descricao TEXT NOT NULL DEFAULT '',
     segredo_cifrado TEXT NOT NULL,
@@ -312,7 +312,13 @@ class Banco:
                           args + [uid])
 
     def remover_usuario(self, uid):
+        # O SQLite reaproveita o maior id depois de um DELETE (bancos criados
+        # antes do AUTOINCREMENT): a conta criada em seguida herdaria a
+        # autoria das credenciais do usuário removido. A autoria por id é
+        # desfeita aqui; o nome em 'criado_por' fica como registro.
         with self.transacao() as c:
+            c.execute("UPDATE credenciais SET criado_por_id = NULL "
+                      "WHERE criado_por_id = ?", (uid,))
             c.execute("DELETE FROM usuarios WHERE id = ?", (uid,))
 
     def admins_ativos(self):

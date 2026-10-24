@@ -421,6 +421,8 @@ Continua somente leitura. Instalação, segurança e operação: [`servidor/LEIA
 
 O netsnap, o netdiag e o painel aceitam a variável `NETSNAP_DADOS` para gravar numa pasta fixa (é assim que o servidor os usa); sem ela, nada muda (pasta ao lado do programa ou, sem permissão de escrita, na pasta pessoal).
 
+`NETSNAP_TEMPO_MAX_HOST` (minutos, padrão 45) limita a coleta de um equipamento. Depois de um comando sem resposta o netsnap manda Ctrl+C e limpa o canal; com dois seguidos, encerra a coleta daquele equipamento e o snapshot sai marcado como interrompido.
+
 ## Topologia (netsnap_topologia e netsnap_desenho)
 
 Monta o grafo da rede a partir do snapshot mais recente de cada equipamento, com duas fontes:
@@ -573,7 +575,7 @@ python3 netsnap_ia.py pacote.zip --provedor openai --url http://127.0.0.1:11434/
 
 - **Contextos:** `contextos/` traz contextos-base por plataforma (Junos, RouterOS, Linux, Huawei VRP, Cisco, OLT) e por aplicação detectada no Linux (Wanguard). As skills completas ficam numa pasta privada, fora do repositório, indicada por `--contextos` ou `NETSNAP_CONTEXTOS`; um `junos.md` ou uma pasta `junos/` ali substitui o contexto-base de mesmo nome.
 - **Provedores:** `anthropic`, ou `openai` para qualquer API compatível com `/chat/completions`, inclusive modelos locais (Ollama, LM Studio, vLLM), que não mandam dado para fora da rede.
-- **Segurança:** snapshots coletados com segredos (`sensitive_data: included`) não são enviados. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
+- **Segurança:** só sai snapshot declarado mascarado (`sensitive_data: redacted`). Cada saída de comando vai entre marcadores com um código novo a cada pedido, e o modelo é instruído a tratar o texto do equipamento como dado; a evidência de cada achado é conferida contra o snapshot enviado (trecho que não está lá rebaixa a confiança); comandos destrutivos ou de reinício propostos são retirados; redirecionamento HTTP é recusado, para a chave da API não ir a outro host. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
 - **Validação da resposta:** severidade e categoria fora da lista são normalizadas; achado sem evidência fica com confiança baixa.
 
 Testado com servidores de API simulados; a primeira execução contra a API real fica com você (veja `docs/IMPLANTACAO-NUC.md`).

@@ -168,6 +168,7 @@ tcp_para_testes = sim
 ociosidade_minutos = 30
 [coleta]
 max_execucoes_simultaneas = 2
+permitir_alvos_locais = sim
 """)
         banco = bd.Banco(os.path.join(cls.dados, "netsnap.db"),
                          cf.Cofre(cf.carregar_chave_mestra(chave)))
@@ -294,6 +295,35 @@ max_execucoes_simultaneas = 2
         self.admin.req("POST", f"/api/usuarios/{uid}/alterar", {"ativo": False})
         st, _, _ = leitor.req("GET", "/api/inventario")
         self.assertEqual(st, 401)
+
+    def test_07b_snapshot_sensivel_e_arquivos_da_pasta(self):
+        pasta = os.path.join(self.dados, "snapshots")
+        self.assertTrue(os.path.isdir(pasta))
+        base = ("---\nhost: \"sens\"\nip: \"192.0.2.77\"\nplatform_key: \"linux\"\n"
+                "sensitive_data: \"{}\"\n---\n\n## Configuração\n\n### `x`\n\n```text\nok\n```\n")
+        with open(os.path.join(pasta, "sens_192.0.2.77_20261024_100000.md"), "w") as f:
+            f.write(base.format("included"))
+        with open(os.path.join(pasta, "_debug_20261024_100000.log"), "w") as f:
+            f.write("depuracao")
+        st, _, _ = self.admin.req("POST", "/api/usuarios", {
+            "usuario": "leitor2", "senha": "Leitor2-Temp-2026", "papel": "leitura"})
+        self.assertEqual(st, 200)
+        leitor = Cliente(self.porta)
+        st, r, _, _ = leitor.entrar("leitor2", "Leitor2-Temp-2026", nova="Leitor2-Final-2026")
+        self.assertEqual(st, 200, r)
+        nome = "sens_192.0.2.77_20261024_100000.md"
+        for rota in (f"/api/snapshots/{nome}", f"/api/arquivo/snapshot/{nome}"):
+            st, _, _ = leitor.req("GET", rota)
+            self.assertEqual(st, 403, rota)
+            st, _, _ = self.admin.req("GET", rota)
+            self.assertEqual(st, 200, rota)
+        st, _, _ = self.admin.req("GET", "/api/arquivo/snapshot/_debug_20261024_100000.log")
+        self.assertEqual(st, 400)
+        st, aud, _ = self.admin.req("GET", "/api/auditoria")
+        texto = json.dumps(aud)
+        self.assertIn("snapshot_sensivel_negado", texto)
+        self.assertIn("snapshot_sensivel_lido", texto)
+        os.remove(os.path.join(pasta, nome))
 
     def test_08_bloqueio_distribuido_nao_tranca_dispositivo_conhecido(self):
         st, r, _ = self.admin.req("POST", "/api/usuarios", {

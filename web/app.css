@@ -395,3 +395,14 @@ pre.comandos {
   margin: 6px 0; padding: 8px 10px; background: var(--console); border-radius: 4px;
   font-family: var(--mono); font-size: 12.5px; overflow-x: auto; white-space: pre;
 }
+
+/* ------------------------------------------------------------ papel e diálogo */
+body.papel-leitura .so-tecnico { display: none !important; }
+tr[data-ir]:focus-visible td { background: var(--acao-suave); }
+dialog.dialogo {
+  border: 1px solid var(--linha-forte); border-radius: var(--raio);
+  background: var(--superficie); color: var(--tinta);
+  padding: 18px 22px; width: min(420px, calc(100vw - 32px));
+}
+dialog.dialogo::backdrop { background: rgba(0, 0, 0, .55); }
+dialog.dialogo h2 { margin-top: 0; }

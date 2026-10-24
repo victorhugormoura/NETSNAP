@@ -246,6 +246,118 @@ class TesteCobertura(unittest.TestCase):
         self.assertNotIn("motivo", v[0])
 
 
+    def test_kernel_prefixo_nao_casa_abi_maior(self):
+        # 6.8.0-14 rodando, só o pacote 6.8.0-146 instalado: reinício pendente
+        v, t = self.versoes("Linux srv 6.8.0-14-generic #14-Ubuntu SMP")
+        n.marcar_cobertura_osv(v, t, [{"fonte": "linux", "versao_fonte": "6.8.0-146.146",
+                                       "binario": "linux-image-6.8.0-146-generic",
+                                       "versao": "6.8.0-146.146"}])
+        self.assertFalse(v[0].get("coberto_osv"))
+        self.assertIn("reinício", v[0]["motivo"])
+
+    def test_kernel_debian_pelo_binario(self):
+        v, t = self.versoes("Linux srv 6.1.0-18-amd64 #1 SMP Debian 6.1.76-1")
+        n.marcar_cobertura_osv(v, t, [{"fonte": "linux", "versao_fonte": "6.1.76-1",
+                                       "binario": "linux-image-6.1.0-18-amd64",
+                                       "versao": "6.1.76-1"}])
+        self.assertTrue(v[0].get("coberto_osv"))
+
+    def test_kernel_hwe_do_ubuntu(self):
+        v, t = self.versoes("Linux srv 6.8.0-45-generic #45~22.04.1-Ubuntu SMP")
+        n.marcar_cobertura_osv(v, t, [{"fonte": "linux-signed-hwe-6.8",
+                                       "versao_fonte": "6.8.0-45.45~22.04.1",
+                                       "binario": "linux-image-6.8.0-45-generic",
+                                       "versao": "6.8.0-45.45~22.04.1"}])
+        self.assertTrue(v[0].get("coberto_osv"))
+
+
+class TesteRevisao(unittest.TestCase):
+    def test_routeros_versao_ponto_zero_e_vulneravel(self):
+        cat = next(e for e in n.CATALOGO if e["id"] == "MIKROTRICK")
+        self.assertEqual(n.situacao_por_faixa("7.24", cat["faixas"]), "vulneravel")
+        self.assertEqual(n.situacao_por_faixa("7.24.0", cat["faixas"]), "vulneravel")
+        self.assertEqual(n.situacao_por_faixa("7.24.3", cat["faixas"]), "corrigida")
+
+    def test_comunidade_trivial_mascarada_ainda_e_apontada(self):
+        import netsnap as ns
+        for texto in ("snmp-server community public RO",
+                      "/snmp community\nset [ find default=yes ] name=public"):
+            snap = ns.sanitizar(snapshot("cisco_ios", [("Configuração", "c", texto)]))
+            ids = [a["id"] for a in n.avaliar_config({"platform_key": "cisco_ios"}, snap)]
+            self.assertIn("CFG-SNMP-COMUNIDADE-PADRAO", ids, texto)
+        snap = ns.sanitizar(snapshot("cisco_ios", [("Configuração", "c",
+                                                    "snmp-server community Xk9forte RO")]))
+        ids = [a["id"] for a in n.avaliar_config({"platform_key": "cisco_ios"}, snap)]
+        self.assertNotIn("CFG-SNMP-COMUNIDADE-PADRAO", ids)
+
+    def regras(self, plataforma, blocos):
+        return {a["id"]: a for a in n.avaliar_config({"platform_key": plataforma},
+                                                     snapshot(plataforma, blocos))}
+
+    def test_heuristicas_so_na_configuracao(self):
+        r = self.regras("juniper_junos", [
+            ("Configuração", "show configuration | display set", "set system host-name x"),
+            ("Logs", "show log messages", "UI_CMDLINE_READ_LINE: User 'x', command "
+                                          "'set snmp community public authorization read-only '"),
+        ])
+        self.assertNotIn("CFG-SNMPV1V2", r)
+        self.assertNotIn("CFG-SNMP-COMUNIDADE-PADRAO", r)
+
+    def test_ntp_com_e_sem_autenticacao(self):
+        sem = self.regras("juniper_junos", [("Configuração", "c",
+            "set system ntp server 192.0.2.1\n"
+            "set system login user noc authentication encrypted-password \"x\"")])
+        self.assertIn("CFG-NTP-SEM-AUTENTICACAO", sem)
+        self.assertEqual(sem["CFG-NTP-SEM-AUTENTICACAO"]["evidencia"],
+                         "set system ntp server 192.0.2.1")
+        com = self.regras("juniper_junos", [("Configuração", "c",
+            "set system ntp authentication-key 1 type md5 value \"$9$x\"\n"
+            "set system ntp server 192.0.2.1 key 1\nset system ntp trusted-key 1")])
+        self.assertNotIn("CFG-NTP-SEM-AUTENTICACAO", com)
+
+    def test_telnet_entre_outros_transportes_e_dns_comentado(self):
+        r = self.regras("cisco_ios", [("Configuração", "c",
+                                       "line vty 0 4\n transport input ssh telnet")])
+        self.assertIn("CFG-TELNET", r)
+        r = self.regras("linux", [("Configuração", "c",
+                                   "options {\n recursion yes;\n"
+                                   "// allow-recursion { any; };\n"
+                                   " allow-recursion { 10.0.0.0/8; };\n};")])
+        self.assertNotIn("CFG-DNS-RECURSAO-ABERTA", r)
+
+    def test_routeros_snmpv3_nao_e_v2c(self):
+        v3 = self.regras("mikrotik_routeros", [("Configuração", "/export", (
+            "/snmp community\nset [ find default=yes ] disabled=yes\n"
+            "add authentication-protocol=SHA1 name=nms security=private"))])
+        self.assertNotIn("CFG-SNMPV1V2", v3)
+        v2 = self.regras("mikrotik_routeros", [("Configuração", "/export", (
+            "/snmp community\nadd addresses=10.0.0.0/8 name=ro"))])
+        self.assertIn("CFG-SNMPV1V2", v2)
+
+    def test_junos_set_version_antigo_nao_e_consultado(self):
+        texto = snapshot("juniper_junos", [
+            ("Configuração", "show configuration | display set", "set version 21.4R3-S5.4"),
+            ("Inventário", "show version", "Hostname: mx\nModel: mx204\nJunos: 23.4R2-S5.4"),
+        ])
+        vs = [v for v in n.extrair_versoes({"platform_key": "juniper_junos"}, texto)
+              if v["rotulo"] == "Junos"]
+        self.assertEqual([v["versao"] for v in vs], ["23.4R2-S5.4"])
+
+    def test_junos_evolved(self):
+        texto = snapshot("juniper_junos", [("Inventário", "show version",
+                                            "Junos: 23.2R2-S1.3-EVO\nJunos OS Evolved")])
+        v = next(v for v in n.extrair_versoes({"platform_key": "juniper_junos"}, texto)
+                 if v["rotulo"] == "Junos")
+        self.assertEqual((v["cpe_produto"], v["versao"]), ("junos_os_evolved", "23.2R2-S1.3"))
+
+    def test_cvss4_so_fica_na_tabela(self):
+        r = n.resumir_vuln_osv({"id": "CVE-2026-1", "severity": [
+            {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}],
+            "affected": []}, "Ubuntu:24.04:LTS", "x")
+        self.assertEqual(r["severidade"], "DESCONHECIDA")
+        self.assertTrue(n._relevante_osv(r, {}, {}))
+
+
 class TesteKEVFabricante(unittest.TestCase):
     KEV = {
         "CVE-2018-14847": {"fabricante": "MikroTik", "produto": "RouterOS",
