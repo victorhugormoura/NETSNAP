@@ -1,6 +1,6 @@
 # Cisco IOS / IOS-XE / NX-OS / IOS-XR — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 Contexto-base sem skill dedicada: marque com `[validar em lab]` a sintaxe que
 não estiver confirmada para a família e a versão.
 

@@ -1,6 +1,6 @@
 # MikroTik RouterOS 7 — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 Base: pacote de conhecimento MikroTik do netsnap (RouterOS 7.23.7 long-term
 e 7.24.5 stable, out/2026). Versão completa na pasta privada de contextos.
 

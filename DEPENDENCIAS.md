@@ -84,7 +84,7 @@ Validado lado a lado contra o mesmo servidor: prompt idêntico, saída idêntica
 
 | Item | Situação |
 |---|---|
-| Python 3.8+ | presente em qualquer sistema atual |
+| Python 3.10+ | presente em qualquer sistema atual (o CI testa 3.10 e 3.12) |
 | Cliente OpenSSH | presente por padrão; necessário só para SSH |
 | Pacotes Python | **nenhum** (Netmiko é opcional) |
 | Compilador | **nenhum** |

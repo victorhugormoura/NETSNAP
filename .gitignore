@@ -6,8 +6,7 @@ netdiag_diagnosticos/
 _cve_triagem_*.md
 _cve_triagem_*.csv
 _cve_triagem_*.json
-_ia_analise_*.md
-_ia_analise_*.json
+_ia_analise_*
 _ia_pedidos_*/
 _netcontrol_plano_*.md
 _netcontrol_plano_*.json
@@ -16,6 +15,14 @@ _netalerta_*.json
 _diagnostico_*.md
 _diagnostico_*.json
 _indice_*.md
+_topologia_*.json
+# Exemplos do README que gravam na pasta atual: topologia com nomes e IPs
+rede.json
+rede.pdf
+rede.svg
+estado.json
+# Temporários de gravação interrompida
+*.tmp
 # Log de depuração: traz trechos reais de saída dos equipamentos
 _debug_*.log
 
@@ -46,6 +53,15 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Artefatos do servidor (chave mestra, backups, banco, certificados), caso
+# um caminho de saída aponte para dentro do repositório
+*.nsbk
+netsnap-backup-*
+netsnap-chave-*.json
+*.db
+*.key
+*.pem
 
 # Pacote do servidor gerado por servidor/montar.sh
 servidor/build/

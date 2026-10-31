@@ -99,7 +99,7 @@ Se o equipamento encerrar a sessão no meio da coleta, os comandos restantes nã
 
 ## Requisitos
 
-- Python 3.8+
+- Python 3.10+ (o CI testa 3.10 e 3.12; as dependências atuais do Netmiko exigem 3.9 ou superior)
 - [Netmiko](https://github.com/ktbyers/netmiko)
 - Acesso SSH ou Telnet (leitura) aos hosts
 
@@ -611,9 +611,13 @@ ANTHROPIC_API_KEY=... python3 netsnap_ia.py snapshots/          # Claude (API Me
 python3 netsnap_ia.py pacote.zip --provedor openai --url http://127.0.0.1:11434/v1 --modelo <modelo>
 ```
 
+Opções: `--modelo` (padrão `claude-sonnet-5-5` no `anthropic`), `--url`, `--max-tokens` (padrão 16000), `--saida` (pasta dos resultados; padrão, a pasta de entrada) e `--contextos`.
+
+- **O que sai da rede:** com um provedor externo, vão ao provedor o hostname, os IPs de gerência, a configuração completa e as demais saídas coletadas, com os segredos mascarados. Descrições de interface costumam trazer nomes de clientes e logins de assinantes. Se isso não puder sair, use um modelo local pelo provedor `openai`.
+
 - **Contextos:** `contextos/` traz contextos-base por plataforma (Junos, RouterOS, Linux, Huawei VRP, Cisco, OLT) e por aplicação detectada no Linux (Wanguard). As skills completas ficam numa pasta privada, fora do repositório, indicada por `--contextos` ou `NETSNAP_CONTEXTOS`; um `junos.md` ou uma pasta `junos/` ali substitui o contexto-base de mesmo nome.
 - **Provedores:** `anthropic`, ou `openai` para qualquer API compatível com `/chat/completions`, inclusive modelos locais (Ollama, LM Studio, vLLM), que não mandam dado para fora da rede.
-- **Segurança:** só sai snapshot declarado mascarado (`sensitive_data: redacted`). Cada saída de comando vai entre marcadores com um código novo a cada pedido, e o modelo é instruído a tratar o texto do equipamento como dado; a evidência de cada achado é conferida contra o snapshot enviado (trecho que não está lá rebaixa a confiança); comandos destrutivos ou de reinício propostos são retirados; redirecionamento HTTP é recusado, para a chave da API não ir a outro host. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
+- **Segurança:** só sai snapshot declarado mascarado (`sensitive_data: redacted`), e o texto passa de novo pelo sanitizador do netsnap antes do envio, quando ele está instalado. A URL precisa ser `https`; `http` só é aceito para `127.0.0.1`/`localhost`. Cada saída de comando vai entre marcadores com um código novo a cada pedido, e o modelo é instruído a tratar o texto do equipamento como dado; a evidência de cada achado é conferida contra o snapshot enviado (trecho que não está lá rebaixa a confiança); comandos destrutivos ou de reinício propostos, inclusive nos comandos de reversão, são retirados; o texto livre do modelo é escapado no relatório `.md`; redirecionamento HTTP é recusado, para a chave da API não ir a outro host. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
 - **Validação da resposta:** severidade e categoria fora da lista são normalizadas; achado sem evidência fica com confiança baixa.
 
 Testado com servidores de API simulados; a primeira execução contra a API real fica com você (veja `docs/IMPLANTACAO-NUC.md`).

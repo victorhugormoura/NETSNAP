@@ -1,6 +1,6 @@
 # Contexto geral — análise de snapshot netsnap
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 
 Este é o contexto-base que acompanha qualquer equipamento. Uma pasta privada
 de contextos (`--contextos` ou `NETSNAP_CONTEXTOS`) pode substituir este

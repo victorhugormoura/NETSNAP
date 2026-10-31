@@ -1,6 +1,6 @@
 # Huawei VRP (V5 campus e V8 CloudEngine/NE) — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 Contexto-base sem skill dedicada: a sintaxe proposta deve levar
 `[validar em lab]` sempre que não estiver confirmada para V5 ou V8.
 

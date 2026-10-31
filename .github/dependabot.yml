@@ -1,0 +1,12 @@
+# Atualizações de dependências: pacotes Python do servidor e ações do CI.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/servidor"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

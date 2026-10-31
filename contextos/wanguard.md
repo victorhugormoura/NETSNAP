@@ -1,6 +1,6 @@
 # Wanguard 9 (Andrisoft) — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 
 Referência: guia do Wanguard 9.0 (docs.andrisoft.com/wanguard/latest). A
 configuração operacional fica no MariaDB da Console (`andrisoft`); o

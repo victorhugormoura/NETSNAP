@@ -8,16 +8,28 @@ on:
 permissions:
   contents: read
 
+# Um push novo no mesmo ramo cancela a execução anterior.
+concurrency:
+  group: testes-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   testes:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         python: ["3.10", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Ações fixadas por commit (a tag pode ser movida); o Dependabot as
+      # mantém atualizadas.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          # O token do GITHUB_TOKEN não fica no .git/config enquanto o código
+          # da PR roda (os testes do servidor rodam como root).
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python }}
       - name: Dependências (com conferência de hash)
