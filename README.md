@@ -542,7 +542,7 @@ python3 netcve.py snapshots/ --catalogo extra.json
 | Pacotes de servidores Linux | Todos os pacotes instalados, pelo OSV: Debian, Ubuntu, Rocky Linux, AlmaLinux |
 | Falhas graves (catálogo) | PHP2Shell, MikroTrick, Junos Flowspec (JSA112187): versão + condição de exposição + mitigações encontradas |
 | KEV do fabricante | CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim |
-| Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard: pipe do ExaBGP gravável por todos, Server Commands ligado (`WANsupervisor` sem `-n`), gráficos sem banco de séries |
+| Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão (inclusive net-snmp), SNMP v1/v2c (inclusive `rocommunity`/`com2sec`), HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard: pipe do ExaBGP gravável por todos, Server Commands ligado (`WANsupervisor` sem `-n`), gráficos sem banco de séries |
 
 ### Limitações — leia antes de usar o resultado
 
