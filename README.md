@@ -563,6 +563,20 @@ Trate o relatório como **triagem para priorizar investigação**, não como lau
 
 ---
 
+## netalerta — alertas de mudança e falha grave nova
+
+Compara coletas do netsnap e triagens do netcve entre dois instantes e avisa: configuração que mudou, CVE que entrou no CISA KEV, falha grave do catálogo nova ou agravada. Entrega no terminal e num arquivo; com destino configurado, também por Telegram, webhook (POST JSON) ou e-mail. Só biblioteca padrão. **Não conecta a equipamento**: lê o que o netsnap e o netcve já geraram — é o passo natural depois de uma coleta agendada.
+
+```bash
+python3 netalerta.py snapshots/                      # as duas coletas mais recentes de cada host
+python3 netalerta.py snapshots/ --estado estado.json # guarda o visto; só avisa o que é novo
+python3 netalerta.py snapshots/ --simular            # mostra e grava, não envia
+```
+
+Os destinos vêm de variáveis de ambiente (não da linha de comando, para não ficarem no `ps` nem no histórico): `NETALERTA_TELEGRAM_TOKEN`/`NETALERTA_TELEGRAM_CHAT`, `NETALERTA_WEBHOOK`, e para e-mail `NETALERTA_SMTP` (host:porta), `NETALERTA_SMTP_DE`, `NETALERTA_SMTP_PARA` e, opcionais, `NETALERTA_SMTP_USUARIO`/`NETALERTA_SMTP_SENHA` (STARTTLS). Sem destino, grava só o arquivo. Saída: `_netalerta_<data>.txt` e `.json` (`netalerta/1`).
+
+---
+
 ## netcontrol — planos de mudança (simulação)
 
 Primeira etapa do NETCONTROL. Lê os snapshots, identifica a plataforma de cada equipamento, confere o estado atual e monta o plano na sintaxe daquela plataforma: comandos, verificação, reversão e a forma segura de aplicar (`commit confirmed` no Junos e no IOS-XR, `commit` no VRP V8, Safe Mode no RouterOS). **Nada é aplicado e nenhuma sessão é aberta**: o plano é para revisão humana. Senha e comunidade aparecem como `<SENHA>` e `<COMUNIDADE>`; a aplicação, com o cofre do servidor e auditoria, é a próxima etapa.
@@ -613,6 +627,7 @@ python3 testes/test_netcve.py             # CVSS, versões de pacote, catálogo,
 NETCVE_TESTE_REDE=1 python3 testes/test_netcve.py   # inclui consulta real ao OSV
 python3 testes/test_netsnap_ia.py         # análise por IA contra APIs simuladas
 python3 testes/test_netcontrol.py         # planos de mudança com snapshots sintéticos
+python3 testes/test_netalerta.py          # alertas de mudança e falha nova (HTTP simulado)
 python3 testes/test_coleta_linux.py       # sintaxe de todos os comandos Linux (dash e bash) e agrupamento de logs
 ./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
 ```

@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.0**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netcontrol 0.1.0**, **netsnap servidor 1.0.2**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.0**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netcontrol 0.1.0**, **netalerta 0.1.0**, **netsnap servidor 1.0.2**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -35,6 +35,7 @@ Usos típicos:
 | `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.8+, cliente OpenSSH para SSH |
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
 | `netcve.py` | Triagem de vulnerabilidades dos snapshots: NVD por CPE, OSV para pacotes Linux, CISA KEV, EPSS, catálogo de falhas graves com condição de exposição e heurísticas de configuração; saída MD, CSV e JSON | só biblioteca padrão (certifi opcional) |
+| `netalerta.py` | Alertas de mudança de configuração e de falha grave nova (KEV, catálogo) a partir dos snapshots e triagens; terminal, arquivo, Telegram, webhook ou e-mail; estado para não repetir | só biblioteca padrão |
 | `netcontrol.py` | Planos de mudança por equipamento (usuário só leitura, comunidade SNMP, NTP, desligar Telnet, achados do netsnap_ia) com verificação, reversão e commit confirmado; simulação, nada é aplicado; saída `netcontrol-plano/1` | só biblioteca padrão |
 | `netsnap_ia.py` + `contextos/` | Análise por IA de cada equipamento com contexto Markdown por plataforma; resposta `netanalytic-achados/1` | só biblioteca padrão; API Anthropic ou compatível com OpenAI (inclusive local) |
 | `netsnap_web.py` + `web/` | Painel local no navegador: coleta, execuções ao vivo, snapshots, inventário, comparação, topologia, netcve, netdiag e agendamentos | só biblioteca padrão; coleta e netdiag usam o Netmiko |
