@@ -505,7 +505,7 @@ O `netcve.py` lê os snapshots gerados pelo netsnap, extrai versões de software
 - **NVD (NIST)**, por CPE, para o sistema dos equipamentos e para aplicações;
 - **OSV.dev**, para os pacotes de servidores **Debian, Ubuntu, Rocky Linux e AlmaLinux**, pela versão exata do pacote da distribuição. Isso respeita as correções retroportadas: o PHP 8.3.6 do Ubuntu 24.04 recebe as correções de segurança e continua 8.3.6, e a comparação pela versão upstream erraria;
 - **CISA KEV** (exploração confirmada) e **EPSS** (probabilidade de exploração em 30 dias);
-- um **catálogo de falhas graves** que avalia, além da versão, a configuração que torna o equipamento explorável. Começa com o **PHP2Shell** (CVE-2026-109618/109619: FPM ou mod_php ativo, mitigações no php.ini) e o **MikroTrick** (SSH do RouterOS aberto, bandwidth-server, device-mode `flagged`, conta `ops`). Entradas extras podem vir de um JSON com `--catalogo`.
+- um **catálogo de falhas graves** que avalia, além da versão, a configuração que torna o equipamento explorável. Começa com o **PHP2Shell** (CVE-2026-109618/109619: FPM ou mod_php ativo, mitigações no php.ini) o **MikroTrick** (SSH do RouterOS aberto, bandwidth-server, device-mode `flagged`, conta `ops`) e o **JSA112187 do Junos** (CVE-2026-102178/101990/101948/101949: só aponta com BGP Flowspec configurado; `update-threading` e Flowspec VPN com BMP indicam as variantes; versões comparadas por trem, release e build, com as do Junos OS Evolved à parte). Entradas extras podem vir de um JSON com `--catalogo`.
 
 Gera relatório Markdown e, com `--json`, o mesmo resultado em JSON (`netcve/1`) para painel, API ou análise por IA.
 
@@ -540,7 +540,7 @@ python3 netcve.py snapshots/ --catalogo extra.json
 | Versões de sistema | Junos, Cisco IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, kernel Linux e Huawei SmartAX MA5800 (consultados na NVD); Huawei VRP, SmartAX MA5600 e FiberHome (extraídos e listados, sem consulta — ver limitações) |
 | Versões de aplicação | BIND, OpenSSH, nginx, Apache, PHP (pela NVD só quando não vierem de pacote da distribuição) |
 | Pacotes de servidores Linux | Todos os pacotes instalados, pelo OSV: Debian, Ubuntu, Rocky Linux, AlmaLinux |
-| Falhas graves (catálogo) | PHP2Shell, MikroTrick: versão + condição de exposição + mitigações encontradas |
+| Falhas graves (catálogo) | PHP2Shell, MikroTrick, Junos Flowspec (JSA112187): versão + condição de exposição + mitigações encontradas |
 | KEV do fabricante | CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim |
 | Configuração (heurísticas locais) | Telnet ativo, community SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard: pipe do ExaBGP gravável por todos, Server Commands ligado (`WANsupervisor` sem `-n`), gráficos sem banco de séries |
 

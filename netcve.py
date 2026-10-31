@@ -32,7 +32,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 import os
 import re
@@ -1227,7 +1227,77 @@ CATALOGO = [
         ],
         "verificado_em": "2026-10-22",
     },
+    {
+        "id": "JUNOS-FLOWSPEC-JSA112187",
+        "titulo": "Junos: falhas no rpd com rotas Flowspec (JSA112187) — "
+                  "travamento ou execução de código pelo vizinho BGP",
+        "cves": ["CVE-2026-102178", "CVE-2026-101990", "CVE-2026-101948",
+                 "CVE-2026-101949"],
+        "produto": "Junos",
+        # Versões do Junos não são números em sequência: comparadas por
+        # trem (23.4), release R, serviço S e build (23.4R2-S8.13).
+        "comparar": "junos",
+        "faixas": [
+            ["0.0R0", "23.2R2-S7.7", "vulneravel"],
+            ["23.4R0", "23.4R2-S8.13", "vulneravel"],
+            ["24.2R0", "24.2R2-S5.5", "vulneravel"],
+            ["24.4R0", "24.4R2-S5", "vulneravel"],
+            ["25.2R0", "25.2R2-S2", "vulneravel"],
+            ["25.4R0", "25.4R1-S3", "vulneravel"],
+            ["26.2R0", "26.2R1-S2", "vulneravel"],
+        ],
+        # Junos OS Evolved tem builds próprios no mesmo boletim.
+        "faixas_por_cpe": {"junos_os_evolved": [
+            ["0.0R0", "23.2R2-S7.7", "vulneravel"],
+            ["23.4R0", "23.4R2-S8.11", "vulneravel"],
+            ["24.2R0", "24.2R2-S5.6", "vulneravel"],
+            ["24.4R0", "24.4R2-S5", "vulneravel"],
+            ["25.2R0", "25.2R2-S2", "vulneravel"],
+            ["25.4R0", "25.4R1-S3", "vulneravel"],
+            ["26.2R0", "26.2R1-S2", "vulneravel"],
+        ]},
+        # Sem sessão BGP com família Flowspec o equipamento não é alcançável
+        # por estas falhas: o achado só sai com a exposição confirmada.
+        "exige_exposicao": True,
+        "exposicao": [
+            {"comando": r"show configuration | display set", "efeito": "presente",
+             "padrao": r"(?m)^set (?:logical-systems \S+ )?(?:routing-instances \S+ )?"
+                       r"protocols bgp\b[^\n]*\bfamily (?:inet6?|inet-vpn|inet6-vpn) flow\b[^\n]*",
+             "texto": "BGP com família Flowspec configurada (todas as CVEs do boletim)"},
+            {"comando": r"show configuration | display set", "efeito": "presente",
+             "padrao": r"(?m)^set system processes routing bgp update-threading[^\n]*",
+             "texto": "update-threading habilitado (CVE-2026-102178, CVSS 9.8)"},
+            {"comando": r"show configuration | display set", "efeito": "presente",
+             "padrao": r"(?ms)(?=.*\bfamily inet-vpn flow\b).*?^set routing-options bmp\b[^\n]*",
+             "texto": "Flowspec VPN com BMP rib-out (CVE-2026-101949)"},
+        ],
+        "correcao": "Atualizar para 23.2R2-S7.7, 23.4R2-S8.13, 24.2R2-S5.5, "
+                    "24.4R2-S5, 25.2R2-S2, 25.4R1-S3, 25.4R2, 26.2R1-S2, 26.2R2 "
+                    "ou 26.4R1 (Evolved: os -EVO equivalentes; 23.4R2-S8.11-EVO e "
+                    "24.2R2-S5.6-EVO). O boletim não traz workaround; até lá, "
+                    "Flowspec só com vizinhos confiáveis (o Wanguard, por "
+                    "exemplo), com import policy restrita aos próprios blocos e "
+                    "prefix-limit, e nunca em grupos de trânsito ou IX.",
+        "exploracao": "Publicado em 14/10/2026. O boletim não informa exploração; "
+                      "conferir o CISA KEV na triagem.",
+        "fontes": [
+            "https://supportportal.juniper.net/JSA112187",
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-102178",
+            "https://cyber.gc.ca/en/alerts-advisories/juniper-networks-security-advisory-av26-1043",
+        ],
+        "verificado_em": "2026-10-30",
+    },
 ]
+
+
+def _tupla_junos(texto):
+    """(trem maior, menor, R, S, build) de uma versão Junos: 23.4R2-S8.13 ->
+    (23, 4, 2, 8, 13); 21.2R3.4 -> (21, 2, 3, 0, 4). Trens X e D (23.4X100)
+    não são comparáveis com as faixas R e devolvem None."""
+    m = re.match(r"(?i)(\d+)\.(\d+)R(\d+)(?:-S(\d+))?(?:\.(\d+))?", texto or "")
+    if not m:
+        return None
+    return tuple(int(g or 0) for g in m.groups())
 
 
 def _tupla_versao(texto):
@@ -1240,14 +1310,15 @@ def _tupla_versao(texto):
     return tuple(int(p) for p in (partes[:4] + ["0"] * 4)[:4])
 
 
-def situacao_por_faixa(versao, faixas):
+def situacao_por_faixa(versao, faixas, comparar=None):
     """'vulneravel', 'sem_correcao', 'parcial', 'corrigida' ou None."""
-    v = _tupla_versao(versao)
+    tupla = _tupla_junos if comparar == "junos" else _tupla_versao
+    v = tupla(versao)
     if not v:
         return None
     situacao = "corrigida"
     for de, ate, estado in faixas:
-        if _tupla_versao(de) <= v < _tupla_versao(ate):
+        if tupla(de) <= v < tupla(ate):
             if estado != "parcial":
                 return estado
             situacao = "parcial"
@@ -1259,8 +1330,10 @@ def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
     consultar_osv (ou None se não houve consulta)."""
     achados = []
     for entrada in catalogo or CATALOGO:
-        versao = next((v["versao"] for v in versoes
-                       if v["rotulo"] == entrada["produto"]), None)
+        ver = next((v for v in versoes if v["rotulo"] == entrada["produto"]), None)
+        versao = ver["versao"] if ver else None
+        faixas = (entrada.get("faixas_por_cpe") or {}).get(
+            (ver or {}).get("cpe_produto"), entrada["faixas"])
         situacao, base = None, ""
         padrao_pkg = entrada.get("pacotes_fonte")
         pkgs = [p for p in (pacotes_osv or [])
@@ -1275,7 +1348,7 @@ def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
                     + ("; ".join(f"{n} {v}, corrigido em {c}" for n, v, c in achou)
                        if achou else "versão instalada já corrigida (OSV)"))
         elif versao:
-            situacao = situacao_por_faixa(versao, entrada["faixas"])
+            situacao = situacao_por_faixa(versao, faixas, entrada.get("comparar"))
             base = f"versão {versao}"
             if padrao_pkg:
                 base += (" (versão upstream; se o PHP veio da distribuição, "
@@ -1291,6 +1364,8 @@ def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
             if alvo and re.search(regra["padrao"], alvo):
                 (mitigacoes if regra["efeito"] == "mitiga" else exposicao).append(
                     regra["texto"])
+        if entrada.get("exige_exposicao") and not exposicao:
+            continue
         achados.append({
             "id": entrada["id"],
             "titulo": entrada["titulo"],

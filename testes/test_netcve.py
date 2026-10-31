@@ -358,6 +358,49 @@ class TesteRevisao(unittest.TestCase):
         self.assertTrue(n._relevante_osv(r, {}, {}))
 
 
+class TesteJunosFlowspec(unittest.TestCase):
+    def avaliar(self, versao, config, evo=False):
+        texto = snapshot("juniper_junos", [
+            ("Configuração", "show configuration | display set", config),
+            ("Inventário", "show version",
+             f"Junos: {versao}" + ("\nJunos OS Evolved" if evo else "")),
+        ])
+        meta = {"platform_key": "juniper_junos"}
+        versoes = n.extrair_versoes(meta, texto)
+        return [a for a in n.avaliar_catalogo(meta, texto, versoes, None)
+                if a["id"] == "JUNOS-FLOWSPEC-JSA112187"]
+
+    FLOW = ("set protocols bgp group WANGUARD type internal\n"
+            "set protocols bgp group WANGUARD family inet flow no-validate FS-IN\n"
+            "set system processes routing bgp update-threading")
+
+    def test_versao_junos(self):
+        t = n._tupla_junos
+        self.assertEqual(t("23.4R2-S8.13"), (23, 4, 2, 8, 13))
+        self.assertEqual(t("21.2R3.4"), (21, 2, 3, 0, 4))
+        self.assertIsNone(t("23.4X100-D20"))
+        self.assertTrue(t("23.4R2-S8.5") < t("23.4R2-S8.13"))
+
+    def test_vulneravel_com_flowspec(self):
+        r = self.avaliar("23.4R2-S5.4", self.FLOW)
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["situacao"], "vulneravel")
+        self.assertEqual(len(r[0]["exposicao"]), 2)
+
+    def test_sem_flowspec_nao_aponta(self):
+        self.assertEqual(self.avaliar("23.4R2-S5.4", "set protocols bgp group T type external"), [])
+
+    def test_corrigidas(self):
+        for v in ("23.4R2-S8.13", "25.4R2", "26.4R1", "24.4R2-S5"):
+            self.assertEqual(self.avaliar(v, self.FLOW), [], v)
+        self.assertEqual(len(self.avaliar("26.2R1-S1", self.FLOW)), 1)
+        self.assertEqual(len(self.avaliar("21.4R3-S5.4", self.FLOW)), 1)
+
+    def test_evolved_com_build_proprio(self):
+        self.assertEqual(self.avaliar("23.4R2-S8.11-EVO", self.FLOW, evo=True), [])
+        self.assertEqual(len(self.avaliar("23.4R2-S8.11", self.FLOW)), 1)  # Junos OS: S8.13
+
+
 class TesteKEVFabricante(unittest.TestCase):
     KEV = {
         "CVE-2018-14847": {"fabricante": "MikroTik", "produto": "RouterOS",
