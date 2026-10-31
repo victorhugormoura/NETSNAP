@@ -639,6 +639,20 @@ def versao_ssh() -> tuple:
     return _cache_versao
 
 
+def _exigir_accept_new():
+    """O OpenSSH anterior ao 7.6 (CentOS 7 traz o 7.4) recusa
+    StrictHostKeyChecking=accept-new e não abre conexão alguma. Trocar por
+    'no' aceitaria qualquer chave, inclusive a de um equipamento falso,
+    sem aviso: melhor dizer o motivo e parar."""
+    v = versao_ssh()
+    if v != (0, 0) and v < (7, 6):
+        raise ErroTransporte(
+            f"OpenSSH {v[0]}.{v[1]} não reconhece StrictHostKeyChecking="
+            "accept-new (requer 7.6+), usado para aprender e conferir a chave "
+            "do equipamento. Atualize o cliente OpenSSH ou use "
+            "transporte='netmiko'.")
+
+
 def _args_ssh(host, usuario, porta, com_senha, terminal):
     args = [ssh_disponivel(), terminal, "-p", str(porta)] + opcoes_ssh()
     if com_senha:
@@ -666,6 +680,7 @@ class SessaoSSHPty(_Sessao):
         super().__init__(host, timeout_leitura)
         if not ssh_disponivel():
             raise ErroTransporte("cliente ssh não encontrado no sistema")
+        _exigir_accept_new()
         mestre, escravo = pty.openpty()
         self.fd = mestre
         self.proc = None
@@ -806,6 +821,7 @@ class SessaoSSHAskpass(_Sessao):
         super().__init__(host, timeout_leitura)
         if not ssh_disponivel():
             raise ErroTransporte("cliente ssh não encontrado no sistema")
+        _exigir_accept_new()
         if senha and versao_ssh() < (8, 4) and versao_ssh() != (0, 0):
             # SSH_ASKPASS_REQUIRE=force surgiu no OpenSSH 8.4. Antes disso o
             # cliente pediria a senha no console do operador e a sessão

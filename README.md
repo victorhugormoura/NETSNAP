@@ -91,7 +91,7 @@ Alguns equipamentos exigem uma tecla depois da autenticação — a OLT FiberHom
 
 Como cada tentativa de identificação por Telnet é um login completo, e OLT costuma ter limite baixo de sessões simultâneas e bloqueio por tentativas, o número de perfis testados às cegas é reduzido a dois, com intervalo entre eles. Não identificando, o equipamento entra na fila de escolha manual em vez de acumular tentativas.
 
-Se o equipamento encerrar a sessão no meio da coleta, os comandos restantes não são enviados: o snapshot registra `session_lost: true` e traz uma nota informando que as seções ausentes indicam interrupção, não recurso inexistente.
+Se o equipamento encerrar a sessão no meio da coleta, os comandos restantes não são enviados: o snapshot registra `session_lost: true` e traz uma nota informando que as seções ausentes indicam interrupção, não recurso inexistente. O mesmo vale quando a coleta é interrompida por tempo; o campo `abort_reason` diz o motivo (`session_closed`, `consecutive_timeouts` ou `host_time_limit`), e a nota do relatório acompanha.
 
 **O Telnet transmite usuário, senha e toda a sessão em texto claro.** O menu avisa na seleção, o snapshot registra `transport: telnet` nos metadados, e o documento traz uma nota informando que a sessão que o originou era legível por qualquer sistema no caminho de rede. Use apenas em rede de gerência confiável e prefira SSH onde a plataforma suportar.
 
@@ -326,7 +326,7 @@ Quando a diferença passa de cinco segundos, o resumo mostra as duas medidas: `C
 
 Serviço em falha repete a mesma mensagem centenas de vezes. Num servidor WANGuard real, 285 das 300 linhas coletadas eram o mesmo erro de conexão com o ClickHouse, cada uma arrastando o comando SQL inteiro: 97 KB para dizer uma coisa só.
 
-As seções de log em hosts Linux passam por um filtro que trunca linhas muito longas e agrupa as que têm a mesma assinatura (dígitos normalizados), mesmo intercaladas com outras mensagens: cada uma aparece uma vez, na posição da primeira ocorrência, seguida de `[+35 linha(s) semelhante(s) omitida(s); a última em ago 20 23:12:34]`. Acima de 200 mensagens distintas ficam as mais recentes. No módulo WANGuard, o comando SQL que os `genrrds_*` repetem a cada falha é cortado antes do agrupamento.
+As seções de log em hosts Linux passam por um filtro que trunca linhas muito longas e agrupa as que têm a mesma assinatura (dígitos normalizados), mesmo intercaladas com outras mensagens: cada uma aparece uma vez, na posição da primeira ocorrência, seguida de `[+35 linha(s) semelhante(s) omitida(s); a última em ago 20 23:12:34]`. Acima de 200 mensagens distintas ficam as 200 vistas por último (pela última ocorrência, para que um erro antigo que continua se repetindo não suma), na ordem da primeira ocorrência. No módulo WANGuard, o comando SQL que os `genrrds_*` repetem a cada falha é cortado antes do agrupamento.
 
 ---
 
@@ -421,7 +421,7 @@ Continua somente leitura. Instalação, segurança e operação: [`servidor/LEIA
 
 O netsnap, o netdiag e o painel aceitam a variável `NETSNAP_DADOS` para gravar numa pasta fixa (é assim que o servidor os usa); sem ela, nada muda (pasta ao lado do programa ou, sem permissão de escrita, na pasta pessoal).
 
-`NETSNAP_TEMPO_MAX_HOST` (minutos, padrão 45) limita a coleta de um equipamento. Depois de um comando sem resposta o netsnap manda Ctrl+C e limpa o canal; com dois seguidos, encerra a coleta daquele equipamento e o snapshot sai marcado como interrompido.
+`NETSNAP_TEMPO_MAX_HOST` (minutos, padrão 45) limita a coleta de um equipamento. Depois de um comando sem resposta o netsnap manda Ctrl+C e limpa o canal; com dois seguidos, encerra a coleta daquele equipamento e o snapshot sai marcado como interrompido (`abort_reason`). Valor não inteiro na variável é ignorado com aviso, e vale o padrão.
 
 ## Topologia (netsnap_topologia e netsnap_desenho)
 
@@ -627,7 +627,7 @@ Testado com servidores de API simulados; a primeira execução contra a API real
 ## Testes
 
 ```bash
-python3 testes/test_sanitizar.py          # mascaramento de segredos: 199 casos, falsos positivos e desempenho
+python3 testes/test_sanitizar.py          # mascaramento de segredos: 239 casos, 83 trechos e 366 linhas que devem ficar intactos, e desempenho
 python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sintéticos
 python3 testes/test_netcve.py             # CVSS, versões de pacote, catálogo, KEV por fabricante
 NETCVE_TESTE_REDE=1 python3 testes/test_netcve.py   # inclui consulta real ao OSV

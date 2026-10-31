@@ -266,9 +266,18 @@ def ler_lldpd(texto):
     return vizinhos
 
 
+# No Linux o comando fica gravado com o prefixo do sudo ("sudo -n lldpcli
+# ..."): sem tirá-lo, nenhum formato casava e a vizinhança saía vazia.
+_PREFIXO_SUDO = re.compile(r"^sudo\s+(?:-\S+\s+)*")
+
+
+def _comando_base(comando):
+    return _PREFIXO_SUDO.sub("", comando.lower().strip())
+
+
 def _eh_tabela(comando):
-    c = comando.lower()
-    return "neighbor brief" in c or c.strip() == "show lldp neighbors"
+    c = _comando_base(comando)
+    return "neighbor brief" in c or c == "show lldp neighbors"
 
 
 PADRAO_BLOCO_JUNOS = re.compile(
@@ -276,7 +285,7 @@ PADRAO_BLOCO_JUNOS = re.compile(
 
 
 def vizinhos_do_comando(comando, saida):
-    c = comando.lower().strip()
+    c = _comando_base(comando)
     if "neighbor brief" in c or c == "show lldp neighbors":
         return ler_tabela(saida)
     if c.startswith("display lldp neighbor"):
@@ -402,7 +411,9 @@ def diagnosticar_vizinhanca(tipo, saidas):
             continue
         vs = [v for v in vizinhos_do_comando(cmd, saida) if v["porta_local"]]
         (resumidas if _eh_tabela(cmd) else detalhadas).extend(vs)
-    n = max(len(detalhadas), len(resumidas))
+    # lldpcli e lldpctl listam os mesmos vizinhos: cada um conta uma vez.
+    n = max(len({(porta_canonica(v["porta_local"]), v["dispositivo"])
+                 for v in lista}) for lista in (detalhadas, resumidas))
     ativar = COMO_ATIVAR.get(tipo, {"comandos": [], "nota": ""})
     if n:
         return {"vizinhos": n, "estado": "ok", "motivo": "",
