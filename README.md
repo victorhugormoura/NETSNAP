@@ -563,6 +563,30 @@ Trate o relatório como **triagem para priorizar investigação**, não como lau
 
 ---
 
+## netcontrol — planos de mudança (simulação)
+
+Primeira etapa do NETCONTROL. Lê os snapshots, identifica a plataforma de cada equipamento, confere o estado atual e monta o plano na sintaxe daquela plataforma: comandos, verificação, reversão e a forma segura de aplicar (`commit confirmed` no Junos e no IOS-XR, `commit` no VRP V8, Safe Mode no RouterOS). **Nada é aplicado e nenhuma sessão é aberta**: o plano é para revisão humana. Senha e comunidade aparecem como `<SENHA>` e `<COMUNIDADE>`; a aplicação, com o cofre do servidor e auditoria, é a próxima etapa.
+
+```bash
+python3 netcontrol.py usuario-leitura snapshots/ --usuario noc-ro --rede 10.0.0.0/24
+python3 netcontrol.py snmp-comunidade snapshots/ --rede 10.10.0.0/24
+python3 netcontrol.py ntp snapshots/ --servidor 192.0.2.1 --servidor 192.0.2.2
+python3 netcontrol.py desligar-telnet snapshots/
+python3 netcontrol.py analise snapshots/_ia_analise_<data>.json   # achados do netsnap_ia
+python3 netcontrol.py                                              # pergunta o pedido
+```
+
+| Pedido | Junos | RouterOS | VRP V5/V8 | IOS/IOS-XE | NX-OS | IOS-XR |
+|---|---|---|---|---|---|---|
+| usuário só leitura | classe `read-only`, senha em hash | grupo `read`, preso à rede | `local-user` nível 1 + SSH | privilégio 1 | `network-operator` | `read-only-tg` |
+| comunidade SNMP v2c | `clients` | `addresses` | ACL 2990 | ACL padrão | ACL IPv4 | ACL IPv4 |
+| NTP | ✓ | v6 e v7 | ✓ | ✓ | ✓ | ✓ |
+| desligar Telnet | ✓ | ✓ | ✓ | `transport input ssh` | `no feature telnet` | ✓ |
+
+Equipamento que já está no estado pedido sai como `ja-existe`; FiberHome, SmartAX e Linux ainda não têm modelo (`nao-suportado`). Os modelos foram conferidos na documentação dos fabricantes e não em equipamento: cada plano sai marcado para validar em laboratório. Saída: `_netcontrol_plano_<data>.md` e `.json` (`netcontrol-plano/1`).
+
+---
+
 ## netsnap_ia — análise por IA com contexto por plataforma
 
 O `netsnap_ia.py` manda cada equipamento para um modelo de IA com o contexto da plataforma em Markdown e recebe os achados no formato `netanalytic-achados/1` (evidência citada do snapshot, impacto, comandos propostos e de reversão). Lê um pacote de análise do servidor (`.zip`) ou uma pasta de snapshots; nesse caso usa também a triagem JSON mais recente do netcve (falhas graves, KEV).
@@ -588,6 +612,7 @@ python3 testes/test_topologia.py          # enlaces LLDP/L3 com snapshots sinté
 python3 testes/test_netcve.py             # CVSS, versões de pacote, catálogo, KEV por fabricante
 NETCVE_TESTE_REDE=1 python3 testes/test_netcve.py   # inclui consulta real ao OSV
 python3 testes/test_netsnap_ia.py         # análise por IA contra APIs simuladas
+python3 testes/test_netcontrol.py         # planos de mudança com snapshots sintéticos
 python3 testes/test_coleta_linux.py       # sintaxe de todos os comandos Linux (dash e bash) e agrupamento de logs
 ./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
 ```
