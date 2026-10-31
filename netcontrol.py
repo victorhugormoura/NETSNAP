@@ -42,7 +42,7 @@ from datetime import datetime
 
 import netsnap_md as md
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 FORMATO = "netcontrol-plano/1"
 SENHA = "<SENHA>"
 COMUNIDADE = "<COMUNIDADE>"

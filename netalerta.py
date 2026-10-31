@@ -55,7 +55,7 @@ try:
 except Exception:
     _sanitizar = None
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 FORMATO = "netalerta/1"
 GRAVIDADE = {"critica": 3, "alta": 2, "media": 1, "info": 0}
 TIMEOUT = 15
