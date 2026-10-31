@@ -23,7 +23,7 @@ jobs:
       - name: Dependências (com conferência de hash)
         run: python -m pip install --require-hashes -r servidor/requirements.lock
       - name: Núcleo compila
-        run: python -m py_compile netsnap*.py netdiag.py netcve.py servidor/*.py
+        run: python -m py_compile netsnap*.py netdiag.py netcve.py netcontrol.py servidor/*.py
       - name: Sanitização e topologia
         run: |
           python -I testes/test_sanitizar.py
@@ -33,6 +33,7 @@ jobs:
         run: |
           python -I testes/test_netcve.py
           python -I testes/test_netsnap_ia.py
+          python -I testes/test_netcontrol.py
       - name: Pacote do servidor
         run: ./servidor/montar.sh --zip
       - name: Servidor (cofre, banco, agenda)
