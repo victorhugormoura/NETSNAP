@@ -1,6 +1,6 @@
 # Implantação numa máquina Windows 11 (NUC) com Claude Code
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 
 Cenário: uma VM ou máquina Windows 11 que alcança as redes de gerência dos
 clientes, onde rodam as coletas, a triagem de vulnerabilidades e a análise por

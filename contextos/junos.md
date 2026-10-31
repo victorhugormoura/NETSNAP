@@ -1,6 +1,6 @@
 # Juniper Junos (linha MX) — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 Base: skill Juniper/Junos para ISP (out/2026). Versão completa na pasta
 privada de contextos.
 

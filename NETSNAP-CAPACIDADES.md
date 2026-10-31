@@ -31,8 +31,8 @@ Usos típicos:
 
 | Arquivo | Função | Dependências |
 |---|---|---|
-| `netsnap.py` | Coletor principal (menu interativo e modo lote) | Python 3.8+, Netmiko |
-| `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.8+, cliente OpenSSH para SSH |
+| `netsnap.py` | Coletor principal (menu interativo e modo lote) | Python 3.10+, Netmiko |
+| `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.10+, cliente OpenSSH para SSH |
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
 | `netcve.py` | Triagem de vulnerabilidades dos snapshots: NVD por CPE, OSV para pacotes Linux, CISA KEV, EPSS, catálogo de falhas graves com condição de exposição e heurísticas de configuração; saída MD, CSV e JSON | só biblioteca padrão (certifi opcional) |
 | `netalerta.py` | Alertas de mudança de configuração e de falha grave nova (KEV, catálogo) a partir dos snapshots e triagens; terminal, arquivo, Telegram, webhook ou e-mail; estado para não repetir | só biblioteca padrão |
@@ -280,7 +280,7 @@ python3 netsnap_ia.py <pacote.zip | pasta> [--provedor anthropic|openai] [--mode
                       [--contextos PASTA | NETSNAP_CONTEXTOS] [--saida PASTA] [--simular]
 ```
 
-Um pedido por equipamento: instruções fixas + contexto da plataforma (`geral` + `junos`, `mikrotik`, `huawei-vrp`, `olt`, `cisco` ou `linux`, mais `wanguard` quando o módulo foi detectado; a pasta privada substitui o contexto-base de mesmo nome, arquivo `.md` ou pasta com vários `.md`, até 150 mil caracteres), resumo do equipamento (do pacote do servidor ou da triagem JSON do netcve), diferença de configuração e o snapshot cortado por seção (120 mil caracteres, configuração com o maior peso). Dentro da seção o corte é por comando: saídas pequenas ficam inteiras e as grandes são encurtadas por igual, para que os módulos de aplicação, que vêm depois dos comandos do sistema, não sejam os primeiros a sumir. No `anthropic`, o bloco de sistema vai com `cache_control` para cache entre equipamentos da mesma plataforma. Snapshot com `sensitive_data: included` não é enviado. A resposta é validada (severidade e categoria normalizadas; achado sem evidência fica com confiança baixa) e gravada em `_ia_analise_<ts>.json` (`netanalytic-achados/1`) e `.md`. `--simular` grava os pedidos em `_ia_pedidos_<ts>/` sem chamar a API.
+Um pedido por equipamento: instruções fixas + contexto da plataforma (`geral` + `junos`, `mikrotik`, `huawei-vrp`, `olt`, `cisco` ou `linux`, mais `wanguard` quando o módulo foi detectado; a pasta privada substitui o contexto-base de mesmo nome, arquivo `.md` ou pasta com vários `.md`, até 150 mil caracteres), resumo do equipamento (do pacote do servidor ou da triagem JSON do netcve), diferença de configuração e o snapshot cortado por seção (120 mil caracteres, configuração com o maior peso). Dentro da seção o corte é por comando: saídas pequenas ficam inteiras e as grandes são encurtadas por igual, para que os módulos de aplicação, que vêm depois dos comandos do sistema, não sejam os primeiros a sumir. No `anthropic`, o bloco de sistema vai com `cache_control` para cache entre equipamentos da mesma plataforma. Só é enviado snapshot com `sensitive_data: redacted` (sem o campo, também não), e o texto passa de novo pelo sanitizador antes do envio quando o netsnap está instalado. A resposta é validada (severidade e categoria normalizadas; achado sem evidência fica com confiança baixa) e gravada em `_ia_analise_<ts>.json` (`netanalytic-achados/1`) e `.md`. `--simular` grava os pedidos em `_ia_pedidos_<ts>/` sem chamar a API.
 
 ### Painel web (netsnap_web)
 

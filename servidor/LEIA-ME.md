@@ -57,10 +57,10 @@ O pacote `netsnap-servidor-<versão>.zip` fica anexado em cada *release* do repo
 ./servidor/montar.sh --zip      # gera servidor/dist/netsnap-servidor-<versão>.zip e mostra o sha256
 ```
 
-O mesmo commit gera sempre o mesmo zip, então o SHA-256 da release pode ser conferido montando de novo. No servidor:
+O mesmo commit gera sempre o mesmo zip (ordem, datas e permissões fixas), então o SHA-256 pode ser conferido montando de novo a partir do mesmo commit em outra máquina. No servidor:
 
 ```bash
-sha256sum netsnap-servidor-1.0.2.zip   # compare com o publicado
+sha256sum netsnap-servidor-1.0.2.zip   # compare com o sha256 mostrado pelo montar.sh
 unzip netsnap-servidor-1.0.2.zip
 cd netsnap-servidor
 sudo ./instalar.sh
@@ -302,7 +302,7 @@ Depois de editar: `sudo systemctl restart netsnap-servidor`. Nomes e porta públ
 ## 10. Testado e não testado
 
 **Testado:**
-- Testes automatizados: cofre e banco; API completa contra equipamentos simulados, incluindo login em etapas, TOTP com recuperação, papéis, bloqueio, CSRF, Host, cofre, coleta, agendamentos, pacote e auditoria; cálculo das próximas execuções e retenção. Rodaram em Python 3.10 e 3.13.
+- Testes automatizados: cofre e banco; API completa contra equipamentos simulados, incluindo login em etapas, TOTP com recuperação, papéis, bloqueio, CSRF, Host, cofre, coleta, agendamentos, pacote e auditoria; cálculo das próximas execuções e retenção. Rodam no CI em Python 3.10 e 3.12 e foram conferidos também em 3.13.
 - Dependências instaladas pelo arquivo com hash em Python 3.10, 3.11 e 3.12, com pip e uv.
 - Instalador em Ubuntu 24.04, com Nginx 1.24 e Apache 2.4.58 reais e `systemd-creds` real, cobrindo:
   - instalação nova, retomada após falha, troca de Nginx para Apache com porta 8443 e restrição por rede, atualização, desinstalação mantendo dados e reinstalação;

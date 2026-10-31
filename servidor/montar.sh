@@ -37,8 +37,12 @@ cp "$REPO/LICENSE" "$DEST/"
 for f in instalar.sh desinstalar.sh LEIA-ME.md requirements.lock VERSAO; do
   cp "$AQUI/$f" "$DEST/"
 done
-chmod 755 "$DEST"/*.sh
 find "$DEST" -name '__pycache__' -prune -exec rm -rf {} +
+# Permissões fixas: com umask diferente (022 ou 077) o zip saía com outro
+# sha256 a partir do mesmo commit.
+find "$DEST" -type d -exec chmod 755 {} +
+find "$DEST" -type f -exec chmod 644 {} +
+chmod 755 "$DEST"/*.sh
 
 if [ "${1:-}" = "--zip" ]; then
   mkdir -p "$AQUI/dist"

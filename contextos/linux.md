@@ -1,6 +1,6 @@
 # Servidor Linux de provedor — checklist de análise
 
-Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
+Infinity Consulting - Victor Hugo R. Moura - victorhugormoura@gmail.com
 
 ## Pacotes e vulnerabilidades
 
