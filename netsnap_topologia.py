@@ -40,7 +40,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import ipaddress
 import json

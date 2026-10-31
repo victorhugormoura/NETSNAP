@@ -32,7 +32,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 import os
 import re

@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.1**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netcontrol 0.1.0**, **netalerta 0.1.0**, **netsnap servidor 1.0.2**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.2**, netsnap_transporte 1.1.3, netdiag 1.1.3, **netcve 0.5.2**, **painel netsnap_web 0.4.2**, netsnap_topologia 1.1.1, netsnap_desenho 1.0.0, netsnap_md 1.0.3, **netsnap_ia 0.1.2**, **netcontrol 0.1.1**, **netalerta 0.1.1**, **netsnap servidor 1.0.3**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -175,7 +175,7 @@ Estrutura:
 
 ````markdown
 ---
-netsnap_version: "1.16.1"
+netsnap_version: "1.18.2"
 host: "MX204-BORDA"
 ip: "203.0.113.200"
 platform_key: "juniper_junos"

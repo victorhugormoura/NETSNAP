@@ -29,7 +29,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 import argparse
 import json
