@@ -148,6 +148,10 @@ class ErroBanco(Exception):
     pass
 
 
+class ErroUltimoAdmin(ErroBanco):
+    """A alteração deixaria o sistema sem administrador ativo."""
+
+
 class Banco:
     def __init__(self, caminho, cofre):
         self.caminho = caminho
@@ -308,8 +312,10 @@ class Banco:
             args.append(int(bool(v)) if k == "ativo" else v)
         if sets:
             with self.transacao() as c:
+                antes = self._contar_admins(c)
                 c.execute(f"UPDATE usuarios SET {', '.join(sets)} WHERE id = ?",
                           args + [uid])
+                self._exigir_admin(c, antes)
 
     def remover_usuario(self, uid):
         # O SQLite reaproveita o maior id depois de um DELETE (bancos criados
@@ -317,9 +323,26 @@ class Banco:
         # autoria das credenciais do usuário removido. A autoria por id é
         # desfeita aqui; o nome em 'criado_por' fica como registro.
         with self.transacao() as c:
+            antes = self._contar_admins(c)
             c.execute("UPDATE credenciais SET criado_por_id = NULL "
                       "WHERE criado_por_id = ?", (uid,))
             c.execute("DELETE FROM usuarios WHERE id = ?", (uid,))
+            self._exigir_admin(c, antes)
+
+    @staticmethod
+    def _contar_admins(c):
+        return c.execute("SELECT COUNT(*) FROM usuarios WHERE papel = 'admin' "
+                         "AND ativo = 1").fetchone()[0]
+
+    @classmethod
+    def _exigir_admin(cls, c, antes):
+        # Conferido dentro da própria transação (BEGIN IMMEDIATE): dois
+        # administradores rebaixando um ao outro ao mesmo tempo, pelo painel
+        # ou pelo netsnapctl, não deixam o sistema sem nenhum. Banco que
+        # ainda não tem administrador (instalação em curso) não é afetado.
+        if antes and not cls._contar_admins(c):
+            raise ErroUltimoAdmin("a alteração deixaria o sistema sem "
+                                  "administrador ativo")
 
     def admins_ativos(self):
         r = self.um("SELECT COUNT(*) AS n FROM usuarios WHERE papel = 'admin' "

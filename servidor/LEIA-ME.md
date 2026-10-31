@@ -45,7 +45,7 @@ Continua somente leitura: nenhum comando altera os equipamentos.
 - Acesso de root e internet durante a instalação (pacotes do sistema e do PyPI).
 - Do servidor até os equipamentos: SSH (ou Telnet) e ICMP liberados, como numa coleta normal.
 - Até os técnicos: a porta HTTPS escolhida, padrão 443. Para Let's Encrypt, também a porta 80 aberta para a internet e um nome DNS público.
-- Hardware: 2 vCPU e 2 GB de RAM atendem dezenas de equipamentos por execução. Cada login usa 128 MB por alguns décimos de segundo (scrypt), e no máximo dois logins são calculados ao mesmo tempo. Calcule o disco pela retenção: um snapshot completo tem de 50 KB a alguns MB.
+- Hardware: 2 vCPU e 2 GB de RAM atendem dezenas de equipamentos por execução. Cada login usa 128 MB por alguns décimos de segundo (scrypt), e no máximo dois logins são calculados ao mesmo tempo (um por IP). Calcule o disco pela retenção: um snapshot completo tem de 50 KB a alguns MB.
 
 ---
 
@@ -93,7 +93,7 @@ Se algo falhar no meio, corrija e rode o instalador de novo: ele detecta a insta
 
 ## 4. Primeiro acesso dos técnicos
 
-1. Com a CA interna, instale a CA no computador do técnico. Ela pode ser baixada pelo link na tela de login ou em `/etc/netsnap/pki/ca.crt`, e a impressão SHA-256 aparece no fim da instalação e em `netsnapctl status`.
+1. Com a CA interna, instale a CA no computador do técnico. Ela pode ser baixada pelo link na tela de login ou em `/etc/netsnap/pki/ca.crt`. Antes de instalar, compare a impressão SHA-256 do arquivo baixado com a que o administrador passou por outro canal (ela aparece no fim da instalação e em `netsnapctl status`): a tela de login mostra a impressão servida, mas, se a conexão estiver interceptada, essa também pode ser falsa. Para ver o SHA-256 do arquivo: `sha256sum` ou `openssl x509 -in ca.crt -noout -fingerprint -sha256` no Linux e no macOS, `certutil -hashfile ca.crt SHA256` no Windows (a janela de certificado do Windows mostra só o SHA-1).
    - **Windows:** `certmgr.msc` → *Autoridades de Certificação Raiz Confiáveis* → *Certificados* → *Todas as tarefas* → *Importar*. Chrome e Edge passam a confiar.
    - **Firefox:** *Configurações* → *Privacidade e Segurança* → *Certificados* → *Ver certificados* → *Autoridades* → *Importar* → marque "identificar sites".
    - **Linux:** `sudo cp netsnap-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`.
@@ -112,10 +112,11 @@ Se algo falhar no meio, corrija e rode o instalador de novo: ele detecta a insta
 | Coletar, diagnosticar, agendar | | sim | sim |
 | Usar o cofre e guardar credenciais | | sim | sim |
 | Alterar ou remover a credencial de outra pessoa | | | sim |
+| Desligar a verificação TLS das bases de CVE | | | sim |
 | Usuários, auditoria, remover pacotes | | | sim |
 
 Senha: 12 ou mais caracteres misturando três tipos (minúsculas, maiúsculas, números, símbolos), ou uma frase com 16 ou mais. Há dois bloqueios:
-- **Conta + origem:** cinco erros seguidos (senha ou código) vindos do mesmo IP, ou da mesma /64 em IPv6, bloqueiam aquela conta para aquela origem por 15 minutos, dobrando a cada novo bloqueio até 24 horas. Quem erra de outro lugar não tranca o dono da conta.
+- **Conta + origem:** cinco erros seguidos (senha ou código) vindos do mesmo IP, ou da mesma /64 em IPv6, bloqueiam aquela conta para aquela origem por 15 minutos, dobrando a cada novo bloqueio até 24 horas. Quem erra de outro lugar não tranca o dono da conta, e erros de um navegador desconhecido na mesma saída de NAT/VPN não trancam o navegador já conhecido do dono.
 - **Conta inteira:** 30 erros de origens variadas bloqueiam a conta por 15 minutos, sem acumular. Esse bloqueio não vale para um navegador onde o usuário já entrou com sucesso (cookie de dispositivo, 180 dias). Quem tenta trancar o administrador de fora não o impede de entrar do computador de sempre.
 
 O administrador desbloqueia em **Usuários**. A sessão expira após 30 minutos sem uso ou 12 horas no total (ajustável).
@@ -190,7 +191,7 @@ Para ver o log: `journalctl -u netsnap-servidor -f`. Cada requisição aparece c
 
 ## 7. Segurança: o que protege o quê
 
-**Chave-mestra (256 bits).** Ela nunca é gravada em claro no espaço do serviço. Em systemd 250 ou mais novo (Debian 12, Ubuntu 24.04), fica selada pelo `systemd-creds`. Com TPM2 presente, ela fica atrelada ao TPM desta máquina; sem TPM2, à chave do host em `/var/lib/systemd/credential.secret`. No Ubuntu 22.04 (systemd 249) é um arquivo legível só pelo root. Nos dois casos o systemd a entrega ao serviço num diretório em memória (`LoadCredential`), e o serviço nunca lê `/etc/netsnap/credenciais`.
+**Chave-mestra (256 bits).** Ela nunca é gravada em claro no espaço do serviço. Em systemd 250 ou mais novo (Debian 12, Ubuntu 24.04), fica selada pelo `systemd-creds`. Com TPM2 presente, ela fica atrelada ao TPM desta máquina; sem TPM2, à chave do host em `/var/lib/systemd/credential.secret`. No Ubuntu 22.04 (systemd 249) é um arquivo legível só pelo root. Nos dois casos o systemd a entrega ao serviço num diretório em memória (`LoadCredential`), e o serviço nunca lê `/etc/netsnap/credenciais`. Ressalva: o processo de coleta, que interpreta a saída dos equipamentos, roda com o mesmo usuário do serviço e conseguiria ler esse diretório e o banco. Isolá-lo exige um usuário à parte para a coleta (segunda unidade sem `LoadCredential`), ainda não implementado.
 
 **Cofre.** Usa AES-256-GCM com nonce aleatório e contexto autenticado. Copiar a senha cifrada de uma credencial para outra não funciona: a decifração falha. Usuário e senha do equipamento ficam cifrados juntos.
 
@@ -212,7 +213,8 @@ Para ver o log: `journalctl -u netsnap-servidor -f`. Cada requisição aparece c
   - no Nginx: 30 por minuto por IP, rajada de 20;
   - no serviço: 60 a cada 5 minutos por IP (por /64 em IPv6);
   - bloqueios por conta+origem e por conta (seção 4);
-  - no máximo dois cálculos de senha ao mesmo tempo, com resposta 503 em vez de fila infinita.
+  - no máximo dois cálculos de senha ao mesmo tempo e um por IP: a segunda tentativa simultânea do mesmo IP recebe 429, e o excesso geral, 503, em vez de fila infinita;
+  - no Apache não há limite equivalente ao do Nginx: valem os do serviço.
 - Restrição por rede (`allow`/`Require ip`) no proxy, opcional.
 
 **Processo.** O systemd isola o serviço:
@@ -224,7 +226,7 @@ As senhas vão ao processo de coleta pela entrada padrão, nunca por argumento n
 **Chaves SSH dos equipamentos.** A primeira coleta registra a chave em `/var/lib/netsnap/.netsnap_known_hosts`. Se a chave mudar depois, a conexão é recusada antes de enviar a senha.
 
 **Auditoria.** Registra:
-- logins, falhas e bloqueios;
+- logins, falhas e bloqueios (nome de usuário inexistente fica mascarado: dois caracteres, tamanho e um resumo, para uma senha digitada no campo errado não ir para o registro);
 - uso de códigos de recuperação;
 - usuários, credenciais, coletas, agendamentos e downloads.
 
@@ -292,7 +294,7 @@ Depois de editar: `sudo systemctl restart netsnap-servidor`. Nomes e porta públ
 | Navegador diz "certificado não confiável" | CA interna não instalada no computador (seção 4), ou o nome digitado não está na lista de nomes |
 | "Host não permitido" (421) | o endereço usado não está em `nomes`: inclua pelo instalador (*Refazer a configuração*) |
 | Código do autenticador sempre inválido | relógio do celular ou do servidor fora de hora: `timedatectl` e NTP. São aceitos 30 s de diferença |
-| Todos os hosts "sem resposta ICMP" | ping sem permissão para o serviço: o netsnap testa o ping no loopback e, se falhar, pula a varredura e tenta todos. Confira `sysctl net.ipv4.ping_group_range` (precisa incluir o grupo `netsnap`; o instalador oferece liberar) |
+| Todos os hosts "sem resposta ICMP" | ping sem permissão para o serviço: o netsnap testa o ping no loopback e, se falhar, pula a varredura e tenta todos. Confira `sysctl net.ipv4.ping_group_range` (precisa incluir o grupo `netsnap`; o instalador oferece liberar só para esse grupo) |
 | "a chave SSH do equipamento é diferente" | o equipamento foi trocado ou teve a chave refeita, ou há interceptação. Confirme e apague a linha dele em `/var/lib/netsnap/.netsnap_known_hosts` |
 | Serviço não sobe: "a chave-mestra carregada não é a que criou este banco" | banco restaurado sem a chave dele: `netsnapctl chave importar` com a cópia correspondente |
 | Let's Encrypt falha | nome não aponta para o servidor, ou a porta 80 está fechada para a internet. Use a CA interna em rede fechada |
