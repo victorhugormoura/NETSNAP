@@ -588,18 +588,18 @@ python3 netcontrol.py usuario-leitura snapshots/ --usuario noc-ro --rede 10.0.0.
 python3 netcontrol.py snmp-comunidade snapshots/ --rede 10.10.0.0/24
 python3 netcontrol.py ntp snapshots/ --servidor 192.0.2.1 --servidor 192.0.2.2
 python3 netcontrol.py desligar-telnet snapshots/
-python3 netcontrol.py analise snapshots/_ia_analise_<data>.json   # achados do netsnap_ia
+python3 netcontrol.py analise snapshots/_ia_analise_<data>.json   # achados do netsnap_ia, com os comandos reconferidos
 python3 netcontrol.py                                              # pergunta o pedido
 ```
 
 | Pedido | Junos | RouterOS | VRP V5/V8 | IOS/IOS-XE | NX-OS | IOS-XR |
 |---|---|---|---|---|---|---|
 | usuário só leitura | classe `read-only`, senha em hash | grupo `read`, preso à rede | `local-user` nível 1 + SSH | privilégio 1 | `network-operator` | `read-only-tg` |
-| comunidade SNMP v2c | `clients` | `addresses` | ACL 2990 | ACL padrão | ACL IPv4 | ACL IPv4 |
-| NTP | ✓ | v6 e v7 | ✓ | ✓ | ✓ | ✓ |
-| desligar Telnet | ✓ | ✓ | ✓ | `transport input ssh` | `no feature telnet` | ✓ |
+| comunidade SNMP v2c | `clients` | `addresses` | ACL 2990 (rede IPv6: revisar) | ACL padrão (rede IPv6: revisar) | ACL IPv4 (rede IPv6: revisar) | ACL IPv4 (rede IPv6: revisar) |
+| NTP | ✓ | v6 (mantém os atuais; só 2 posições) e v7 | ✓ | ✓ | ✓ | ✓ |
+| desligar Telnet | ✓ | ✓ | ✓ | `transport input` de cada bloco `line vty`, revertido ao original | `no feature telnet` | por linha capturada, inclusive VRF |
 
-Equipamento que já está no estado pedido sai como `ja-existe`; FiberHome, SmartAX e Linux ainda não têm modelo (`nao-suportado`). Os modelos foram conferidos na documentação dos fabricantes e não em equipamento: cada plano sai marcado para validar em laboratório. Saída: `_netcontrol_plano_<data>.md` e `.json` (`netcontrol-plano/1`).
+Equipamento que já está no estado pedido sai como `ja-existe`. Sai como `revisar`, com o motivo, quando o plano não pode ser montado com segurança: snapshot sem a seção de configuração, conta conhecida (`admin`, `root`, `administrator`), equipamento coletado por Telnet ou IOS sem sinal de SSH (desligar o Telnet trancaria o acesso), servidores NTP que não cabem, e itens de análise que mexem no caminho de gerência (rota padrão, interface, VTY/SSH, AAA, filtros), não têm reversão ou têm confiança baixa — comandos destrutivos são retirados, inclusive da reversão; FiberHome, SmartAX e Linux ainda não têm modelo (`nao-suportado`). Os modelos foram conferidos na documentação dos fabricantes e não em equipamento: cada plano sai marcado para validar em laboratório. Saída: `_netcontrol_plano_<data>.md` e `.json` (`netcontrol-plano/1`).
 
 ---
 
