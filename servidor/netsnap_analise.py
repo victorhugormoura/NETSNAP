@@ -145,8 +145,9 @@ def snapshot_anterior(caminho, meta, pasta):
         m = md.ler_metadados(c)
         if (m.get("host"), m.get("ip")) != chave:
             continue
-        if m.get("sensitive_data") == "included":
-            # Coleta feita com segredos em claro: o diff os levaria ao pacote.
+        if m.get("sensitive_data") != "redacted":
+            # Só coleta declarada mascarada entra no diff: com segredos em
+            # claro, ou sem o campo, o diff os levaria ao pacote.
             continue
         d = m.get("collected_at") or ""
         if d < data and (melhor is None or d > melhor[0]):

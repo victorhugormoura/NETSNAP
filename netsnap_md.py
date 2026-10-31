@@ -65,10 +65,16 @@ def _valor(bruto):
     return str(v) if not isinstance(v, str) else v
 
 
+CAMPOS_TEXTO = ("host", "ip", "platform_key", "platform_name", "vendor",
+                "collected_at", "sensitive_data", "transport")
+
+
 def ler_metadados(caminho: str) -> dict:
     """Lê apenas o front-matter YAML (cada valor é JSON válido)."""
     meta = {}
-    with open(caminho, "r", encoding="utf-8", errors="replace") as f:
+    # utf-8-sig: um snapshot salvo de novo pelo Bloco de Notas ganha BOM, e o
+    # cabeçalho deixaria de ser reconhecido.
+    with open(caminho, "r", encoding="utf-8-sig", errors="replace") as f:
         primeira = f.readline()
         if primeira.strip() != "---":
             return meta
@@ -79,6 +85,11 @@ def ler_metadados(caminho: str) -> dict:
             if not sep:
                 continue
             meta[chave.strip()] = _valor(valor.strip())
+    # Campos de identificação são sempre texto: um arquivo editado com lista
+    # ou número em 'host' derrubaria a topologia e o inventário da pasta.
+    for chave in CAMPOS_TEXTO:
+        if chave in meta and not isinstance(meta[chave], str):
+            meta[chave] = "" if meta[chave] is None else str(meta[chave])
     return meta
 
 
@@ -91,7 +102,7 @@ def ler_snapshot(caminho: str) -> dict:
       secoes   [{titulo, chave, modulo, comandos: [{comando, saida, vazio,
                retorno}]}] — saida é None quando o comando não teve saída útil
     """
-    with open(caminho, "r", encoding="utf-8", errors="replace") as f:
+    with open(caminho, "r", encoding="utf-8-sig", errors="replace") as f:
         linhas = f.read().split("\n")
 
     meta, i = {}, 0
@@ -103,6 +114,9 @@ def ler_snapshot(caminho: str) -> dict:
                 meta[chave.strip()] = _valor(valor.strip())
             i += 1
         i += 1
+    for chave in CAMPOS_TEXTO:
+        if chave in meta and not isinstance(meta[chave], str):
+            meta[chave] = "" if meta[chave] is None else str(meta[chave])
 
     avisos, secoes = [], []
     atual, comando, cerca, buffer = None, None, None, []
