@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.17.2**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.4.1**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netsnap servidor 1.0.2**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.0**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netsnap servidor 1.0.2**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -132,16 +132,16 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; um
 
 | Chave (`platform_key`) | Plataforma | Acesso | Observações |
 |---|---|---|---|
-| `juniper_junos` | Juniper MX (Junos) | SSH, Telnet | `display set`; em BNG, contagem de sessões em vez de listar assinantes; `show interfaces extensive` retirado (52 s/host) |
+| `juniper_junos` | Juniper MX (Junos) | SSH, Telnet | `display set`; em BNG, contagem de sessões em vez de listar assinantes; `show interfaces extensive` retirado (52 s/host); FPC e folga de memória por placa, pools de NAT (CGNAT) e associações NTP |
 | `huawei` | Huawei VRP V5 (S5700, S6720, S6730, S9700) | SSH, Telnet | |
-| `huawei_ce` | Huawei VRP V8 (CE6800/CE6860/CE8800, NE) | SSH, Telnet | driver Netmiko `huawei_vrpv8` |
+| `huawei_ce` | Huawei VRP V8 (CE6800/CE6860/CE8800, NE) | SSH, Telnet | driver Netmiko `huawei_vrpv8`; em NE8000/NE40E como BNG, usuários online e pools (`[validar em equipamento]`) |
 | `huawei_smartax` | Huawei SmartAX (OLT MA5600/MA5800) | SSH, Telnet | `enable` antes da leitura |
 | `fiberhome` | FiberHome OLT (AN551x, AN6000) | SSH, Telnet | sem driver Netmiko nativo: leitura por temporização; `enable` + `config` exigidos pela CLI; lista ampla de comandos candidatos |
 | `cisco_nxos` | Cisco Nexus (NX-OS) | SSH, Telnet | |
 | `cisco_ios` | Cisco IOS/IOS-XE (ASR 1000) | SSH, Telnet | |
 | `cisco_xr` | Cisco IOS-XR (ASR 9000) | SSH, Telnet | |
-| `mikrotik_routeros` | MikroTik RouterOS v6/v7 | SSH, Telnet | `/export hide-sensitive` com recuo para `/export`; `/ip service print` para serviços de gerência |
-| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha |
+| `mikrotik_routeros` | MikroTik RouterOS v6/v7 | SSH, Telnet | `/export hide-sensitive` com recuo para `/export`; `/ip service print` para serviços de gerência; interfaces e endereços dinâmicos (PPPoE) só contados; sessões PPPoE contadas, histórico de mudanças (`/system history`), NTP e conntrack |
+| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha; tabela de rotas contada por família e cortada (servidores com BGP completo); `ip6tables-save`, `conntrack -S`; comandos fora do histórico do shell |
 
 ### Módulos de aplicação em Linux
 
@@ -264,7 +264,7 @@ Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--to
 - extrai versões do Inventário (ignorando Vizinhança e Logs) e consulta a NVD 2.0 por CPE, com paginação completa (Junos, IOS/IOS-XE/NX-OS/IOS-XR, RouterOS, SmartAX MA5800, kernel, BIND, OpenSSH, nginx, Apache, PHP). Huawei VRP, SmartAX MA5600 e FiberHome têm versão extraída mas não consultada (sem CPE genérico). A versão é convertida para o formato CPE da NVD (Junos `21.4R3-S5.4` → `21.4:r3-s5`; IOS-XE `17.03.04a` → `17.3.4a`);
 - em servidores Debian, Ubuntu, Rocky Linux e AlmaLinux, consulta todos os pacotes no OSV pelo pacote-fonte e pela versão exata (coluna nova do inventário a partir do netsnap 1.17.1). Software que veio de pacote da distribuição (PHP, OpenSSH, BIND, nginx, Apache, kernel em execução igual ao instalado) sai da consulta pela NVD, que usaria a versão upstream. Por vulnerabilidade: CVEs, CVSS 3 calculado do vetor, prioridade do Ubuntu, urgência do Debian (descarta `unimportant`) e versão corrigida;
 - cruza tudo com o CISA KEV (com fabricante, produto, data e uso por ransomware) e com o EPSS;
-- aplica o catálogo de falhas graves: versão afetada **e** condição de exposição lida do snapshot, mais mitigações encontradas. Entradas: PHP2Shell (CVE-2026-109618/109619) e MikroTrick (CVE-2026-67279, 86060, 67277, 67276, 67278, 67281). Para PHP de pacote da distribuição, vale o resultado do OSV;
+- aplica o catálogo de falhas graves: versão afetada **e** condição de exposição lida do snapshot, mais mitigações encontradas. Entradas: PHP2Shell (CVE-2026-109618/109619), MikroTrick (CVE-2026-67279, 86060, 67277, 67276, 67278, 67281) e Junos Flowspec JSA112187 (CVE-2026-102178, 101990, 101948, 101949; só com família flow no BGP, faixas próprias do Evolved). Para PHP de pacote da distribuição, vale o resultado do OSV;
 - lista o "KEV do fabricante": CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim;
 - aplica 13 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard, pipe do ExaBGP gravável por todos, `WANsupervisor` sem `-n` e gráficos sem banco de séries);
 - identifica GoBGP (`gobgpd --version`) e FRRouting (`frr version`) para a consulta à NVD; instalados por pacote da distribuição, vão para o OSV.

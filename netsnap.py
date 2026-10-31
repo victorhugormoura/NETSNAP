@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.17.2"
+__version__ = "1.18.0"
 
 import os
 import re
@@ -211,6 +211,14 @@ PERFIS = {
             "show system core-dumps",
             "show system commit",
             "show vmhost version",
+            # Placas e folga de memória/FIB por FPC: com tabela completa,
+            # a falta de folga aparece aqui antes de virar descarte.
+            "show chassis fpc",
+            "show system resource-monitor fpc",
+            # CGNAT (MS-MPC/SPC3): ocupação dos pools, base do log de NAT do
+            # Marco Civil. Sem serviço de NAT, a saída vem vazia.
+            "show services nat source pool all",
+            "show ntp associations no-resolve",
         ],
         "optica": [
             # Filtro positivo pelas interfaces de infraestrutura. Um filtro
@@ -323,6 +331,11 @@ PERFIS = {
             "display ospf peer brief",
             "display fan",
             "display power",
+            # NE8000/NE40E como BNG: usuários online e pools. Em CloudEngine
+            # o comando não existe e sai como sem saída útil.
+            # [validar em equipamento]
+            "display access-user online-total",
+            "display ip pool",
         ],
         "optica": [
             "display interface brief",
@@ -571,17 +584,26 @@ PERFIS = {
             "/user print without-paging",
             "/user active print without-paging",
             "/ip cloud print",
+            # BNG: sessões PPPoE só contadas (a lista inteira tem milhares).
+            "/ppp active print count-only",
+            # Histórico de mudanças (quem alterou o quê), sem o export inteiro.
+            "/system history print without-paging",
+            "/system ntp client print",
+            "/ip firewall connection tracking print",
         ],
         "optica": [
-            "/interface print stats without-paging",
+            # Interfaces dinâmicas (uma por sessão PPPoE) ficam de fora das
+            # listas e entram só na contagem.
+            "/interface print count-only where dynamic",
+            "/interface print stats without-paging where !dynamic",
             "/interface ethernet print without-paging",
-            "/ip address print without-paging",
+            "/ip address print without-paging where !dynamic",
             # monitor once em todas as ethernet: para portas SFP retorna
             # vendor/PN, wavelength, sfp-link-length (alcance), temperatura
             # e potências Rx/Tx do módulo
             "/interface ethernet monitor [find] once",
             "/interface ethernet print stats without-paging",
-            "/interface print detail without-paging",
+            "/interface print detail without-paging where !dynamic",
         ],
         "vizinhanca": [
             "/ip neighbor print detail without-paging",
@@ -610,7 +632,14 @@ PERFIS = {
             "cat /etc/hostname /etc/hosts /etc/resolv.conf 2>/dev/null",
             "ip -br address",
             "ip -d address",
-            "ip route show table all",
+            # Com BIRD/FRR exportando a tabela completa para o kernel, a
+            # lista tem perto de um milhão de linhas: contagem por família e
+            # as primeiras rotas.
+            "echo \"IPv4: $(ip -4 route show table all 2>/dev/null | wc -l) rotas  "
+            "IPv6: $(ip -6 route show table all 2>/dev/null | wc -l) rotas\"; "
+            "ip route show table all 2>/dev/null | awk 'NR<=300; NR==301 "
+            "{print \"[... saída cortada em 300 linhas]\"}'",
+            "{S}conntrack -S 2>/dev/null | head -n 16",
             "ip rule show",
             # O BIND abre um socket UDP por worker thread por interface (832
             # sockets em 14 endereços num servidor de 32 núcleos). A remoção
