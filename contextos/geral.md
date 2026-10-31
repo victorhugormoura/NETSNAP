@@ -14,7 +14,7 @@ arquivo e os das plataformas por versões completas (as skills).
   nem "community ausente" por causa da máscara.
 - `(sem saída útil: ...)` é comando não suportado no firmware ou sem retorno;
   não significa que o recurso esteja desligado.
-- `session_lost: true` no resumo: a sessão caiu durante a coleta; o que falta
+- `session_lost: true` no resumo: a coleta foi interrompida (sessão encerrada ou tempo esgotado; `abort_reason` diz qual); o que falta
   pode ser só falta de dado.
 - Contadores de erro são cumulativos desde o boot ou o último clear. Uma
   coleta não dá taxa; compare com o uptime e, havendo, com a coleta anterior.

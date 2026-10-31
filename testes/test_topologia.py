@@ -75,6 +75,20 @@ CONF_B = "set system host-name MX-B\nset interfaces ae1 unit 0 family inet addre
 HUAWEI_CONF = "#\nsysname SW-C\n#\ninterface Vlanif30\n ip address 10.30.0.2 255.255.255.252\n#\ninterface XGigabitEthernet0/0/1\n ipv6 address 2001:db8:30::2/126\n#\n"
 MK_EXPORT = "/system identity\nset name=RB-D\n/ip address\nadd address=10.30.0.1/30 interface=\\\n    vlan30-core network=10.30.0.0\nadd address=10.40.0.1/30 disabled=yes interface=ether9 network=10.40.0.0\n/ipv6 address\nadd address=2001:db8:30::1/126 interface=vlan30-core\n"
 
+LLDPD = """-------------------------------------------------------------------------------
+LLDP neighbors:
+-------------------------------------------------------------------------------
+Interface:    eno1, via: LLDP, RID: 1, Time: 0 day, 00:10:00
+  Chassis:
+    ChassisID:    mac 78:4f:9b:00:00:09
+    SysName:      SW-CORE
+    MgmtIP:       10.0.0.9
+  Port:
+    PortID:       ifname XGigabitEthernet0/0/7
+    PortDescr:    SERVIDOR-DNS
+-------------------------------------------------------------------------------
+"""
+
 class T(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -151,6 +165,23 @@ class T(unittest.TestCase):
         self.assertEqual(d["estado"], "sem_vizinhos")
         d = t.diagnosticar_vizinhanca("linux", [("lldpcli show neighbors detail", "bash: lldpcli: command not found")])
         self.assertEqual(d["estado"], "desligado")
+
+    def test_lldpd_com_sudo(self):
+        # O netsnap grava o comando do Linux com o prefixo do sudo.
+        for cmd in ("sudo -n lldpcli show neighbors detail", "sudo -n lldpctl", "lldpctl"):
+            vs = t.vizinhos_do_comando(cmd, LLDPD)
+            self.assertEqual([(v["porta_local"], v["dispositivo"]) for v in vs],
+                             [("eno1", "SW-CORE")], cmd)
+        d = t.diagnosticar_vizinhanca("linux", [("sudo -n lldpcli show neighbors detail", LLDPD),
+                                                ("sudo -n lldpctl", LLDPD)])
+        self.assertEqual((d["estado"], d["vizinhos"]), ("ok", 1))
+        snapshot(self.d, "dns1", "10.0.0.53", "linux", {
+            "vizinhanca": [("sudo -n lldpcli show neighbors detail", LLDPD),
+                           ("sudo -n lldpctl", LLDPD)]})
+        g = t.construir(self.d)
+        lldp = [e for e in g["enlaces"] if e["tipo"] == "lldp"]
+        self.assertEqual(len(lldp), 1, lldp)
+        self.assertEqual(lldp[0]["porta_b"], "XGigabitEthernet0/0/7")
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

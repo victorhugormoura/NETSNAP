@@ -426,7 +426,37 @@ SEGREDOS = [('J01',
  ('R12', 'rwcommunity LxRwComR12forte 192.168.0.0/16', ['LxRwComR12forte']),
  ('R13', 'createUser monitor SHA "LxAuthR13pass" AES "LxPrivR13pass"',
   ['LxAuthR13pass', 'LxPrivR13pass']),
- ('R14', 'com2sec redeLab 10.0.0.0/8 LxCom2secR14', ['LxCom2secR14'])]
+ ('R14', 'com2sec redeLab 10.0.0.0/8 LxCom2secR14', ['LxCom2secR14']),
+ ('R15', 'com2sec -Cn ctxA redeLab 10.0.0.0/8 LxCom2secR15', ['LxCom2secR15']),
+ ('R16', 'defCommunity LxDefComR16', ['LxDefComR16']),
+ ('R17', 'defAuthPassphrase LxDefAuthR17', ['LxDefAuthR17']),
+ ('R18', 'defPrivPassphrase "LxDefPrivR18"', ['LxDefPrivR18']),
+ ('R19', 'defPassphrase LxDefPassR19', ['LxDefPassR19']),
+ ('R20', 'defAuthLocalizedKey 0xLxDefKeyR20aa', ['LxDefKeyR20aa']),
+ ('R21', 'defPrivMasterKey 0xLxDefKeyR21bb', ['LxDefKeyR21bb']),
+ ('R22', 'trapsess -v 2c -c LxTrapsessR22 192.0.2.1', ['LxTrapsessR22']),
+ ('R23', 'trapsess -v 3 -u trapusr -l authPriv -a SHA -A LxTrapAuthR23 -x AES -X LxTrapPrivR23 '
+  '192.0.2.1', ['LxTrapAuthR23', 'LxTrapPrivR23']),
+ ('R24', 'proxy -v 2c -c LxProxyComR24 192.0.2.2 .1.3.6.1.2.1', ['LxProxyComR24']),
+ ('R25', 'proxy -v 3 -u pu -l authNoPriv -a MD5 -A LxProxyAuthR25 192.0.2.2 .1.3',
+  ['LxProxyAuthR25']),
+ ('R26', 'snmpwalk -v3 -u nms -l authPriv -a SHA -A LxWalkAuthR26 -x AES -X LxWalkPrivR26 '
+  '192.0.2.1 ifTable', ['LxWalkAuthR26', 'LxWalkPrivR26']),
+ ('R27', "snmpget -v2c -c 'LxGetComR27' 192.0.2.1 sysName.0", ['LxGetComR27']),
+ ('R28', 'htpasswd -b /etc/nginx/.htpasswd admin LxHtpasswdR28', ['LxHtpasswdR28']),
+ ('R29', 'htpasswd -B -c -b /etc/apache2/.htpasswd noc LxHtpasswdR29', ['LxHtpasswdR29']),
+ ('R30', 'htpasswd -nb noc LxHtpasswdR30', ['LxHtpasswdR30']),
+ ('R31', 'neighbor 192.0.2.9 {\n    md5 LxExabgpR31;\n}', ['LxExabgpR31']),
+ ('R32', '    md5 "LxExabgpR32";', ['LxExabgpR32']),
+ ('R33', ' ip rip authentication string LxRipR33', ['LxRipR33']),
+ ('R34', ' ipv6 ospf6 authentication key-id 1 hash-algo hmac-sha-256 key LxOspf6R34',
+  ['LxOspf6R34']),
+ ('R35', 'crypto pw LxNtpCryptoR35', ['LxNtpCryptoR35']),
+ ('R36', 'crypto pw "LxNtpCryptoR36"', ['LxNtpCryptoR36']),
+ ('R37', 'server 192.0.2.10 key 7 LxNtpKeyR37', ['LxNtpKeyR37']),
+ ('R38', '/system ntp key\nadd key=LxNtpKeyR38 key-id=1', ['LxNtpKeyR38']),
+ ('R39', '/system ntp key add key="LxNtpKeyR39" key-id=2', ['LxNtpKeyR39']),
+ ('R40', ' vrrp 1 authentication text LxVrrpR40', ['LxVrrpR40'])]
 
 # (id, texto, trechos que PRECISAM sobreviver)
 PRESERVAR = [('P01',
@@ -568,7 +598,9 @@ PRESERVAR = [('P01',
   'LxWgDbPassA01\n'
   '===== /opt/andrisoft/etc/dbhost.conf\n'
   '127.0.0.1',
-  ['127.0.0.1'])]
+  ['127.0.0.1']),
+ ('P81', 'com2sec readonly default public', ['***REMOVIDO-TRIVIAL***']),
+ ('P82', 'com2sec -Cn ctxA redeLab 10.0.0.0/8 LxCom2secP82', ['-Cn ctxA redeLab 10.0.0.0/8'])]
 
 # Linhas sem segredo que devem sair idênticas
 BENIGNAS = ['set version 23.4R2-S2',
@@ -930,6 +962,23 @@ BENIGNAS = ['set version 23.4R2-S2',
  'O token foi renovado com sucesso',
  'Password complexity check : Enabled',
  'Generated password policy: strong',
+ 'server 10.0.0.1 key 1 iburst',
+ 'server ntp.exemplo.net.br key 10 iburst prefer',
+ 'peer 10.0.0.2 key 2 minpoll 4 maxpoll 6',
+ 'server 10.0.0.3 key 3 nts',
+ 'server 10.0.0.4 key 4 xleave',
+ 'server 10.0.0.5 key 5 version 4',
+ 'server 10.0.0.6 key 6 burst',
+ 'defSecurityName nms',
+ 'defVersion 3',
+ 'defAuthType SHA',
+ '    md5-base64 false;',
+ ' ip rip authentication mode md5',
+ ' ip rip authentication key-chain RIP-KC',
+ 'keys /etc/ntp.keys',
+ 'crypto randfile /dev/urandom',
+ '    proxy_pass http://127.0.0.1:3000;',
+ 'snmpbulkwalk -v 2c -Cr10 -On 192.0.2.1 ifTable',
  '2026-10-10T10:00:00 level=info msg="password reset email sent to noc@exemplo.net.br"']
 
 

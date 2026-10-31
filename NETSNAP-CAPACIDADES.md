@@ -32,7 +32,7 @@ Usos típicos:
 | Arquivo | Função | Dependências |
 |---|---|---|
 | `netsnap.py` | Coletor principal (menu interativo e modo lote) | Python 3.10+, Netmiko |
-| `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.10+, cliente OpenSSH para SSH |
+| `netsnap_transporte.py` | Camada de acesso SSH/Telnet só com a biblioteca padrão (SSH via cliente OpenSSH do sistema). **Ainda não integrada ao netsnap.py** | Python 3.10+, cliente OpenSSH 7.6+ para SSH |
 | `netdiag.py` | Executa cada comando do perfil isoladamente e classifica o resultado, para depurar perfis | netsnap.py, Netmiko |
 | `netcve.py` | Triagem de vulnerabilidades dos snapshots: NVD por CPE, OSV para pacotes Linux, CISA KEV, EPSS, catálogo de falhas graves com condição de exposição e heurísticas de configuração; saída MD, CSV e JSON | só biblioteca padrão (certifi opcional) |
 | `netalerta.py` | Alertas de mudança de configuração e de falha grave nova (KEV, catálogo) a partir dos snapshots e triagens; terminal, arquivo, Telegram, webhook ou e-mail; estado para não repetir | só biblioteca padrão |
@@ -105,7 +105,7 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; um
    - **Telnet:** lê o texto de login (respondendo à negociação de opções, que alguns equipamentos exigem antes de mostrar o pedido): `>>User name:` → SmartAX; `Username:` → VRP/Cisco; `Login:` → FiberHome/Linux; modelo no banner (MA5xxx, AN5xxx). Sem pista, testa no máximo dois perfis, com intervalo, para não disparar bloqueio por tentativas.
    - Host acessível e não reconhecido vai para uma **fila de pendentes**, perguntada ao operador depois da fase paralela (nenhuma thread fica parada esperando).
 3. **Coleta:** abre a sessão, trata o aviso `--Press any key--`, extrai o hostname do prompt (recusando capturas inválidas), executa os comandos preparatórios do perfil, as seções escolhidas e, em Linux, os módulos de aplicação detectados. Se um comando cair num paginador que o comando de desativação não cobriu (`---- More ----`, `--More--`, `Press any key to continue`, `-- [Q quit|...]`), o netsnap avança as páginas e remove os marcadores e as sequências de apagamento da saída.
-4. **Queda de sessão:** um vigia acompanha o canal SSH durante cada comando, e o fechamento pelo equipamento é percebido na hora, sem esperar o timeout de leitura. Se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente.
+4. **Queda de sessão:** um vigia acompanha o canal SSH durante cada comando, e o fechamento pelo equipamento é percebido na hora, sem esperar o timeout de leitura. Se o transporte reportar sessão encerrada, a coleta daquele host para, e o snapshot registra `session_lost: true` com nota explicando que seções ausentes indicam interrupção, não recurso inexistente. Interrupção por tempo (dois comandos seguidos sem resposta, ou o limite por equipamento) também marca `session_lost: true`; `abort_reason` diz qual foi: `session_closed`, `consecutive_timeouts` ou `host_time_limit` (vazio quando a coleta terminou).
 5. **Vizinhança:** depois da seção Vizinhança, o log informa quantos vizinhos LLDP/CDP o equipamento tem. Sem nenhum, diz o motivo provável (LLDP desligado ou não configurado, ou nenhum vizinho anunciando) e o comando para ativar o protocolo na plataforma — Junos, Huawei, Cisco, MikroTik e Linux; para SmartAX e FiberHome, onde a sintaxe não foi conferida, indica o manual. O mesmo aviso vai para o cabeçalho do snapshot (`> **Vizinhança:** ...`).
 6. **Saída:** grava o snapshot, depois o índice da execução e o resumo no terminal.
 
@@ -143,7 +143,7 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; um
 | `cisco_ios` | Cisco IOS/IOS-XE (ASR 1000) | SSH, Telnet | |
 | `cisco_xr` | Cisco IOS-XR (ASR 9000) | SSH, Telnet | |
 | `mikrotik_routeros` | MikroTik RouterOS v6/v7 | SSH, Telnet | `/export hide-sensitive` com recuo para `/export`; `/ip service print` para serviços de gerência; interfaces e endereços dinâmicos (PPPoE) só contados; sessões PPPoE contadas, histórico de mudanças (`/system history`), NTP e conntrack |
-| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha; tabela de rotas contada por família e cortada (servidores com BGP completo); `ip6tables-save`, `conntrack -S`; configs de serviços de rede (snmpd, chrony/ntp, keepalived) sem comentários e com segredos mascarados; comandos fora do histórico do shell |
+| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha; tabela de rotas contada por família e cortada (servidores com BGP completo); `ip6tables-save`, `conntrack -S`; configs de serviços de rede (snmpd, chrony/ntp — inclusive `/etc/chrony.conf` e `/etc/chrony.d/` do RHEL —, keepalived) sem comentários, com segredos mascarados e corte anunciado em 120 linhas; comandos fora do histórico do shell |
 
 ### Módulos de aplicação em Linux
 
@@ -187,6 +187,7 @@ sections: ["config", "logs", "basico", "optica", "vizinhanca", "inventario"]
 applications: []
 transport: "ssh"
 session_lost: false
+abort_reason: ""
 sensitive_data: "redacted"
 read_only: true
 config_changes_made: 0
@@ -223,7 +224,7 @@ Convenções:
 ## 9. Tratamento do conteúdo
 
 - **Sanitização** (padrão ligado): senhas e hashes, inclusive com qualificador (`password irreversible-cipher $1c$...`, `enable secret 9 ...`, `key-string 7 ...`, `authentication-key 1 type md5 value "$9$..."`, `pre-shared-key ascii-text ...`); chaves BGP/OSPF/NTP/TACACS/RADIUS/MD5 do MikroTik; communities SNMP v1/v2c (Cisco, Huawei, Junos, MikroTik, snmpd.conf) e credenciais SNMPv3; chaves WireGuard, `bindpw`, tokens e chaves de API; formatos `chave=valor`, `chave: valor`, JSON, PHP (`$DB['PASSWORD']`); blocos PEM, inclusive truncados; arquivos inteiramente secretos (`dbpass.conf`). Comunidades **BGP** são preservadas.
-- **Sanitização, outras formas cobertas:** credencial em URL (`mysql://u:SENHA@`, repositórios apt), senha em linha de comando (crontab, `ps`, journal: `mysql -p`, `mysqldump -p`, `sshpass -p`, `curl -u`, `lftp -u`, `smbclient -U`, `ttyd -c`), cabeçalho `Authorization` (Basic/Bearer), tokens de formato conhecido (Telegram com o id do bot preservado, JWT, AWS, GitHub/GitLab, Slack, webhooks Slack/Discord), chaves Cisco em claro (`radius-server`/`tacacs-server ... key`, `crypto isakmp key`, keyring `pre-shared-key`, `message-digest-key`, HSRP, `wpa-psk`, `snmp-server host ... COMUNIDADE`), Huawei `authentication-mode ... plain`, `target-host ... securityname` (v1/v2c), cifras `%@%@`/`%$%$`/`%#%#`/`%+%#`, net-snmp `createUser`/`trap2sink`/`trapcommunity`, chaves `preshared-key`, `privacy-key`, `community-name`, `ADMIN_PASS=`, `senha:`, OLT `password-auth`/`checkcode-auth`, e hashes crypt soltos (o prefixo do algoritmo fica visível).
+- **Sanitização, outras formas cobertas:** credencial em URL (`mysql://u:SENHA@`, repositórios apt), senha em linha de comando (crontab, `ps`, journal: `mysql -p`, `mysqldump -p`, `sshpass -p`, `curl -u`, `lftp -u`, `smbclient -U`, `ttyd -c`), cabeçalho `Authorization` (Basic/Bearer), tokens de formato conhecido (Telegram com o id do bot preservado, JWT, AWS, GitHub/GitLab, Slack, webhooks Slack/Discord), chaves Cisco em claro (`radius-server`/`tacacs-server ... key`, `crypto isakmp key`, keyring `pre-shared-key`, `message-digest-key`, HSRP, `wpa-psk`, `snmp-server host ... COMUNIDADE`), Huawei `authentication-mode ... plain`, `target-host ... securityname` (v1/v2c), cifras `%@%@`/`%$%$`/`%#%#`/`%+%#`, net-snmp `createUser`/`trap2sink`/`trapcommunity`/`trapsess`/`proxy`, `snmp.conf` (`defCommunity`, `def*Passphrase`, `def*Key`), `com2sec -Cn`, `snmpwalk`/`snmpget` com `-c`/`-A`/`-X`, `htpasswd -b`, ExaBGP `md5`, FRR `ip rip authentication string` e `ospf6 ... key`, NTP `crypto pw` e chave do MikroTik (`/system ntp key`), VRRP `authentication text`, chaves `preshared-key`, `privacy-key`, `community-name`, `ADMIN_PASS=`, `senha:`, OLT `password-auth`/`checkcode-auth`, e hashes crypt soltos (o prefixo do algoritmo fica visível).
 - **Sanitização, o que deixou de ser removido por engano:** `Accepted/Failed password for <usuário>` dos logs do sshd, `PWD=/caminho` do sudo, versões dos pacotes `passwd`/`base-passwd` no inventário (usadas pelo netcve), ajustes de política de senha (`password minimum-length`, `password expire`, `complexity-check`), nomes de chave TSIG do BIND, `auth-method=pre-shared-key peer=X` do RouterOS.
 - **Bloco PEM sem o fim:** uma chave privada sem `END` (saída truncada) leva consigo o resto da saída; um certificado sem `END` remove só o cabeçalho e as linhas em base64 seguintes.
 - **Estrutura protegida:** a saída dos equipamentos não é escapada; o bloco de código usa mais crases que qualquer sequência presente nela, e os leitores (netsnap_md, netcve, painel) só fecham o bloco com o mesmo delimitador. Um banner com ```` ``` ```` e `## Configuração` não forja seções nem comandos.
@@ -321,7 +322,7 @@ Gera `{documento, versao, gerado_em, nos[], enlaces[], sem_vizinhanca[]}`.
 
 ### netsnap_transporte
 
-Sessões SSH e Telnet sem pacotes externos: Telnet completo (RFC 854) sobre socket; SSH conduzindo o cliente OpenSSH do sistema por pseudoterminal (Unix) ou `SSH_ASKPASS` (Windows, OpenSSH 8.4+). Pede algoritmos legados (DH group1/14-sha1, ssh-rsa, CBC, hmac-sha1) apenas se o cliente local os conhecer (`ssh -Q`), o que evita a falha do OpenSSH 10. Interface única para os dois transportes e para o Netmiko opcional:
+Sessões SSH e Telnet sem pacotes externos: Telnet completo (RFC 854) sobre socket; SSH conduzindo o cliente OpenSSH do sistema (7.6 ou superior, pelo `StrictHostKeyChecking=accept-new`) por pseudoterminal (Unix) ou `SSH_ASKPASS` (Windows, OpenSSH 8.4+). Pede algoritmos legados (DH group1/14-sha1, ssh-rsa, CBC, hmac-sha1) apenas se o cliente local os conhecer (`ssh -Q`), o que evita a falha do OpenSSH 10. Interface única para os dois transportes e para o Netmiko opcional:
 
 ```python
 import netsnap_transporte as tr
@@ -362,7 +363,7 @@ O mesmo comando pode aparecer em mais de uma seção (por exemplo `show chassis 
 A saída dos comandos não é escapada; o que a protege é a cerca, sempre mais longa que qualquer sequência de crases da saída. Uma linha de saída que comece com `## ` ainda confundiria este parser simplificado; para uso em produção, percorra o arquivo linha a linha e ignore cabeçalhos enquanto estiver dentro de um bloco de código.
 
 - Use `platform_key` para escolher o parser e `collected_at` para ordenar coletas.
-- Confira `session_lost` antes de concluir que algo não existe.
+- Confira `session_lost` (e `abort_reason`) antes de concluir que algo não existe.
 - Confira `sensitive_data`: com `"redacted"`, valores de segredo não estão no arquivo.
 - Arquivos que começam com `_` (índice, triagem, diagnóstico) não são snapshots de host.
 

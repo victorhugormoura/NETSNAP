@@ -690,12 +690,15 @@ PERFIS = {
             # VRRP. Sem comentários; segredos (comunidade, chave de auth/priv
             # SNMPv3, chave NTP, senha do keepalived) saem mascarados pelo
             # sanitizador, e a comunidade SNMP padrão vira
-            # ***REMOVIDO-TRIVIAL*** e é apontada pelo netcve.
+            # ***REMOVIDO-TRIVIAL*** e é apontada pelo netcve. O chrony fica
+            # em /etc/chrony/ no Debian e em /etc/chrony.conf na família RHEL.
             "for f in /etc/snmp/snmpd.conf /etc/snmp/snmp.conf "
-            "/etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf /etc/ntp.conf "
+            "/etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf "
+            "/etc/chrony.conf /etc/chrony.d/*.conf /etc/ntp.conf "
             "/etc/ntpsec/ntp.conf /etc/keepalived/keepalived.conf; do "
             "[ -f \"$f\" ] || continue; echo \"===== $f\"; "
-            "{S}grep -v -E '^[[:space:]]*(#|;|!|$)' \"$f\" | head -n 120; done",
+            "{S}grep -v -E '^[[:space:]]*(#|;|!|$)' \"$f\" | "
+            "awk 'NR<=120; NR==121 {print \"[... saída cortada em 120 linhas]\"}'; done",
         ],
         # Com sudo: sem ele, só o journal do próprio usuário.
         "logs": ["{S}journalctl -n 300 --no-pager"],
@@ -2014,14 +2017,18 @@ APPS_LINUX = {
                 "-name install.sh -path '*ISP-Stack*' 2>/dev/null | head -n1); "
                 "echo \"install.sh: ${I:-nao localizado}\"",
                 # Só executa como root um script de root que ninguém mais
-                # pode alterar (arquivo e pasta sem escrita de grupo/outros):
+                # pode alterar (arquivo e pastas sem escrita de grupo/outros):
                 # senão, quem escreve em /srv ou /opt rodaria código como root
-                # pelo sudo do operador.
+                # pelo sudo do operador. Vale para todas as pastas até a raiz:
+                # quem escreve numa delas pode renomear a de baixo e pôr
+                # outro install.sh no lugar.
                 "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
                 "-name install.sh -path '*ISP-Stack*' -user root ! -perm /022 "
-                "2>/dev/null | head -n1); [ -n \"$I\" ] && case \"$({S}stat -c "
-                "'%U %A' \"$(dirname \"$I\")\")\" in 'root '?????w????|"
-                "'root '????????w?) I=;; 'root '*) ;; *) I=;; esac; "
+                "2>/dev/null | head -n1); [ -n \"$I\" ] && { d=$(dirname \"$I\"); "
+                "while :; do case \"$({S}stat -c '%U %A' \"$d\" 2>/dev/null)\" in "
+                "'root '?????w????|'root '????????w?) I=; break;; 'root '*) ;; "
+                "*) I=; break;; esac; [ \"$d\" = / ] && break; "
+                "d=$(dirname \"$d\"); done; }; "
                 # A flag é conferida no próprio script antes da chamada: um
                 # install.sh antigo, sem '--audit', poderia ignorar o
                 # argumento e seguir o fluxo de instalação.
@@ -2032,9 +2039,11 @@ APPS_LINUX = {
                 "executado'; fi",
                 "I=$({S}find /opt /root /usr/local/share /srv -maxdepth 4 "
                 "-name install.sh -path '*ISP-Stack*' -user root ! -perm /022 "
-                "2>/dev/null | head -n1); [ -n \"$I\" ] && case \"$({S}stat -c "
-                "'%U %A' \"$(dirname \"$I\")\")\" in 'root '?????w????|"
-                "'root '????????w?) I=;; 'root '*) ;; *) I=;; esac; "
+                "2>/dev/null | head -n1); [ -n \"$I\" ] && { d=$(dirname \"$I\"); "
+                "while :; do case \"$({S}stat -c '%U %A' \"$d\" 2>/dev/null)\" in "
+                "'root '?????w????|'root '????????w?) I=; break;; 'root '*) ;; "
+                "*) I=; break;; esac; [ \"$d\" = / ] && break; "
+                "d=$(dirname \"$d\"); done; }; "
                 "[ -n \"$I\" ] && if {S}grep -q -e '--verify)' -e '\"--verify\"' "
                 "\"$I\"; then echo '===== install.sh --verify'; "
                 "timeout 180 {S}bash \"$I\" --verify </dev/null 2>&1 | "
@@ -2285,7 +2294,11 @@ PADROES_SENSIVEIS = [
                r"(?!(?:(?:read|write|cipher|simple)[ \t]+)*\*\*\*)"
                r"(\"[^\"\n]*\"|\S+)"),
     re.compile(r"(?m)^([ \t]*r[ow]community6?[ \t]+)(?!\*\*\*)(\S+)"),
-    re.compile(r"(?m)^([ \t]*com2sec6?[ \t]+\S+[ \t]+\S+[ \t]+)(?!\*\*\*)(\S+)"),
+    # "com2sec -Cn contexto nome origem comunidade": sem saltar o contexto,
+    # o nome era mascarado e a comunidade ficava. O nome não começa com '-'
+    # para que, já mascarada, a linha não case de novo deslocada.
+    re.compile(r"(?m)^([ \t]*com2sec6?[ \t]+(?:-cn[ \t]+\S+[ \t]+)?(?!-)\S+[ \t]+"
+               r"\S+[ \t]+)(?!\*\*\*)(\S+)"),
     # SNMPv3: "auth sha X priv aes 128 Y" (NX-OS: "priv aes-128 Y").
     re.compile(r"((?:auth|priv)(?<!\w....)[ \t]+(?:md5|sha\d*|aes(?:[ \t-]*\d+)?|"
                r"3?des)[ \t]+(?:encrypted[ \t]+)?)(\S+)"),
@@ -2294,7 +2307,11 @@ PADROES_SENSIVEIS = [
     # Junos "key 0 secret ..." deixa o valor para o padrão de 'secret'; no
     # BIND, 'key "nome" {' e 'key "nome";' nomeiam a chave TSIG, não a contêm.
     re.compile(r"(key(?<![\w-]key)[ \t]+\d{1,2}[ \t]+)"
-               r"(?!(?:secret|key-string|algorithm|start-time)\b)(\S+)"),
+               r"(?!(?:secret|key-string|algorithm|start-time)\b)"
+               # ntp.conf/chrony.conf: "server X key 1 iburst" é o número da
+               # chave seguido de opção do servidor.
+               r"(?!(?:iburst|burst|prefer|minpoll|maxpoll|nts|xleave|version)\b)"
+               r"(\S+)"),
     re.compile(r"(key(?<![\w-]key)[ \t]+)(\"[^\"\n]*\"|\$\S+)(?![ \t]*[{;])"),
     # chave valor, na mesma linha, com qualificadores opcionais.
     # Não tomam o lugar do valor: verbos de menu do RouterOS ("/ppp secret
@@ -2338,6 +2355,19 @@ PADROES_ESPECIFICOS = [
     (("sink", "community"), re.compile(
         r"(?m)^([ \t]*(?:trap2?sink|informsink)[ \t]+\S+[ \t]+|"
         r"[ \t]*trapcommunity[ \t]+|[ \t]*authcommunity[ \t]+\S+[ \t]+)(\S+)")),
+    # snmp.conf: comunidade e senhas padrão dos utilitários do cliente.
+    (("defcommunity", "passphrase", "localizedkey", "masterkey"), re.compile(
+        r"(?m)^([ \t]*def(?:community|(?:auth|priv)?passphrase|"
+        r"(?:auth|priv)(?:localized|master)key)[ \t]+)" + _VALOR)),
+    # ExaBGP 3.x: "md5 X;" no bloco do neighbor (o 4.x usa md5-password).
+    (("md5",), re.compile(r"(?m)^([ \t]*md5[ \t]+)(\"[^\"\n]*\"|[^\s;]+)(?=[ \t]*;)")),
+    # FRR: senha em claro do RIP e chave HMAC do OSPFv3.
+    (("rip",), re.compile(r"(rip[ \t]+authentication[ \t]+string[ \t]+)(\S+)")),
+    (("ospf6",), re.compile(
+        r"(ospf6[ \t]+authentication[ \t]+key-id[ \t]+\d+[ \t]+hash-algo[ \t]+\S+"
+        r"[ \t]+key[ \t]+)(\S+)")),
+    # ntp.conf (Autokey): senha da chave privada do servidor.
+    (("crypto",), re.compile(r"(?m)^([ \t]*crypto[ \t]+pw[ \t]+)" + _VALOR)),
     # SNMPv3 'priv' sem algoritmo (NX-OS "priv 0x... localizedkey"). Restrito
     # à linha do usuário: em "snmp-server group G v3 priv read V" a palavra
     # seguinte é a view.
@@ -2377,6 +2407,10 @@ PADROES_ESPECIFICOS = [
     (("standby",), re.compile(
         r"(?m)^([ \t]*standby[ \t]+(?:\d+[ \t]+)?authentication[ \t]+"
         r"(?:text[ \t]+)?)(?!md5\b)(\S+)")),
+    # VRRP com senha em texto (Cisco: "vrrp 1 authentication text X").
+    (("vrrp",), re.compile(
+        r"(?m)^([ \t]*vrrp[ \t]+\d+[ \t]+authentication[ \t]+"
+        r"(?:text[ \t]+)?)(?!md5\b)(\S+)")),
     (("wpa-psk",), re.compile(r"(wpa-psk[ \t]+(?:ascii|hex)[ \t]+\d[ \t]+)(\S+)")),
     # Cabeçalho HTTP de autenticação (Apache, nginx, curl -H, /tool fetch).
     (("authorization",), re.compile(
@@ -2401,6 +2435,8 @@ PADROES_ESPECIFICOS = [
         r"(?:[ \t]+(?:for|of|do|da|de|para|to)[ \t]+[\w.@-]+)?[ \t]*:(?!=)[ \t]*)"
         r"(?!(?:yes|no)\))" + _VALOR)),
 ]
+# Opções do htpasswd antes dos argumentos; -C e -r levam um número.
+_OPCOES_HTPASSWD = r"(?:[ \t]+-(?:[a-zA-Z]*[Cr][ \t]+\d+|[a-zA-Z]+))"
 # Padrões que dependem da caixa e por isso casam sobre o texto original:
 # '-p' é a senha do mysql e '-P' a porta; '-c' é a credencial do ttyd e
 # '-C' o certificado; tokens de formato conhecido (Telegram "<id>:<35
@@ -2419,16 +2455,38 @@ PADROES_CAIXA = [
     ((":",), re.compile(
         r"(\d{6,12}:)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])([\w-]{30,40})(?![\w-])")),
     (("eyJ",), re.compile(r"(eyJ)(?<![\w-]eyJ)[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}")),
-    # Utilitários net-snmp: "-c" é a comunidade ("-C" é opção de saída),
-    # visível em crontab e na lista de processos.
-    (("snmp",), re.compile(
-        r"(snmp(?:walk|bulkwalk|get|bulkget|getnext|set|table|trap|status|df|"
-        r"netstat|delta|check)\b[^\n]{0,200}?[ \t]-c[ \t]*)(?!-)(\S+)")),
+    # htpasswd -b: a senha é o último argumento, depois do arquivo e do
+    # usuário (com -n não há arquivo). '-B' é o bcrypt, não o -b.
+    (("htpasswd",), re.compile(
+        r"(htpasswd(?<!\whtpasswd)(?=" + _OPCOES_HTPASSWD + r"*?[ \t]+-[a-zA-Z]*b)"
+        r"(?!" + _OPCOES_HTPASSWD + r"*?[ \t]+-[a-zA-Z]*n)"
+        + _OPCOES_HTPASSWD + r"+[ \t]+\S+[ \t]+\S+[ \t]+)(\"[^\"\n]*\"|'[^'\n]*'|\S+)")),
+    (("htpasswd",), re.compile(
+        r"(htpasswd(?<!\whtpasswd)(?=" + _OPCOES_HTPASSWD + r"*?[ \t]+-[a-zA-Z]*b)"
+        r"(?=" + _OPCOES_HTPASSWD + r"*?[ \t]+-[a-zA-Z]*n)"
+        + _OPCOES_HTPASSWD + r"+[ \t]+\S+[ \t]+)(\"[^\"\n]*\"|'[^'\n]*'|\S+)")),
     (("AKIA", "ASIA"), re.compile(r"(AKIA|ASIA)(?<!\w....)[0-9A-Z]{16}\b")),
     (("gh", "glpat-", "xox"), re.compile(
         r"(gh[pousr]_|github_pat_|glpat-|xox[abposr]-)(?=[\w-]{20})[\w-]+")),
 ]
 _MARCA = "***REMOVIDO***"
+# Utilitários net-snmp e as diretivas trapsess e proxy do snmpd.conf, que
+# aceitam as mesmas opções: "-c" é a comunidade, "-A"/"-X" as senhas do
+# SNMPv3 e "-3m/-3M/-3k/-3K" as chaves; "-C", "-a" e "-x" são opção de saída
+# e protocolos, por isso a caixa importa. Uma linha traz as duas senhas: o
+# comando inteiro é casado e cada opção é mascarada dentro dele. Visível em
+# crontab, na lista de processos e no snmpd.conf.
+PADRAO_COMANDO_SNMP = re.compile(
+    r"(?m)(?:snmp(?:walk|bulkwalk|get|bulkget|getnext|set|table|trap|status|"
+    r"df|netstat|delta|check)\b|^[ \t]*(?:trapsess|proxy)[ \t]+(?=-))[^\n]*")
+PADRAO_OPCAO_SNMP = re.compile(
+    r"((?<!\S)-(?:[cAX]|3[mMkK])[ \t]*)(?!-)(\"[^\"\n]*\"|'[^'\n]*'|\S+)")
+
+
+def _mascarar_comando_snmp(m):
+    return PADRAO_OPCAO_SNMP.sub(r"\1" + _MARCA, m.group(0))
+
+
 # Blocos PEM completos. Sem o END (saída truncada pelo limite de tamanho, ou
 # um BEGIN citado num log), uma chave privada leva consigo todo o restante da
 # saída; nos demais blocos (certificados), só o cabeçalho e as linhas em
@@ -2441,6 +2499,16 @@ PADRAO_CERT_ABERTO = re.compile(r"-----BEGIN[^-\n]*-----(?:\r?\n[A-Za-z0-9+/=]{1
 # "/snmp community" do export, sem palavra-chave que o denuncie.
 PADRAO_BLOCO_SNMP_MIKROTIK = re.compile(
     r"(?m)^/snmp community\s*$(?:\n(?!/).*)*")
+
+
+# MikroTik: chave simétrica do NTP ("key=" no bloco "/system ntp key", ou na
+# forma de uma linha "/system ntp key add key=X key-id=1").
+PADRAO_BLOCO_NTP_MIKROTIK = re.compile(
+    r"(?m)^/system ntp key\b.*$(?:\n(?!/).*)*")
+
+
+def _mascarar_ntp_mikrotik(m):
+    return re.sub(r"(\bkey=)(?!\*\*\*)(\"[^\"\n]*\"|\S+)", r"\1" + _MARCA, m.group(0))
 
 
 def _mascarar_snmp_mikrotik(m):
@@ -2506,11 +2574,16 @@ def sanitizar(texto: str) -> str:
     texto = PADRAO_CERT_ABERTO.sub("***CERTIFICADO/CHAVE REMOVIDO***", texto)
     texto = PADRAO_ARQUIVO_SEGREDO.sub(_suprimir_arquivo, texto)
     texto = PADRAO_BLOCO_SNMP_MIKROTIK.sub(_mascarar_snmp_mikrotik, texto)
-    if "ommunity" in texto or "OMMUNITY" in texto:
+    if "/system ntp key" in texto:
+        texto = PADRAO_BLOCO_NTP_MIKROTIK.sub(_mascarar_ntp_mikrotik, texto)
+    # O com2sec declara a comunidade sem a palavra "community".
+    if any(g in texto for g in ("ommunity", "OMMUNITY", "com2sec", "COM2SEC")):
         texto = _marcar_comunidades_triviais(texto)
     for guardas, padrao in PADROES_CAIXA:
         if any(g in texto for g in guardas):
             texto = padrao.sub(r"\1" + _MARCA, texto)
+    if any(g in texto for g in ("snmp", "trapsess", "proxy")):
+        texto = PADRAO_COMANDO_SNMP.sub(_mascarar_comando_snmp, texto)
     # U+0130 (İ) é o único caractere cujo lower() tem dois caracteres; a
     # troca prévia mantém o alinhamento posicional entre as duas versões.
     minusculo = texto.replace("\u0130", "i").lower()
@@ -2627,16 +2700,20 @@ def sem_saida_util(saida: str) -> bool:
 # coisa só. O filtro trunca linhas muito longas e agrupa as que têm a mesma
 # assinatura (dígitos normalizados), mesmo intercaladas com outras: cada
 # mensagem aparece uma vez, na posição da primeira ocorrência, com a
-# contagem e o horário da última. Acima de 200 assinaturas ficam as mais
-# recentes.
+# contagem e o horário da última. Acima de 200 assinaturas ficam as 200
+# vistas por último: pela primeira ocorrência, o erro dominante, que começou
+# cedo e segue até agora, era justamente o que saía do relatório. Cada linha
+# pertence a uma só assinatura, então as últimas linhas (t) são distintas e
+# a varredura de NR para trás acha o corte c.
 FILTRO_LOG = (
     r" | cut -c1-400 | awk "
     '\'{ k=$0; gsub(/[0-9]+/,"#",k); gsub(/#[.:,-]#/,"#",k); k=substr(k,1,110); '
-    r"if (!(k in n)) { o[++m]=k; l[k]=$0 } n[k]++; "
+    r"if (!(k in n)) { o[++m]=k; l[k]=$0 } n[k]++; t[k]=NR; "
     r'u[k] = ($1 ~ /^[0-9][0-9][0-9][0-9]-/) ? $1 : $1 " " $2 " " $3 } '
-    r"END { i0 = (m > 200) ? m - 199 : 1; "
-    r'if (i0 > 1) printf "    [%d mensagem(ns) mais antiga(s) omitida(s)]\n", i0 - 1; '
-    r"for (i = i0; i <= m; i++) { k = o[i]; print l[k]; "
+    r"END { c = 0; if (m > 200) { for (i = 1; i <= m; i++) f[t[o[i]]] = 1; "
+    r"s = 0; for (j = NR; j > 0 && s < 200; j--) if (j in f) { s++; c = j } "
+    r'printf "    [%d mensagem(ns) mais antiga(s) omitida(s)]\n", m - 200 } '
+    r"for (i = 1; i <= m; i++) { k = o[i]; if (t[k] < c) continue; print l[k]; "
     r'if (n[k] > 1) printf "    [+%d linha(s) semelhante(s) omitida(s); a última em %s]\n", '
     "n[k] - 1, u[k] } }\'"
 )
@@ -3429,7 +3506,14 @@ def executar_comando(conn, cmd, usa_timing, ip="-", limite=None):
 # de ambiente. Com dois comandos seguidos sem resposta a coleta do host
 # também termina: depois de um ReadTimeout o canal pode seguir despejando a
 # saída anterior, e cada comando seguinte esperaria os 180 s inteiros.
-TEMPO_MAX_HOST = max(5, int(os.environ.get("NETSNAP_TEMPO_MAX_HOST", "45") or 45)) * 60
+# Valor inválido ("45m", "1.5") não pode derrubar a importação: o
+# netsnap_web e o netdiag importam este módulo.
+try:
+    TEMPO_MAX_HOST = max(5, int(os.environ.get("NETSNAP_TEMPO_MAX_HOST", "45") or 45)) * 60
+except ValueError:
+    print(f"[AVISO] NETSNAP_TEMPO_MAX_HOST={os.environ['NETSNAP_TEMPO_MAX_HOST']!r} "
+          "não é um número inteiro de minutos; usando 45", file=sys.stderr)
+    TEMPO_MAX_HOST = 45 * 60
 
 
 def ressincronizar(conn, ip):
@@ -3480,7 +3564,10 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
     contexto_usado = False
     perdeu_sessao = False
     inicio_host = time.perf_counter()
-    estado_tempo = {"seguidos": 0}
+    # "motivo" diz por que a coleta parou: queda de sessão e tempo esgotado
+    # pedem providências diferentes, e o relatório dizia "o equipamento
+    # encerrou a sessão" também quando foi o netsnap que desistiu.
+    estado_tempo = {"seguidos": 0, "motivo": ""}
 
     def tempo_esgotado(saida):
         """Conta tempos esgotados seguidos e o orçamento do host; devolve
@@ -3489,6 +3576,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
             estado_tempo["seguidos"] += 1
             if estado_tempo["seguidos"] >= 2:
                 log(ip, "[ABORTADO] dois comandos seguidos sem resposta")
+                estado_tempo["motivo"] = "consecutive_timeouts"
                 return True
             ressincronizar(conn, ip)
         else:
@@ -3496,6 +3584,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
         if time.perf_counter() - inicio_host > TEMPO_MAX_HOST:
             log(ip, f"[ABORTADO] tempo máximo por equipamento "
                     f"({TEMPO_MAX_HOST // 60} min, NETSNAP_TEMPO_MAX_HOST)")
+            estado_tempo["motivo"] = "host_time_limit"
             return True
         return False
 
@@ -3593,6 +3682,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                     # idênticas e nenhum dado; a coleta deste host termina
                     # aqui, com o motivo registrado no relatório.
                     perdeu_sessao = True
+                    estado_tempo["motivo"] = "session_closed"
                     log(ip, "[ABORTADO] sessão encerrada pelo equipamento")
                     depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
             if saidas:
@@ -3618,6 +3708,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
                 if saida.startswith("[ERRO ao executar comando:") and \
                         sessao_perdida(saida):
                     perdeu_sessao = True
+                    estado_tempo["motivo"] = "session_closed"
                     log(ip, "[ABORTADO] sessão encerrada pelo equipamento")
                     depurar(ip, "sessao perdida", f"apos: {cmd[:80]}")
             return saidas
@@ -3651,7 +3742,7 @@ def coletar(ip, porta, tipo, usuario, senha, secoes, nome_modo,
     arquivo = escrever_relatorio(
         ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         incluir_sensivel, apps_detectados, contexto_usado, protocolo,
-        perdeu_sessao, diag_vizinhanca,
+        perdeu_sessao, diag_vizinhanca, estado_tempo["motivo"],
     )
     return arquivo, hostname
 
@@ -3694,7 +3785,7 @@ def cerca_markdown(texto):
 def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
                        incluir_sensivel, apps, contexto_usado,
                        protocolo="ssh", sessao_encerrada=False,
-                       vizinhanca=None):
+                       vizinhanca=None, motivo_interrupcao=""):
     agora = datetime.now()
     meta = {
         "netsnap_version": __version__,
@@ -3708,7 +3799,11 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
         "sections": secoes,
         "applications": [APPS_LINUX[a]["nome"] for a in apps],
         "transport": protocolo,
+        # session_lost segue verdadeiro em qualquer interrupção (o netalerta
+        # e o painel o leem como "coleta incompleta"); abort_reason diz qual:
+        # session_closed, consecutive_timeouts ou host_time_limit.
         "session_lost": sessao_encerrada,
+        "abort_reason": motivo_interrupcao if sessao_encerrada else "",
         "sensitive_data": "included" if incluir_sensivel else "redacted",
         "read_only": True,
         "config_changes_made": 0,
@@ -3795,7 +3890,25 @@ def escrever_relatorio(ip, hostname, tipo, perfil, blocos, nome_modo, secoes,
             "tratados como inexistentes** — confirme por interface ativa sem "
             "vizinho declarado.\n"
         )
-    if sessao_encerrada:
+    if sessao_encerrada and motivo_interrupcao == "consecutive_timeouts":
+        md.append(
+            "> **Coleta incompleta.** Dois comandos seguidos ficaram sem "
+            "resposta dentro do tempo limite e o netsnap interrompeu a coleta "
+            "deste equipamento; os comandos seguintes não foram enviados. As "
+            "seções ausentes não indicam recurso inexistente — indicam que a "
+            "coleta foi interrompida. Causas frequentes: equipamento com CPU "
+            "alta, saída muito grande ou lenta, ou prompt não reconhecido.\n"
+        )
+    elif sessao_encerrada and motivo_interrupcao == "host_time_limit":
+        md.append(
+            "> **Coleta incompleta.** A coleta atingiu o tempo máximo por "
+            f"equipamento ({TEMPO_MAX_HOST // 60} min, ajustável em "
+            "NETSNAP_TEMPO_MAX_HOST) e foi interrompida pelo netsnap; os "
+            "comandos seguintes não foram enviados. As seções ausentes não "
+            "indicam recurso inexistente — indicam que a coleta foi "
+            "interrompida.\n"
+        )
+    elif sessao_encerrada:
         md.append(
             "> **Coleta incompleta.** O equipamento encerrou a sessão durante "
             "a execução e os comandos seguintes não chegaram a ser enviados. "
