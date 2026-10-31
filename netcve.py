@@ -32,7 +32,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 import os
 import re
@@ -213,7 +213,7 @@ REGRAS_CONFIG = [
         # No RouterOS o bloco /snmp community também guarda os usuários
         # SNMPv3 (security=authorized|private); só a entrada sem isso é v1/v2c.
         "padrao": r"(?im)^[ \t]*(?:snmp-server\s+community|snmp-agent\s+community|"
-                  r"set\s+snmp\s+community)|"
+                  r"set\s+snmp\s+community|r[ow]community6?\b|com2sec6?\b)|"
                   r"^/snmp community\s*$(?:\n(?!/).*)*?\n(?:add|set)\b"
                   r"(?![^\n]*(?:security=(?:authorized|private)|disabled=yes))[^\n]*",
         "recomendacao": "Migrar para SNMPv3 (authPriv) e restringir origens.",

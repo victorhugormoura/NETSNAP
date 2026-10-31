@@ -18,7 +18,7 @@ Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT. Consulte o arquivo LICENSE.
 """
 
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 import os
 import re
@@ -686,6 +686,16 @@ PERFIS = {
             # Parâmetros de rede alterados em relação ao padrão
             "{S}cat /etc/sysctl.conf /etc/sysctl.d/*.conf 2>/dev/null | "
             "grep -v -E '^[[:space:]]*#|^[[:space:]]*$'",
+            # Serviços de rede comuns num servidor de provedor: SNMP, NTP e
+            # VRRP. Sem comentários; segredos (comunidade, chave de auth/priv
+            # SNMPv3, chave NTP, senha do keepalived) saem mascarados pelo
+            # sanitizador, e a comunidade SNMP padrão vira
+            # ***REMOVIDO-TRIVIAL*** e é apontada pelo netcve.
+            "for f in /etc/snmp/snmpd.conf /etc/snmp/snmp.conf "
+            "/etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf /etc/ntp.conf "
+            "/etc/ntpsec/ntp.conf /etc/keepalived/keepalived.conf; do "
+            "[ -f \"$f\" ] || continue; echo \"===== $f\"; "
+            "{S}grep -v -E '^[[:space:]]*(#|;|!|$)' \"$f\" | head -n 120; done",
         ],
         # Com sudo: sem ele, só o journal do próprio usuário.
         "logs": ["{S}journalctl -n 300 --no-pager"],

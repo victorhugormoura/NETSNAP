@@ -421,7 +421,12 @@ SEGREDOS = [('J01',
  ('R08', 'olcRootPW: {SSHA}LxLdapR08hash', ['LxLdapR08hash']),
  ('R09', 'user_key: LxPushoverR09key', ['LxPushoverR09key']),
  ('R10', 'terminal user name buildrun_new_password root "LxSmartaxR10Hash" 1 2 3',
-  ['LxSmartaxR10Hash'])]
+  ['LxSmartaxR10Hash']),
+ ('R11', 'rocommunity LxRoComR11forte 10.0.0.0/8', ['LxRoComR11forte']),
+ ('R12', 'rwcommunity LxRwComR12forte 192.168.0.0/16', ['LxRwComR12forte']),
+ ('R13', 'createUser monitor SHA "LxAuthR13pass" AES "LxPrivR13pass"',
+  ['LxAuthR13pass', 'LxPrivR13pass']),
+ ('R14', 'com2sec redeLab 10.0.0.0/8 LxCom2secR14', ['LxCom2secR14'])]
 
 # (id, texto, trechos que PRECISAM sobreviver)
 PRESERVAR = [('P01',

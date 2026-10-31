@@ -1,6 +1,6 @@
 # netsnap — referência de capacidades
 
-Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.0**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.0**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netcontrol 0.1.0**, **netalerta 0.1.0**, **netsnap servidor 1.0.2**.
+Documento de contexto para projetos que vão consumir, integrar ou estender o netsnap. Descreve o que a ferramenta faz, o que entrega, em que formato e com quais limites. Versões cobertas: **netsnap 1.18.1**, netsnap_transporte 1.1.2, netdiag 1.1.3, **netcve 0.5.1**, **painel netsnap_web 0.4.1**, netsnap_topologia 1.1.0, netsnap_desenho 1.0.0, netsnap_md 1.0.2, **netsnap_ia 0.1.1**, **netcontrol 0.1.0**, **netalerta 0.1.0**, **netsnap servidor 1.0.2**.
 
 Autor: Victor Hugo R. Moura (VHRMO3) / Infinity Consulting — licença MIT.
 
@@ -143,7 +143,7 @@ Duplicatas são removidas. Expansões acima de 256 alvos pedem confirmação; um
 | `cisco_ios` | Cisco IOS/IOS-XE (ASR 1000) | SSH, Telnet | |
 | `cisco_xr` | Cisco IOS-XR (ASR 9000) | SSH, Telnet | |
 | `mikrotik_routeros` | MikroTik RouterOS v6/v7 | SSH, Telnet | `/export hide-sensitive` com recuo para `/export`; `/ip service print` para serviços de gerência; interfaces e endereços dinâmicos (PPPoE) só contados; sessões PPPoE contadas, histórico de mudanças (`/system history`), NTP e conntrack |
-| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha; tabela de rotas contada por família e cortada (servidores com BGP completo); `ip6tables-save`, `conntrack -S`; comandos fora do histórico do shell |
+| `linux` | Servidor Linux (Debian/Ubuntu/RHEL e derivados) | SSH, Telnet | usa `sudo -n` quando disponível, sem pedir senha; tabela de rotas contada por família e cortada (servidores com BGP completo); `ip6tables-save`, `conntrack -S`; configs de serviços de rede (snmpd, chrony/ntp, keepalived) sem comentários e com segredos mascarados; comandos fora do histórico do shell |
 
 ### Módulos de aplicação em Linux
 
@@ -268,7 +268,7 @@ Não acessa equipamentos. Lê os snapshots (o mais recente por host, salvo `--to
 - cruza tudo com o CISA KEV (com fabricante, produto, data e uso por ransomware) e com o EPSS;
 - aplica o catálogo de falhas graves: versão afetada **e** condição de exposição lida do snapshot, mais mitigações encontradas. Entradas: PHP2Shell (CVE-2026-109618/109619), MikroTrick (CVE-2026-67279, 86060, 67277, 67276, 67278, 67281) e Junos Flowspec JSA112187 (CVE-2026-102178, 101990, 101948, 101949; só com família flow no BGP, faixas próprias do Evolved). Para PHP de pacote da distribuição, vale o resultado do OSV;
 - lista o "KEV do fabricante": CVEs exploradas do produto em uso que a consulta por versão não confirmou, para conferir no boletim;
-- aplica 13 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard, pipe do ExaBGP gravável por todos, `WANsupervisor` sem `-n` e gráficos sem banco de séries);
+- aplica 13 heurísticas de configuração (Telnet ativo, SNMP padrão, SNMP v1/v2c — inclusive net-snmp (`rocommunity`/`com2sec`) em servidores Linux, HTTP de gerência, serviços legados do RouterOS, `PermitRootLogin yes`, recursão DNS aberta, versão do BIND exposta, banco de dados em todas as interfaces, NTP sem autenticação; no Wanguard, pipe do ExaBGP gravável por todos, `WANsupervisor` sem `-n` e gráficos sem banco de séries);
 - identifica GoBGP (`gobgpd --version`) e FRRouting (`frr version`) para a consulta à NVD; instalados por pacote da distribuição, vão para o OSV.
 
 Gera `_cve_triagem_<ts>.md`, e com as opções `.csv` e `.json` (`netcve/1`: por host, versões com CVEs, pacotes com vulnerabilidades, catálogo, KEV do fabricante e configuração, com KEV e EPSS por CVE). Cache de 7 dias em `~/.netcve_cache.json` (NVD, resumos do OSV e EPSS). Falha de TLS ou erro 4xx não é repetido. Resultado é triagem, não laudo.
