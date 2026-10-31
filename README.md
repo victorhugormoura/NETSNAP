@@ -505,7 +505,7 @@ O `netcve.py` lê os snapshots gerados pelo netsnap, extrai versões de software
 - **NVD (NIST)**, por CPE, para o sistema dos equipamentos e para aplicações;
 - **OSV.dev**, para os pacotes de servidores **Debian, Ubuntu, Rocky Linux e AlmaLinux**, pela versão exata do pacote da distribuição. Isso respeita as correções retroportadas: o PHP 8.3.6 do Ubuntu 24.04 recebe as correções de segurança e continua 8.3.6, e a comparação pela versão upstream erraria;
 - **CISA KEV** (exploração confirmada) e **EPSS** (probabilidade de exploração em 30 dias);
-- um **catálogo de falhas graves** que avalia, além da versão, a configuração que torna o equipamento explorável. Começa com o **PHP2Shell** (CVE-2026-109618/109619: FPM ou mod_php ativo, mitigações no php.ini) o **MikroTrick** (SSH do RouterOS aberto, bandwidth-server, device-mode `flagged`, conta `ops`) e o **JSA112187 do Junos** (CVE-2026-102178/101990/101948/101949: só aponta com BGP Flowspec configurado; `update-threading` e Flowspec VPN com BMP indicam as variantes; versões comparadas por trem, release e build, com as do Junos OS Evolved à parte). Entradas extras podem vir de um JSON com `--catalogo`.
+- um **catálogo de falhas graves** que avalia, além da versão, a configuração que torna o equipamento explorável. Começa com o **PHP2Shell** (CVE-2026-109618/109619: FPM ou mod_php ativo, mitigações no php.ini) o **MikroTrick** (SSH do RouterOS aberto, bandwidth-server, device-mode `flagged`, conta `ops`) e o **JSA112187 do Junos** (CVE-2026-102178/101990/101948/101949: só aponta com BGP Flowspec configurado; `update-threading` e Flowspec VPN com BMP indicam as variantes; versões comparadas por trem, release e build, com as do Junos OS Evolved à parte; Flowspec herdado por `apply-groups` conta, configuração desativada não, e trens X/D como `15.1X49-D200` saem como *conferir manualmente*). Entradas extras podem vir de um JSON com `--catalogo`.
 
 Gera relatório Markdown e, com `--json`, o mesmo resultado em JSON (`netcve/1`) para painel, API ou análise por IA.
 
@@ -515,7 +515,7 @@ Não acessa equipamentos e não usa credenciais: opera apenas sobre os arquivos 
 python3 netcve.py snapshots/                    # analisa a pasta de snapshots
 python3 netcve.py snapshots/ --api-key SUA_CHAVE
 python3 netcve.py snapshots/ --sem-rede         # só heurísticas locais
-python3 netcve.py snapshots/ --csv              # gera CSV além do Markdown
+python3 netcve.py snapshots/ --csv              # gera CSV além do Markdown (célula iniciada por = + - @ ganha apóstrofo, contra fórmula)
 python3 netcve.py snapshots/ --todos            # inclui coletas antigas do mesmo host
 python3 netcve.py snapshots/ --inseguro         # ignora validação TLS (ver abaixo)
 python3 netcve.py snapshots/ --json             # resultado também em JSON
@@ -531,7 +531,7 @@ python3 netcve.py snapshots/ --catalogo extra.json
 
 **Falha de certificado TLS:** se as consultas falharem com `CERTIFICATE_VERIFY_FAILED ... certificate has expired`, o problema costuma estar no repositório de autoridades da estação, não no servidor. O netcve usa o pacote `certifi` automaticamente quando instalado (`pip install --upgrade certifi`) e, ao detectar essa falha, interrompe as consultas e explica as opções em vez de repetir o erro para cada versão.
 
-**Chave da API NVD:** opcional e gratuita (<https://nvd.nist.gov/developers/request-an-api-key>). Sem chave o limite é de 5 requisições a cada 30 segundos (~6,5 s por consulta); com chave, 50 a cada 30 segundos. Pode ser passada em `--api-key` ou na variável de ambiente `NVD_API_KEY`. Versões repetidas no parque são consultadas uma única vez e o resultado fica em cache local por 7 dias.
+**Chave da API NVD:** opcional e gratuita (<https://nvd.nist.gov/developers/request-an-api-key>). Sem chave o limite é de 5 requisições a cada 30 segundos (~6,5 s por consulta); com chave, 50 a cada 30 segundos. Pode ser passada em `--api-key` ou na variável de ambiente `NVD_API_KEY`. Versões repetidas no parque são consultadas uma única vez e o resultado fica em cache local por 7 dias; execuções com `--inseguro` não gravam no cache.
 
 **O que é analisado:**
 
@@ -556,7 +556,7 @@ A correspondência é feita **pela versão declarada**, não por verificação a
 - **Debian e Ubuntu listam CVEs sem correção.** Muitas entradas aparecem como "sem correção" (aguardando triagem da distribuição). O relatório separa por pacote, mostra só KEV, crítica, alta ou EPSS ≥ 10% e traz a maior versão corrigida; médias e baixas ficam na contagem e no JSON.
 - **O catálogo depende do que foi coletado.** As condições de exposição do MikroTrick usam comandos novos do perfil RouterOS (1.17.1); em snapshots antigos a exposição aparece como "nenhum indicador encontrado". O formato da saída de `/ip service print detail` foi conferido pela documentação, não em equipamento `[validar]`.
 - **A versão é lida do próprio equipamento.** A busca começa pela seção *Inventário* e ignora *Vizinhança* e *Logs*, que descrevem outros equipamentos — em versões anteriores, a versão de um vizinho LLDP podia ser atribuída ao host.
-- **Community SNMP padrão** só é detectável em snapshots coletados com dados sensíveis incluídos; com a sanitização ativa, o valor chega mascarado. A regra considera apenas declarações SNMP, para não confundir com nomes de community BGP.
+- **Community SNMP padrão** é detectada também com a sanitização ativa: o netsnap marca valores triviais (`public`, `private`...) como `***REMOVIDO-TRIVIAL***`. A regra considera apenas declarações SNMP, para não confundir com nomes de community BGP. Em snapshot coletado com dados sensíveis, ou sem o campo `sensitive_data: redacted`, a evidência citada no relatório é omitida, para o segredo não ir parar na triagem.
 - A fonte autoritativa é sempre o boletim do fabricante (Juniper SIRT, Cisco PSIRT, Huawei PSIRT, MikroTik).
 
 Trate o relatório como **triagem para priorizar investigação**, não como laudo de vulnerabilidade. Os itens marcados **KEV** (catálogo CISA de exploração confirmada) são a prioridade real e merecem verificação imediata.
