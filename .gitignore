@@ -9,6 +9,10 @@ _cve_triagem_*.json
 _ia_analise_*.md
 _ia_analise_*.json
 _ia_pedidos_*/
+_netcontrol_plano_*.md
+_netcontrol_plano_*.json
+_netalerta_*.txt
+_netalerta_*.json
 _diagnostico_*.md
 _diagnostico_*.json
 _indice_*.md
