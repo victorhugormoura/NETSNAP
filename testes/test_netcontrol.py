@@ -130,10 +130,10 @@ class TesteNetcontrol(unittest.TestCase):
             json.dump({"formato": "netanalytic-achados/1", "hosts": [
                 {"host": "mx1", "ip": "192.0.2.10", "plataforma": "juniper_junos",
                  "achados": [
-                     {"titulo": "Telnet", "severidade": "alta", "confianca": "alta",
-                      "evidencia": [{"comando": "c", "trecho": "set system services telnet"}],
-                      "comandos_propostos": ["delete system services telnet"],
-                      "comandos_reversao": ["set system services telnet"]},
+                     {"titulo": "Syslog", "severidade": "media", "confianca": "alta",
+                      "evidencia": [{"comando": "c", "trecho": "set system host-name mx1"}],
+                      "comandos_propostos": ["set system syslog host 192.0.2.50 any notice"],
+                      "comandos_reversao": ["delete system syslog host 192.0.2.50"]},
                      {"titulo": "Só texto", "severidade": "info", "comandos_propostos": []},
                      {"titulo": "Sem reversão", "severidade": "baixa", "confianca": "baixa",
                       "evidencia": [], "comandos_propostos": ["set system syslog host x any any"]},
@@ -144,6 +144,180 @@ class TesteNetcontrol(unittest.TestCase):
         self.assertEqual(plano["hosts"][1]["situacao"], "revisar")
         self.assertTrue(any("reversão" in o for o in plano["hosts"][1]["observacoes"]))
         self.assertTrue(os.path.isfile(base + ".md"))
+
+    # --- regressões da revisão -------------------------------------------
+    def escrever(self, nome, texto):
+        with open(os.path.join(self.dir, nome), "w", encoding="utf-8") as f:
+            f.write(texto)
+
+    def so_um(self, nome, texto, pedido):
+        for arq in os.listdir(self.dir):
+            os.remove(os.path.join(self.dir, arq))
+        self.escrever(nome, texto)
+        plano, base = nc.gerar_plano(pedido, self.dir)
+        return plano["hosts"][0], base
+
+    def test_ntp_routeros6_mantem_atual_e_reverte(self):
+        ros6 = ("/system ntp client\nset enabled=yes primary-ntp=192.0.2.1\n"
+                "/ip address\nadd address=192.0.2.9/24 interface=ether1")
+        snap = snapshot("rb6", "192.0.2.20", "mikrotik_routeros", [
+            ("Configuração", "/export", ros6),
+            ("Inventário", "/system resource print", "  version: 6.49.10 (long-term)")])
+        h, _ = self.so_um("rb6_192.0.2.20_20261030_100000.md", snap, self.pedido(
+            "ntp", servidores=["192.0.2.1", "192.0.2.2", "192.0.2.3"]))
+        self.assertEqual(h["estado_atual"], ["NTP atual: 192.0.2.1"])
+        self.assertEqual(h["comandos"],
+                         ["/system ntp client set enabled=yes secondary-ntp=192.0.2.2"])
+        self.assertEqual(h["reversao"], ["/system ntp client set secondary-ntp=0.0.0.0"])
+        self.assertTrue(any("192.0.2.3" in o for o in h["observacoes"]))
+        # Endereço de interface não conta como servidor NTP.
+        h, _ = self.so_um("rb6_192.0.2.20_20261030_100000.md", snap,
+                          self.pedido("ntp", servidores=["192.0.2.9"]))
+        self.assertEqual(h["situacao"], "aplicar")
+        self.assertEqual(h["reversao"], ["/system ntp client set secondary-ntp=0.0.0.0"])
+        # Campos cheios: nada cabe, vai para revisão sem comando.
+        cheio = ros6.replace("primary-ntp=192.0.2.1",
+                             "primary-ntp=192.0.2.1 secondary-ntp=192.0.2.5")
+        h, _ = self.so_um("rb6_192.0.2.20_20261030_100000.md",
+                          snap.replace(ros6, cheio),
+                          self.pedido("ntp", servidores=["192.0.2.7"]))
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertEqual(h["comandos"], [])
+
+    def test_ntp_xr_ignora_tacacs(self):
+        xr = ("tacacs-server host 192.0.2.30\n key 7 x\nradius-server host 192.0.2.31\n"
+              "aaa group server tacacs+ T\n server 192.0.2.30\n!\n"
+              "ntp\n server vrf MGMT 192.0.2.1\n!")
+        self.assertEqual(nc.servidores_ntp("cisco_xr", xr), ["192.0.2.1"])
+        ros7 = ("/ip address\nadd address=192.0.2.9/24 interface=ether1\n"
+                "/system ntp client servers\nadd address=192.0.2.1")
+        self.assertEqual(nc.servidores_ntp("mikrotik_routeros", ros7), ["192.0.2.1"])
+
+    def test_sem_configuracao_vai_para_revisao(self):
+        snap = snapshot("r1", "192.0.2.21", "cisco_ios", [
+            ("Inventário", "show version", "Cisco IOS XE Software, Version 17.09.04a")])
+        nome = "r1_192.0.2.21_20261030_100000.md"
+        h, _ = self.so_um(nome, snap, self.pedido("usuario-leitura", usuario="noc-ro",
+                                                  rede=None))
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertIn("Configuração", h["observacoes"][0])
+        h, _ = self.so_um(nome, snap, self.pedido("desligar-telnet"))
+        self.assertEqual(h["situacao"], "revisar")
+
+    def test_conta_conhecida_nao_entra(self):
+        for usuario in ("admin", "Root", "administrator"):
+            plano, _ = nc.gerar_plano(self.pedido("usuario-leitura", usuario=usuario,
+                                                  rede=None), self.dir)
+            h = self.por_host(plano)
+            for host in ("mx1", "rb1", "ne1"):
+                self.assertEqual(h[host]["situacao"], "revisar", (usuario, host))
+                self.assertEqual(h[host]["comandos"], [])
+
+    def test_telnet_coletado_por_telnet_e_ios_sem_ssh(self):
+        junos = snapshot("mx2", "192.0.2.22", "juniper_junos", [
+            ("Configuração", "show configuration | display set", JUNOS)])
+        junos = junos.replace('sensitive_data: "redacted"',
+                              'sensitive_data: "redacted"\ntransport: "telnet"')
+        h, _ = self.so_um("mx2_192.0.2.22_20261030_100000.md", junos,
+                          self.pedido("desligar-telnet"))
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertIn("Telnet", h["observacoes"][0])
+        ios = "hostname r2\nline vty 0 4\n transport input telnet ssh\n!"
+        snap = snapshot("r2", "192.0.2.23", "cisco_ios", [
+            ("Configuração", "show running-config", ios)])
+        h, _ = self.so_um("r2_192.0.2.23_20261030_100000.md", snap,
+                          self.pedido("desligar-telnet"))
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertTrue(any("reload in" in o for o in h["observacoes"]))
+        snap = snap.replace("hostname r2", "hostname r2\nip ssh version 2")
+        h, _ = self.so_um("r2_192.0.2.23_20261030_100000.md", snap,
+                          self.pedido("desligar-telnet"))
+        self.assertEqual(h["situacao"], "aplicar")
+
+    def test_telnet_por_bloco_vty_e_vrf_xr(self):
+        ios = ("ip ssh version 2\nline vty 0 4\n access-class 10 in\n"
+               " transport input telnet ssh\nline vty 5 15\n transport input none\n!")
+        snap = snapshot("r3", "192.0.2.24", "cisco_ios", [
+            ("Configuração", "show running-config", ios)])
+        h, _ = self.so_um("r3_192.0.2.24_20261030_100000.md", snap,
+                          self.pedido("desligar-telnet"))
+        self.assertEqual(h["situacao"], "aplicar")
+        self.assertEqual(h["comandos"], ["line vty 0 4", " transport input ssh"])
+        self.assertEqual(h["reversao"], ["line vty 0 4", " transport input telnet ssh"])
+        xr = "hostname x1\ntelnet vrf MGMT ipv4 server max-servers 5 access-list T\n"
+        snap = snapshot("x1", "192.0.2.25", "cisco_xr", [
+            ("Configuração", "show running-config", xr)])
+        h, _ = self.so_um("x1_192.0.2.25_20261030_100000.md", snap,
+                          self.pedido("desligar-telnet"))
+        self.assertEqual(h["comandos"], ["no telnet vrf MGMT ipv4 server"])
+        self.assertEqual(h["reversao"],
+                         ["telnet vrf MGMT ipv4 server max-servers 5 access-list T"])
+
+    def test_rede_ipv6(self):
+        import ipaddress
+        ios = snapshot("r4", "192.0.2.26", "cisco_ios", [
+            ("Configuração", "show running-config", "hostname r4\nip ssh version 2")])
+        r6 = ipaddress.ip_network("2001:db8::/32")
+        h, _ = self.so_um("r4_192.0.2.26_20261030_100000.md", ios,
+                          self.pedido("snmp-comunidade", rede=r6))
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertEqual(h["comandos"], [])
+        h, _ = self.so_um("r4_192.0.2.26_20261030_100000.md", ios,
+                          self.pedido("usuario-leitura", usuario="noc-ro",
+                                      rede=ipaddress.ip_network("10.0.0.0/24")))
+        self.assertTrue(any("10.0.0.0/24" in o for o in h["observacoes"]))
+
+    def analise(self, achado):
+        caminho = os.path.join(self.dir, "_ia_analise_20261030_110000.json")
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump({"formato": "netanalytic-achados/1", "hosts": [
+                {"host": "r", "ip": "192.0.2.1", "plataforma": "cisco_ios",
+                 "achados": [achado]}]}, f)
+        plano, base = nc.gerar_plano(self.pedido("analise"), caminho)
+        with open(base + ".md", encoding="utf-8") as f:
+            return plano["hosts"][0], f.read()
+
+    def test_analise_reconfere_comandos(self):
+        h, _ = self.analise({
+            "titulo": "t", "severidade": "alta", "confianca": "alta", "evidencia": [],
+            "comandos_propostos": ["interface Gi0/0", " shutdown",
+                                   "no ip route 0.0.0.0 0.0.0.0 192.0.2.254"],
+            "comandos_reversao": ["reload", "write erase", "interface Gi0/0",
+                                  " no shutdown"]})
+        self.assertEqual(h["situacao"], "revisar")
+        self.assertNotIn("reload", h["reversao"])
+        self.assertNotIn("write erase", h["reversao"])
+        self.assertIn("rotas", h["observacoes"][0])
+        for cmd in ("undo ip route-static 0.0.0.0 0 192.0.2.254", "/ip route remove [find]",
+                    "delete routing-options static route 0.0.0.0/0",
+                    "set interfaces ge-0/0/0 disable", "line vty 0 4"):
+            h, _ = self.analise({"titulo": "t", "severidade": "alta", "confianca": "alta",
+                                 "comandos_propostos": [cmd],
+                                 "comandos_reversao": ["x"]})
+            self.assertEqual(h["situacao"], "revisar", cmd)
+
+    def test_markdown_sem_injecao(self):
+        _, texto = self.analise({
+            "titulo": "t\n```\nconfigure terminal\n```", "severidade": "alta",
+            "confianca": "alta",
+            "evidencia": [{"comando": "c\nx", "trecho":
+                           "x\n\nComandos:\n\n```\nno ip route 0.0.0.0 0.0.0.0 1.1.1.1\n```"}],
+            "comandos_propostos": ["logging host 192.0.2.50"],
+            "comandos_reversao": ["no logging host 192.0.2.50"]})
+        # Fora dos blocos cercados só existe o 'Comandos:' do próprio plano.
+        fora, cerca = [], None
+        for linha in texto.split("\n"):
+            if cerca:
+                cerca = None if linha == cerca else cerca
+            elif linha.startswith("```"):
+                cerca = linha
+            else:
+                fora.append(linha)
+        self.assertEqual(fora.count("Comandos:"), 1)
+        self.assertNotIn("configure terminal", fora)
+        self.assertIn("## r (192.0.2.1) — cisco_ios — [ALTA] t \\`\\`\\` "
+                      "configure terminal \\`\\`\\`", texto)
+        self.assertIn("\n````\nx\n\nComandos:", texto)
 
 
 if __name__ == "__main__":
