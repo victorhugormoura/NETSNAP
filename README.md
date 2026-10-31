@@ -570,10 +570,12 @@ Compara coletas do netsnap e triagens do netcve entre dois instantes e avisa: co
 ```bash
 python3 netalerta.py snapshots/                      # as duas coletas mais recentes de cada host
 python3 netalerta.py snapshots/ --estado estado.json # guarda o visto; só avisa o que é novo
-python3 netalerta.py snapshots/ --simular            # mostra e grava, não envia
+python3 netalerta.py snapshots/ --simular            # mostra e grava, não envia nem atualiza o --estado
 ```
 
-Os destinos vêm de variáveis de ambiente (não da linha de comando, para não ficarem no `ps` nem no histórico): `NETALERTA_TELEGRAM_TOKEN`/`NETALERTA_TELEGRAM_CHAT`, `NETALERTA_WEBHOOK`, e para e-mail `NETALERTA_SMTP` (host:porta), `NETALERTA_SMTP_DE`, `NETALERTA_SMTP_PARA` e, opcionais, `NETALERTA_SMTP_USUARIO`/`NETALERTA_SMTP_SENHA` (STARTTLS). Sem destino, grava só o arquivo. Saída: `_netalerta_<data>.txt` e `.json` (`netalerta/1`).
+Os destinos vêm de variáveis de ambiente (não da linha de comando, para não ficarem no `ps` nem no histórico): `NETALERTA_TELEGRAM_TOKEN`/`NETALERTA_TELEGRAM_CHAT`, `NETALERTA_WEBHOOK`, e para e-mail `NETALERTA_SMTP` (host:porta), `NETALERTA_SMTP_DE`, `NETALERTA_SMTP_PARA` e, opcionais, `NETALERTA_SMTP_USUARIO`/`NETALERTA_SMTP_SENHA` (porta 465 com TLS implícito; nas demais, STARTTLS, e sem TLS o login é recusado). O webhook precisa ser `https` (`http` só para loopback). Sem destino, grava só o arquivo. Um alerta só conta como visto no `--estado` depois que ao menos um destino o aceitou (sem destino configurado, vale a gravação do arquivo).
+
+A diferença de configuração só é enviada quando os dois snapshots estão com `sensitive_data: redacted`, e passa de novo pelo sanitizador quando o netsnap está instalado; caso contrário o alerta leva só a contagem de linhas. Linhas de cabeçalho que mudam a cada coleta (data do `/export` do RouterOS, `!Time:` do NX-OS, `ntp clock-period` do IOS, `## Last commit` do Junos e similares) são ignoradas, e coletas com sessão interrompida não são comparadas. Saída: `_netalerta_<data>.txt` e `.json` (`netalerta/1`).
 
 ---
 

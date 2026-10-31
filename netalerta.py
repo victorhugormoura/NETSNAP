@@ -5,18 +5,19 @@ Compara coletas do netsnap e triagens do netcve entre dois instantes e
 levanta alertas:
   - configuração mudou entre a coleta anterior e a atual de um equipamento;
   - CVE com exploração confirmada (CISA KEV) nova em relação à triagem anterior;
-  - falha grave do catálogo (netcve) nova ou agravada;
-  - equipamento que deixou de ser coletado (sumiu do inventário).
+  - falha grave do catálogo (netcve) nova ou agravada.
 
 Entrega os alertas no terminal e num arquivo, e, quando configurado, por
 Telegram, webhook (JSON) ou e-mail. Só biblioteca padrão. Os destinos vêm de
 variáveis de ambiente, nunca da linha de comando (não ficam no histórico nem
 no 'ps'):
   NETALERTA_TELEGRAM_TOKEN, NETALERTA_TELEGRAM_CHAT
-  NETALERTA_WEBHOOK            (URL https que recebe POST JSON)
-  NETALERTA_SMTP   = host:porta
+  NETALERTA_WEBHOOK            (URL https que recebe POST JSON; http só
+                                para loopback)
+  NETALERTA_SMTP   = host:porta  (porta 465: TLS implícito; outras: STARTTLS)
   NETALERTA_SMTP_DE, NETALERTA_SMTP_PARA   (remetente e destinatários)
-  NETALERTA_SMTP_USUARIO, NETALERTA_SMTP_SENHA   (opcional, STARTTLS)
+  NETALERTA_SMTP_USUARIO, NETALERTA_SMTP_SENHA   (opcional; sem TLS o login
+                                                  é recusado)
 
 Uso:
   python3 netalerta.py snapshots/                 compara as duas coletas mais recentes
@@ -31,8 +32,10 @@ Licenciado sob a licença MIT.
 """
 import argparse
 import difflib
+import ipaddress
 import json
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -40,8 +43,17 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
+from urllib.parse import urlsplit
 
 import netsnap_md as md
+
+# Segunda passada do sanitizador nas linhas de diferença antes do envio. O
+# netsnap traz o Netmiko junto; numa estação só de análise, sem ele, vale
+# apenas a exigência de "sensitive_data: redacted" dos dois snapshots.
+try:
+    from netsnap import sanitizar as _sanitizar
+except Exception:
+    _sanitizar = None
 
 __version__ = "0.1.0"
 FORMATO = "netalerta/1"
@@ -56,9 +68,43 @@ class ErroAlerta(Exception):
 # ---------------------------------------------------------------------------
 # Comparação de configuração entre as duas coletas de cada equipamento
 # ---------------------------------------------------------------------------
+# Linhas que o próprio equipamento reescreve a cada exportação (data, hora,
+# relógio do NTP). Sem este filtro toda coleta acusaria "configuração mudou".
+LINHAS_VOLATEIS = [re.compile(p, re.IGNORECASE) for p in (
+    r"^#\s.*\bby RouterOS\b",                       # MikroTik /export
+    r"^!\s*Time:",                                   # NX-OS
+    r"^!\s*Running configuration last done at\b",   # NX-OS
+    r"^\s*ntp clock-period\b",                       # Cisco IOS
+    r"^!\s*NVRAM config last updated\b",            # Cisco IOS
+    r"^!\s*Last configuration change\b",            # Cisco IOS
+    r"^Current configuration\s*:",                   # Cisco IOS (bytes)
+    r"^!\s*Last configuration was (updated|saved)\b",  # Huawei VRP
+    r"^\s*## Last (commit|changed)\b",               # Junos
+)]
+
+
 def _config(snap):
     return "\n".join(c["saida"] or "" for s in snap["secoes"]
                      if s["chave"] == "config" for c in s["comandos"])
+
+
+def _linhas_estaveis(texto):
+    return [l for l in texto.splitlines()
+            if not any(p.search(l) for p in LINHAS_VOLATEIS)]
+
+
+def _diferenca(a, b):
+    return [l for l in difflib.unified_diff(a, b, "anterior", "atual",
+                                            lineterm="", n=0)
+            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+
+
+def _id_config(host, ip, coletado_em):
+    # hash() do Python muda a cada processo (PYTHONHASHSEED) e o --estado
+    # nunca reconheceria o alerta já dado. O instante da coleta mais recente
+    # identifica a mudança: a mesma diferença numa coleta posterior (alguém
+    # desfez e refez) é um evento novo e deve avisar de novo.
+    return f"config|{host}|{ip}|{coletado_em}"
 
 
 def duas_mais_recentes(caminhos):
@@ -82,25 +128,40 @@ def alertas_de_config(pasta):
         if not anterior:
             continue
         sa, sb = md.ler_snapshot(anterior), md.ler_snapshot(atual)
-        a, b = _config(sa).splitlines(), _config(sb).splitlines()
+        # Sessão perdida no meio da coleta deixa a configuração truncada: a
+        # comparação viraria centenas de linhas "-" que não são mudança.
+        if any(s["meta"].get("session_lost") is True for s in (sa, sb)):
+            continue
+        a, b = _linhas_estaveis(_config(sa)), _linhas_estaveis(_config(sb))
         if not a or not b:
             continue
-        diff = [l for l in difflib.unified_diff(a, b, "anterior", "atual",
-                                                lineterm="", n=0)
-                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        diff = _diferenca(a, b)
         if not diff:
             continue
         mais = sum(1 for l in diff if l[0] == "+")
         menos = sum(1 for l in diff if l[0] == "-")
+        coletado_em = sb["meta"].get("collected_at") or os.path.basename(atual)
+        # O detalhe sai da máquina (Telegram, webhook, e-mail). Snapshot
+        # coletado com dados sensíveis traria senha e comunidade SNMP no
+        # texto: nesse caso vai só a contagem de linhas.
+        if any(s["meta"].get("sensitive_data") != "redacted" for s in (sa, sb)):
+            detalhe = ("Diferença omitida: um dos snapshots não está com "
+                       "sensitive_data: redacted. Compare os arquivos localmente.")
+        else:
+            if _sanitizar is not None:
+                diff = _diferenca(_sanitizar("\n".join(a)).splitlines(),
+                                  _sanitizar("\n".join(b)).splitlines())
+            detalhe = ("\n".join(diff[:40])
+                       + ("\n[... diferença cortada]" if len(diff) > 40 else "")
+                       if diff else
+                       "Diferença apenas em trechos mascarados pelo sanitizador.")
         alertas.append({
             "tipo": "config-mudou", "severidade": "alta",
             "host": host, "ip": ip,
             "titulo": f"configuração mudou (+{mais}/-{menos} linhas)",
-            "detalhe": "\n".join(diff[:40])
-                       + ("\n[... diferença cortada]" if len(diff) > 40 else ""),
-            "coletado_em": sb["meta"].get("collected_at"),
-            # Chave estável para não repetir o mesmo alerta: as linhas mudadas.
-            "id": f"config|{host}|{ip}|" + str(hash("\n".join(sorted(diff)))),
+            "detalhe": detalhe,
+            "coletado_em": coletado_em,
+            "id": _id_config(host, ip, coletado_em),
         })
     return alertas
 
@@ -134,16 +195,34 @@ def _por_host(triagem):
     return {(h.get("host"), h.get("ip")): h for h in triagem.get("hosts") or []}
 
 
-def alertas_de_triagem(pasta):
-    arquivos = _triagens(pasta)
-    if not arquivos:
+def _triagens_validas(pasta, registrar=print, quantas=2):
+    """As 'quantas' triagens legíveis mais recentes, da mais nova para a mais
+    antiga. Arquivo corrompido (gravação interrompida, edição manual) é
+    pulado com aviso: derrubar a execução calaria também os alertas de
+    configuração."""
+    validas = []
+    for caminho in reversed(_triagens(pasta)):
+        try:
+            with open(caminho, encoding="utf-8") as f:
+                dados = json.load(f)
+        except (ValueError, OSError) as e:
+            registrar(f"[!] Triagem ilegível ignorada: {caminho}: {e}")
+            continue
+        if not isinstance(dados, dict):
+            registrar(f"[!] Triagem fora do formato ignorada: {caminho}")
+            continue
+        validas.append(dados)
+        if len(validas) == quantas:
+            break
+    return validas
+
+
+def alertas_de_triagem(pasta, registrar=print):
+    validas = _triagens_validas(pasta, registrar)
+    if not validas:
         return []
-    with open(arquivos[-1], encoding="utf-8") as f:
-        atual = json.load(f)
-    anterior = {}
-    if len(arquivos) > 1:
-        with open(arquivos[-2], encoding="utf-8") as f:
-            anterior = _por_host(json.load(f))
+    atual = validas[0]
+    anterior = _por_host(validas[1]) if len(validas) > 1 else {}
     alertas = []
     for (host, ip), h in _por_host(atual).items():
         antes = anterior.get((host, ip), {})
@@ -201,7 +280,26 @@ def enviar_telegram(texto, token, chat):
                          "disable_web_page_preview": True})
 
 
+def _url_segura(url):
+    """https sempre; http só para loopback (coletor local, testes). Os
+    alertas levam IP, versão e trecho de configuração da rede."""
+    partes = urlsplit(url)
+    if partes.scheme == "https":
+        return
+    if partes.scheme == "http":
+        host = partes.hostname or ""
+        if host == "localhost":
+            return
+        try:
+            if ipaddress.ip_address(host).is_loopback:
+                return
+        except ValueError:
+            pass
+    raise ValueError("webhook precisa ser https (http só para loopback)")
+
+
 def enviar_webhook(url, alertas):
+    _url_segura(url)
     _post_json(url, {"formato": FORMATO, "gerado_em": datetime.now().isoformat(),
                      "alertas": alertas})
 
@@ -213,11 +311,25 @@ def enviar_email(texto, cfg):
     msg["To"] = ", ".join(cfg["para"])
     msg.set_content(texto)
     host, _, porta = cfg["servidor"].partition(":")
-    with smtplib.SMTP(host, int(porta or 25), timeout=TIMEOUT) as s:
-        try:
-            s.starttls(context=ssl.create_default_context())
-        except smtplib.SMTPNotSupportedError:
-            pass
+    porta = int(porta or 25)
+    ctx = ssl.create_default_context()
+    if porta == 465:
+        # Porta de submissão com TLS implícito: a sessão já nasce cifrada.
+        conexao = smtplib.SMTP_SSL(host, porta, timeout=TIMEOUT, context=ctx)
+    else:
+        conexao = smtplib.SMTP(host, porta, timeout=TIMEOUT)
+    with conexao as s:
+        if porta != 465:
+            try:
+                s.starttls(context=ctx)
+            except smtplib.SMTPNotSupportedError:
+                # Quem está no meio pode apagar o STARTTLS do EHLO. Sem TLS
+                # a senha iria às claras: com usuário configurado, recusa.
+                # Sem usuário (relay interno) segue como antes.
+                if cfg.get("usuario"):
+                    raise smtplib.SMTPException(
+                        "servidor não ofereceu STARTTLS; login recusado "
+                        "para não enviar a senha sem TLS")
         if cfg.get("usuario"):
             s.login(cfg["usuario"], cfg["senha"])
         s.send_message(msg)
@@ -291,14 +403,14 @@ def salvar_estado(caminho, vistos):
     os.replace(tmp, caminho)
 
 
-def coletar(pasta):
-    return alertas_de_config(pasta) + alertas_de_triagem(pasta)
+def coletar(pasta, registrar=print):
+    return alertas_de_config(pasta) + alertas_de_triagem(pasta, registrar)
 
 
 def rodar(pasta, estado=None, simular=False, env=None, registrar=print):
     if not os.path.isdir(pasta):
         raise ErroAlerta(f"pasta não encontrada: {pasta}")
-    todos = coletar(pasta)
+    todos = coletar(pasta, registrar)
     vistos = carregar_estado(estado)
     novos = [a for a in todos if a["id"] not in vistos]
     agora = datetime.now()
@@ -306,6 +418,7 @@ def rodar(pasta, estado=None, simular=False, env=None, registrar=print):
              "pasta": pasta, "total": len(todos), "novos": len(novos),
              "alertas": novos, "envio": {}}
     base = os.path.join(pasta, f"_netalerta_{agora:%Y%m%d_%H%M%S}")
+    entregue = True
     if novos:
         with open(base + ".txt", "w", encoding="utf-8") as f:
             f.write(_texto(novos))
@@ -316,9 +429,15 @@ def rodar(pasta, estado=None, simular=False, env=None, registrar=print):
             saida["envio"] = {d: "simulado" for d in destinos}
         elif destinos:
             saida["envio"] = enviar(novos, destinos, registrar)
+            entregue = any(r == "ok" for r in saida["envio"].values())
         else:
             saida["envio"] = {"nenhum": "sem destino configurado (só arquivo)"}
-    if estado:
+    # Só marca como visto o que chegou a alguém: sem destino configurado, o
+    # arquivo e o terminal são a entrega; com destino, basta um ter aceitado
+    # (os outros falharam e o aviso já saiu por um canal). Se todos falharam,
+    # a próxima execução tenta de novo. Simulação não envia nada e por isso
+    # não mexe no estado.
+    if estado and not simular and entregue:
         salvar_estado(estado, vistos | {a["id"] for a in todos})
     return saida, base if novos else None
 
