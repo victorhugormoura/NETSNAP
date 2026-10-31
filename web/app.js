@@ -922,7 +922,15 @@ async function vTopologia() {
   });
   const bc = $("#topo-coletar");
   if (bc) bc.addEventListener("click", () => {
-    S.prefill = comIp.map((n) => `${n.ips_gerencia.find((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip))}   # ${n.rotulo}`).join("\n");
+    // O endereço e o nome vêm do próprio vizinho (LLDP/CDP) e podem ser
+    // forjados por qualquer equipamento ligado a uma porta monitorada. Como
+    // são hosts novos, a chave SSH apresentada é aceita no primeiro acesso:
+    // o operador confere a lista antes de entregar a senha.
+    if (!confirm("Estes endereços são anunciados pelos próprios vizinhos " +
+        "(LLDP/CDP) e podem ser forjados. Confira cada um antes de informar " +
+        "a senha. Continuar?")) return;
+    S.prefill = "# Anunciados pelos vizinhos via LLDP/CDP: confira antes de enviar a senha\n" +
+      comIp.map((n) => `${n.ips_gerencia.find((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip))}   # ${n.rotulo}`).join("\n");
     location.hash = "#/coletar";
   });
 }

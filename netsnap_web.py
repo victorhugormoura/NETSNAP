@@ -239,7 +239,7 @@ def executor_netdiag(cfg):
         timeout=int(cfg.get("timeout", 120)))
     pasta = nd.preparar_ambiente()
     anon = nd.Anonimizador(args.anonimizar)
-    alvos = _alvos(ns, cfg["alvos"], int(cfg["porta"]))[:20]
+    alvos = _alvos(ns, cfg["alvos"], int(cfg["porta"]))[:LIMITE_ALVOS_NETDIAG]
     emitir({"tipo": "alvos", "lista": [fmt_alvo(ip, p) for ip, p in alvos]})
     relatorios = []
     for ip, porta in alvos:
@@ -488,6 +488,16 @@ def pos_job(job):
 
 
 LIMITE_ALVOS = 4096
+# O netdiag mede comando por comando; mais que isto vira uma coleta.
+LIMITE_ALVOS_NETDIAG = 20
+
+
+def exigir_textos(dados, campos):
+    """Campos de texto vindos do navegador: outro tipo JSON (lista, número)
+    vira 400 em vez de AttributeError e erro 500."""
+    for c in campos:
+        if dados.get(c) is not None and not isinstance(dados[c], str):
+            raise ErroAPI(400, f"Campo inválido: {c}")
 
 
 def contar_alvos(linhas):
@@ -524,6 +534,8 @@ def contar_alvos(linhas):
 def nova_coleta(cfg, origem="manual"):
     if not CAPACIDADES["coleta"]:
         raise ErroAPI(409, CAPACIDADES["motivo"])
+    exigir_textos(cfg, ("alvos", "usuario", "senha", "modo", "protocolo",
+                        "tipo", "titulo", "varredura"))
     obrig = ("alvos", "usuario", "senha", "modo", "protocolo")
     faltando = [c for c in obrig if not str(cfg.get(c, "")).strip()]
     if faltando:
@@ -585,9 +597,16 @@ def porta_valida(valor, padrao):
 def novo_netdiag(cfg):
     if not CAPACIDADES["coleta"]:
         raise ErroAPI(409, CAPACIDADES["motivo"])
+    exigir_textos(cfg, ("alvos", "usuario", "senha"))
     for c in ("alvos", "usuario", "senha"):
         if not str(cfg.get(c, "")).strip():
             raise ErroAPI(400, f"Preencha: {c}")
+    # Contado antes de expandir: um /16 por linha seria expandido inteiro no
+    # processo filho antes do corte.
+    linhas = [l for l in cfg["alvos"].splitlines() if l.split("#", 1)[0].strip()]
+    if contar_alvos(linhas) > LIMITE_ALVOS_NETDIAG:
+        raise ErroAPI(400, f"O diagnóstico aceita até {LIMITE_ALVOS_NETDIAG} "
+                           "endereços por vez; para mais, use uma coleta.")
     cfg["porta"] = porta_valida(cfg.get("porta"), 22)
     cfg["timeout"] = inteiro_valido(cfg.get("timeout"), 120, 10, 600,
                                     "Tempo máximo por comando")
@@ -668,6 +687,8 @@ class Agenda:
         return alvo
 
     def validar(self, dados):
+        exigir_textos(dados, ("nome", "alvos", "modo", "protocolo", "varredura",
+                              "usuario"))
         item = {c: dados.get(c) for c in self.CAMPOS}
         if not (item["nome"] or "").strip():
             raise ErroAPI(400, "Dê um nome ao agendamento")
