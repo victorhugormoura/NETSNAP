@@ -294,6 +294,17 @@ class TesteRevisao(unittest.TestCase):
         return {a["id"]: a for a in n.avaliar_config({"platform_key": plataforma},
                                                      snapshot(plataforma, blocos))}
 
+    def test_netsnmp_comunidade_no_linux(self):
+        import netsnap as ns
+        conf = ("===== /etc/snmp/snmpd.conf\n"
+                "rocommunity LinhaForteXyz 10.0.0.0/8\n"
+                "rocommunity public default\n")
+        snap = ns.sanitizar(snapshot("linux", [("Configuração", "c", conf)]))
+        ids = [a["id"] for a in n.avaliar_config({"platform_key": "linux"}, snap)]
+        self.assertIn("CFG-SNMPV1V2", ids)
+        self.assertIn("CFG-SNMP-COMUNIDADE-PADRAO", ids)  # 'public' marcada
+        self.assertNotIn("LinhaForteXyz", snap)  # valor forte mascarado
+
     def test_heuristicas_so_na_configuracao(self):
         r = self.regras("juniper_junos", [
             ("Configuração", "show configuration | display set", "set system host-name x"),
