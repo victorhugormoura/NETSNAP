@@ -8,8 +8,11 @@ uso: python3 testes/test_netcve.py
 Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
 Licenciado sob a licença MIT.
 """
+import csv
 import os
 import sys
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -291,8 +294,8 @@ class TesteRevisao(unittest.TestCase):
         self.assertNotIn("CFG-SNMP-COMUNIDADE-PADRAO", ids)
 
     def regras(self, plataforma, blocos):
-        return {a["id"]: a for a in n.avaliar_config({"platform_key": plataforma},
-                                                     snapshot(plataforma, blocos))}
+        meta = {"platform_key": plataforma, "sensitive_data": "redacted"}
+        return {a["id"]: a for a in n.avaliar_config(meta, snapshot(plataforma, blocos))}
 
     def test_netsnmp_comunidade_no_linux(self):
         import netsnap as ns
@@ -361,6 +364,33 @@ class TesteRevisao(unittest.TestCase):
                  if v["rotulo"] == "Junos")
         self.assertEqual((v["cpe_produto"], v["versao"]), ("junos_os_evolved", "23.2R2-S1.3"))
 
+    def test_evo_solto_na_configuracao_nao_e_evolved(self):
+        texto = snapshot("juniper_junos", [
+            ("Inventário", "show version", "Model: mx204\nJunos: 23.4R2-S8.12"),
+            ("Configuração", "show configuration | display set",
+             "set interfaces xe-0/0/1 description TRANSIT-EVO\n"
+             "set policy-options policy-statement IX-EVO term 1 then accept"),
+        ])
+        v = next(v for v in n.extrair_versoes({"platform_key": "juniper_junos"}, texto)
+                 if v["rotulo"] == "Junos")
+        self.assertEqual((v["cpe_produto"], v["versao"]), ("junos", "23.4R2-S8.12"))
+        # Só a versão com sufixo -EVO, sem a linha "Junos OS Evolved".
+        texto = snapshot("juniper_junos", [("Inventário", "show version",
+                                            "Junos: 23.4R2-S8.11-EVO")])
+        v = next(v for v in n.extrair_versoes({"platform_key": "juniper_junos"}, texto)
+                 if v["rotulo"] == "Junos")
+        self.assertEqual((v["cpe_produto"], v["versao"]), ("junos_os_evolved", "23.4R2-S8.11"))
+
+    def test_evidencia_omitida_com_dados_sensiveis(self):
+        snap = snapshot("mikrotik_routeros", [("Configuração", "/export", (
+            "/snmp community\nadd addresses=10.0.0.0/8 name=S3cr3tC0mmunity"))])
+        for meta in ({"platform_key": "mikrotik_routeros", "sensitive_data": "included"},
+                     {"platform_key": "mikrotik_routeros"}):
+            r = {a["id"]: a for a in n.avaliar_config(meta, snap)}
+            self.assertIn("CFG-SNMPV1V2", r)
+            self.assertNotIn("S3cr3t", r["CFG-SNMPV1V2"]["evidencia"])
+            self.assertIn("omitido", r["CFG-SNMPV1V2"]["evidencia"])
+
     def test_cvss4_so_fica_na_tabela(self):
         r = n.resumir_vuln_osv({"id": "CVE-2026-1", "severity": [
             {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"}],
@@ -410,6 +440,92 @@ class TesteJunosFlowspec(unittest.TestCase):
     def test_evolved_com_build_proprio(self):
         self.assertEqual(self.avaliar("23.4R2-S8.11-EVO", self.FLOW, evo=True), [])
         self.assertEqual(len(self.avaliar("23.4R2-S8.11", self.FLOW)), 1)  # Junos OS: S8.13
+
+    def test_so_update_threading_nao_aponta(self):
+        self.assertEqual(self.avaliar("23.4R2-S5.4", (
+            "set system processes routing bgp update-threading\n"
+            "set protocols bgp group T family inet unicast")), [])
+
+    def test_flowspec_herdado_de_grupo(self):
+        grupo = "set groups FS protocols bgp group WG family inet flow no-validate X\n"
+        self.assertEqual(len(self.avaliar("23.4R2-S5.4", grupo + "set apply-groups FS")), 1)
+        # Grupo sem apply-groups não atua.
+        self.assertEqual(self.avaliar("23.4R2-S5.4", grupo), [])
+
+    def test_flowspec_desativado_nao_conta(self):
+        flow = "set protocols bgp group WG family inet flow no-validate X\n"
+        for desativa in ("deactivate protocols bgp group WG",
+                         "deactivate protocols bgp",
+                         "deactivate protocols bgp group WG family inet flow"):
+            self.assertEqual(self.avaliar("23.4R2-S5.4", flow + desativa), [], desativa)
+        # 'deactivate ... group WG' não alcança o grupo WG2.
+        self.assertEqual(len(self.avaliar("23.4R2-S5.4", flow.replace("WG", "WG2")
+                                          + "deactivate protocols bgp group WG")), 1)
+        grupo = ("set groups FS protocols bgp group WG family inet flow\n"
+                 "set apply-groups FS\ndeactivate protocols bgp group WG")
+        self.assertEqual(self.avaliar("23.4R2-S5.4", grupo), [])
+
+    def test_bmp_com_flowspec_vpn(self):
+        r = self.avaliar("23.4R2-S5.4", (
+            "set protocols bgp group V family inet-vpn flow\n"
+            "set routing-options bmp station S1 station-address 192.0.2.9"))
+        self.assertEqual(len(r[0]["exposicao"]), 2)
+        self.assertIn("BMP", r[0]["exposicao"][1])
+
+    def test_configuracao_grande_sem_flowspec_e_rapida(self):
+        config = "\n".join(f"set interfaces ge-0/0/{i} unit 0 family inet address "
+                           f"10.{i % 250}.{i % 200}.1/30 description LINK-{i}"
+                           for i in range(25000))
+        self.assertGreater(len(config), 2_000_000)
+        inicio = time.time()
+        self.assertEqual(self.avaliar("23.4R2-S5.4", config), [])
+        self.assertLess(time.time() - inicio, 2)
+
+    def test_trem_x_d_fica_para_conferir(self):
+        r = self.avaliar("15.1X49-D200", self.FLOW)
+        self.assertEqual(r[0]["situacao"], "conferir")
+        self.assertIn("conferir manualmente", r[0]["base"])
+        self.assertEqual(self.avaliar("15.1X49-D200", "set protocols bgp group T type external"), [])
+
+
+class TesteSaidas(unittest.TestCase):
+    def test_csv_sem_formula(self):
+        h = {"host": "@r1", "ip": "192.0.2.1", "plataforma": "x", "config": [],
+             "catalogo": [], "osv": None,
+             "versoes": [{"rotulo": "X", "versao": "1", "cves": [
+                 {"id": "CVE-2026-1", "severidade": "HIGH", "nota": 7.5,
+                  "descricao": "=HYPERLINK(\"http://exemplo.invalid\",\"x\")"}]}]}
+        with tempfile.TemporaryDirectory() as pasta:
+            with open(n.gerar_csv([h], {}, pasta), encoding="utf-8-sig", newline="") as f:
+                linha = list(csv.reader(f))[1]
+        self.assertEqual(linha[0], "'@r1")
+        self.assertTrue(linha[10].startswith("'=HYPERLINK("))
+        self.assertEqual(linha[8], "7.5")
+
+    def test_inseguro_nao_grava_cache(self):
+        original_cache, original_tls = n.CACHE, n.VERIFICAR_TLS
+        with tempfile.TemporaryDirectory() as pasta:
+            n.CACHE = os.path.join(pasta, "cache.json")
+            try:
+                n.VERIFICAR_TLS = False
+                n.salvar_cache({"cpe:x": []})
+                self.assertFalse(os.path.exists(n.CACHE))
+                n.VERIFICAR_TLS = True
+                n.salvar_cache({"cpe:x": []})
+                self.assertTrue(os.path.exists(n.CACHE))
+            finally:
+                n.CACHE, n.VERIFICAR_TLS = original_cache, original_tls
+
+    def test_epss_ausente_nao_vai_para_o_cache(self):
+        original = n.http_json
+        n.http_json = lambda url, timeout=45: {"data": [{"cve": "CVE-2026-1", "epss": "0.5"}]}
+        try:
+            cache = {}
+            r = n.consultar_epss(["CVE-2026-1", "CVE-2026-2"], cache)
+        finally:
+            n.http_json = original
+        self.assertEqual(r, {"CVE-2026-1": 0.5, "CVE-2026-2": None})
+        self.assertEqual(cache, {"epss:CVE-2026-1": 0.5})
 
 
 class TesteKEVFabricante(unittest.TestCase):

@@ -50,6 +50,14 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
+# Segunda passada do sanitizador sobre a evidência citada nos relatórios. O
+# netsnap traz o Netmiko junto; numa estação só de análise, sem ele, vale
+# apenas a omissão do trecho em snapshot coletado com dados sensíveis.
+try:
+    from netsnap import sanitizar as _sanitizar
+except Exception:
+    _sanitizar = None
+
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 OSV_LOTE = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
@@ -449,12 +457,16 @@ def extrair_versoes(meta, texto):
             })
             break  # primeira ocorrência por regra basta
 
-    # Junos OS Evolved tem CPE próprio na NVD.
-    if re.search(r"(?i)Junos OS Evolved|JUNOS EVO|-EVO\b", texto):
-        for a in achados:
-            if a["cpe_produto"] == "junos":
-                a["cpe_produto"] = "junos_os_evolved"
-                a["versao"] = re.sub(r"(?i)-EVO$", "", a["versao"])
+    # Junos OS Evolved tem CPE próprio na NVD. Só valem o show version e a
+    # própria versão: um "-EVO" solto no arquivo (descrição de interface
+    # TRANSIT-EVO, nome de policy) mandava um Junos OS para o CPE do Evolved.
+    show_version = _bloco_do_comando(texto, re.compile(r"`show version"))
+    evolved = bool(re.search(r"(?i)Junos OS Evolved|JUNOS EVO", show_version))
+    for a in achados:
+        if a["cpe_produto"] == "junos" and (
+                evolved or re.search(r"(?i)-EVO$", a["versao"])):
+            a["cpe_produto"] = "junos_os_evolved"
+            a["versao"] = re.sub(r"(?i)-EVO$", "", a["versao"])
     # No IOS-XE o 'show version' também traz a linha "Cisco IOS Software
     # ... Version 17.x", que casaria a regra do IOS clássico e geraria uma
     # consulta a cisco:ios, produto que não tem versões 17.x.
@@ -505,6 +517,10 @@ def avaliar_config(meta, texto):
     """Aplica as heurísticas locais de configuração insegura."""
     plataforma = meta.get("platform_key", "")
     so_config = _texto_de_configuracao(texto)
+    # Snapshot coletado com dados sensíveis: o trecho citado seria o próprio
+    # segredo (a community da regra de SNMP v1/v2c, por exemplo), e o
+    # relatório fica no servidor ao alcance de quem só tem leitura.
+    mascarado = meta.get("sensitive_data") == "redacted"
     achados = []
     for regra in REGRAS_CONFIG:
         if regra["plataformas"] and plataforma not in regra["plataformas"]:
@@ -516,7 +532,12 @@ def avaliar_config(meta, texto):
         if not m:
             continue
         ev = m.group("ev") if "ev" in m.re.groupindex else m.group(0)
-        trecho = " ".join(ev.split())[:120].replace("|", "/").replace("`", "'")
+        if mascarado:
+            if _sanitizar is not None:
+                ev = _sanitizar(ev)
+            trecho = " ".join(ev.split())[:120].replace("|", "/").replace("`", "'")
+        else:
+            trecho = "(trecho omitido: snapshot coletado com dados sensíveis)"
         achados.append({
             "id": regra["id"],
             "titulo": regra["titulo"],
@@ -624,6 +645,11 @@ def carregar_cache():
 
 
 def salvar_cache(cache):
+    # Com --inseguro a resposta pode ter sido adulterada no caminho; gravada,
+    # seria reaproveitada por 7 dias pelas execuções com TLS verificado. O
+    # cache existente ainda é lido (veio de execução verificada).
+    if not VERIFICAR_TLS:
+        return
     # Gravação atômica: uma interrupção no meio da escrita não deixa o
     # cache corrompido.
     try:
@@ -1077,7 +1103,11 @@ def consultar_epss(cves, cache):
             break
         recebidos = {d["cve"]: float(d.get("epss", 0)) for d in dados.get("data", [])}
         for c in lote:
-            resultado[c] = cache["epss:" + c] = recebidos.get(c)
+            resultado[c] = recebidos.get(c)
+            # CVE ausente da resposta (recém-publicada, ainda sem nota) não
+            # entra no cache: ficaria sem EPSS pelos 7 dias da validade.
+            if c in recebidos:
+                cache["epss:" + c] = recebidos[c]
     return resultado
 
 
@@ -1257,18 +1287,28 @@ CATALOGO = [
             ["26.2R0", "26.2R1-S2", "vulneravel"],
         ]},
         # Sem sessão BGP com família Flowspec o equipamento não é alcançável
-        # por estas falhas: o achado só sai com a exposição confirmada.
+        # por estas falhas: o achado só sai com a regra obrigatória (a da
+        # família Flowspec) confirmada; update-threading e BMP só dizem quais
+        # CVEs do boletim se somam.
         "exige_exposicao": True,
         "exposicao": [
+            # 'config_junos': as regras olham só a configuração que vale de
+            # fato (sem o que está sob 'deactivate', com os grupos aplicados
+            # por apply-groups já no lugar onde atuam).
             {"comando": r"show configuration | display set", "efeito": "presente",
+             "config_junos": True, "obrigatoria": True,
              "padrao": r"(?m)^set (?:logical-systems \S+ )?(?:routing-instances \S+ )?"
                        r"protocols bgp\b[^\n]*\bfamily (?:inet6?|inet-vpn|inet6-vpn) flow\b[^\n]*",
              "texto": "BGP com família Flowspec configurada (todas as CVEs do boletim)"},
             {"comando": r"show configuration | display set", "efeito": "presente",
+             "config_junos": True,
              "padrao": r"(?m)^set system processes routing bgp update-threading[^\n]*",
              "texto": "update-threading habilitado (CVE-2026-102178, CVSS 9.8)"},
+            # Ancorada em \A: sem a âncora, o lookahead era refeito a cada
+            # posição do texto, e uma configuração de 66 KB levava 41 s.
             {"comando": r"show configuration | display set", "efeito": "presente",
-             "padrao": r"(?ms)(?=.*\bfamily inet-vpn flow\b).*?^set routing-options bmp\b[^\n]*",
+             "config_junos": True,
+             "padrao": r"(?ms)\A(?=.*\bfamily inet-vpn flow\b).*?^set routing-options bmp\b",
              "texto": "Flowspec VPN com BMP rib-out (CVE-2026-101949)"},
         ],
         "correcao": "Atualizar para 23.2R2-S7.7, 23.4R2-S8.13, 24.2R2-S5.5, "
@@ -1325,6 +1365,46 @@ def situacao_por_faixa(versao, faixas, comparar=None):
     return situacao
 
 
+def _config_junos_efetiva(texto):
+    """Linhas 'set' do 'display set' que valem de fato no Junos.
+
+    Um 'deactivate <caminho>' desliga o caminho e tudo abaixo dele, mas o
+    'display set' continua listando os 'set' (um grupo BGP de Flowspec
+    desativado contava como exposição). Já 'set groups <G> ...' só atua com
+    'apply-groups <G>' em algum nível; aplicado, a linha vale como se
+    estivesse fora do grupo (o Flowspec herdado de grupo passava em branco).
+    Grupo sem apply-groups é ignorado."""
+    linhas = [linha.rstrip("\r") for linha in texto.split("\n")]
+    desativados = tuple(linha[len("deactivate "):].strip() for linha in linhas
+                        if linha.startswith("deactivate "))
+
+    def desativada(caminho):
+        return any(caminho == d or caminho.startswith(d + " ") for d in desativados)
+
+    aplicados = set()
+    for linha in linhas:
+        m = re.match(r"set (?:[^\n]* )?apply-groups \"?([^\s\"]+)", linha)
+        if m and not desativada(linha[4:]):
+            aplicados.add(m.group(1))
+
+    efetivas = []
+    for linha in linhas:
+        if not linha.startswith("set "):
+            continue
+        caminho = linha[4:]
+        if desativada(caminho):
+            continue
+        m = re.match(r"groups (\S+) (.*)", caminho)
+        if m:
+            if m.group(1).strip('"') not in aplicados:
+                continue
+            caminho = m.group(2)
+            if desativada(caminho):
+                continue
+        efetivas.append("set " + caminho)
+    return "\n".join(efetivas)
+
+
 def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
     """Aplica o catálogo ao snapshot. 'pacotes_osv' é a lista devolvida por
     consultar_osv (ou None se não houve consulta)."""
@@ -1350,6 +1430,13 @@ def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
         elif versao:
             situacao = situacao_por_faixa(versao, faixas, entrada.get("comparar"))
             base = f"versão {versao}"
+            if situacao is None:
+                # Versão que não dá para comparar com as faixas (trens X e D
+                # do Junos, 15.1X49-D200): pular em silêncio passava por
+                # "não afetado".
+                situacao = "conferir"
+                base += (" (formato não comparável com as faixas do boletim; "
+                         "conferir manualmente)")
             if padrao_pkg:
                 base += (" (versão upstream; se o PHP veio da distribuição, "
                          "confira o pacote: correções retroportadas não mudam "
@@ -1357,14 +1444,21 @@ def avaliar_catalogo(meta, texto, versoes, pacotes_osv, catalogo=None):
         if situacao in (None, "corrigida"):
             continue
         exposicao, mitigacoes = [], []
+        falta_obrigatoria = False
         for regra in entrada["exposicao"]:
             alvo = texto
             if regra.get("comando"):
                 alvo = _bloco_do_comando(texto, re.compile(re.escape(regra["comando"])))
+            if alvo and regra.get("config_junos"):
+                alvo = _config_junos_efetiva(alvo)
             if alvo and re.search(regra["padrao"], alvo):
                 (mitigacoes if regra["efeito"] == "mitiga" else exposicao).append(
                     regra["texto"])
-        if entrada.get("exige_exposicao") and not exposicao:
+            elif regra.get("obrigatoria"):
+                falta_obrigatoria = True
+        # Regra obrigatória é a condição de alcance (a família Flowspec no
+        # JSA112187); as demais só qualificam a variante e não bastam sozinhas.
+        if entrada.get("exige_exposicao") and (falta_obrigatoria or not exposicao):
             continue
         achados.append({
             "id": entrada["id"],
@@ -1593,7 +1687,8 @@ def gerar_relatorio(hosts, kev, pasta, sem_rede, limite_cve, epss=None,
             for a in h.get("catalogo") or []:
                 estado = {"vulneravel": "VULNERÁVEL",
                           "sem_correcao": "VULNERÁVEL — ramo sem correção oficial",
-                          "parcial": "corrigido em parte"}[a["situacao"]]
+                          "parcial": "corrigido em parte",
+                          "conferir": "CONFERIR MANUALMENTE"}[a["situacao"]]
                 md.append(f"### {h['host']} ({h['ip']}) — {a['titulo']}\n")
                 md.append(f"- **Situação:** {estado} ({a['base']})")
                 md.append(f"- **CVEs:** {', '.join(a['cves'])}")
@@ -1804,13 +1899,33 @@ def gerar_json(hosts, kev, pasta, epss, carimbo, fontes):
     return caminho
 
 
+def _celula_csv(valor):
+    """Texto que o Excel ou o LibreOffice leriam como fórmula (=, +, -, @,
+    tabulação ou CR no início) ganha um apóstrofo na frente. A descrição da
+    NVD, o nome de pacote e o hostname vêm de fora e chegariam ao CSV como
+    =HYPERLINK(...) executável ao abrir a planilha."""
+    if isinstance(valor, str) and valor[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + valor
+    return valor
+
+
+class _EscritorCSV:
+    """csv.writer que passa cada célula por _celula_csv."""
+
+    def __init__(self, arquivo):
+        self._w = csv.writer(arquivo)
+
+    def writerow(self, linha):
+        self._w.writerow([_celula_csv(c) for c in linha])
+
+
 def gerar_csv(hosts, kev, pasta):
     agora = datetime.now()
     caminho = os.path.join(pasta, f"_cve_triagem_{agora:%Y%m%d_%H%M%S}.csv")
     # utf-8-sig: sem BOM, o Excel no Windows abre o CSV como ANSI e
     # corrompe a acentuação.
     with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
+        w = _EscritorCSV(f)
         w.writerow(["host", "ip", "plataforma", "tipo", "software", "versao",
                     "identificador", "severidade", "cvss", "kev", "detalhe"])
         for h in hosts:
@@ -1887,7 +2002,8 @@ def main():
     global VERIFICAR_TLS
     if args.inseguro:
         VERIFICAR_TLS = False
-        print("[!] Validação de certificado TLS desativada (--inseguro).")
+        print("[!] Validação de certificado TLS desativada (--inseguro); "
+              "as respostas desta execução não vão para o cache.")
 
     if not os.path.isdir(args.pasta):
         alternativa = os.path.join(os.path.expanduser("~"), "netsnap_snapshots")
@@ -2119,10 +2235,15 @@ def main():
         print(f"[+] JSON: {gerar_json(hosts, kev, args.pasta, epss, carimbo, fontes)}")
 
     graves = [(h["host"], a["id"]) for h in hosts for a in h["catalogo"]
-              if a["situacao"] != "parcial"]
+              if a["situacao"] not in ("parcial", "conferir")]
     if graves:
         print("\n[!] Falhas graves do catálogo: "
               + ", ".join(f"{a} em {hh}" for hh, a in graves[:10]))
+    conferir = [(h["host"], a["id"]) for h in hosts for a in h["catalogo"]
+                if a["situacao"] == "conferir"]
+    if conferir:
+        print("\n[?] Conferir manualmente (versão fora do formato das faixas): "
+              + ", ".join(f"{a} em {hh}" for hh, a in conferir[:10]))
     total_kev = (sum(1 for h in hosts for v in h["versoes"]
                      for c in (v["cves"] or []) if c["id"] in kev)
                  + sum(1 for h in hosts for _ in _kev_osv(h, kev)))
