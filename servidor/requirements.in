@@ -1,3 +1,3 @@
 netmiko>=4.4,<5
 # 50.0.0 corrige os avisos PYSEC-2026-3552/3553/3554 e o OpenSSL embutido
-cryptography>=50.0.0
+cryptography>=50.0.2
