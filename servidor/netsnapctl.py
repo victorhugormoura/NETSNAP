@@ -645,7 +645,10 @@ def certificado_ca_interna(inst, forcar=False):
     if nova:
         print("  Os técnicos instalam a CA uma vez: botão na tela de login ou "
               f"{PKI}/ca.crt\n  (Windows: certmgr.msc > Autoridades de "
-              "Certificação Raiz Confiáveis > Importar).")
+              "Certificação Raiz Confiáveis > Importar).\n  Passe a eles a "
+              "impressão acima por outro meio (telefone, mensagem): baixada\n"
+              "  de uma conexão com aviso de certificado, a CA só é instalada "
+              "se a impressão bater.")
 
 
 def certificado_letsencrypt(inst, email):
@@ -849,7 +852,7 @@ server {{
     client_body_timeout 30s;
     client_header_timeout 30s;
 {acesso}
-    location ~ ^/api/sessao(/etapa)?$ {{
+    location ~ ^/api/sessao(/etapa)?/*$ {{
         limit_req zone=netsnap_login burst=20 nodelay;
         limit_req_status 429;
         include /etc/nginx/netsnap-proxy.conf;

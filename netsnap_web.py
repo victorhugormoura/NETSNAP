@@ -531,6 +531,15 @@ def contar_alvos(linhas):
     return total
 
 
+def config_publica(cfg):
+    """O que fica visível da execução (detalhe, histórico). Nunca a senha; com
+    credencial do cofre (servidor), também não o usuário do equipamento: ele
+    é parte do segredo guardado, e a execução repetida usa a mesma credencial
+    pelo número."""
+    ocultos = {"senha", "usuario"} if cfg.get("credencial") else {"senha"}
+    return {k: v for k, v in cfg.items() if k not in ocultos}
+
+
 def nova_coleta(cfg, origem="manual"):
     if not CAPACIDADES["coleta"]:
         raise ErroAPI(409, CAPACIDADES["motivo"])
@@ -565,7 +574,7 @@ def nova_coleta(cfg, origem="manual"):
     job = Job("coleta", cfg.get("titulo") or titulo, origem)
     # Configuração sem a senha: permite repetir a coleta ou resolver
     # pendentes sem redigitar tudo.
-    job.config = {k: v for k, v in cfg.items() if k != "senha"}
+    job.config = config_publica(cfg)
     registrar(job)
     iniciar_processo(job, [sys.executable, "-u", os.path.abspath(__file__),
                            "--executor", "coleta"], entrada=cfg)
@@ -613,7 +622,7 @@ def novo_netdiag(cfg):
     validas = {s["chave"] for s in CAPACIDADES["secoes"]}
     cfg["secoes"] = [s for s in cfg.get("secoes") or [] if s in validas]
     job = Job("netdiag", "Diagnóstico · " + cfg["alvos"].splitlines()[0][:40])
-    job.config = {k: v for k, v in cfg.items() if k != "senha"}
+    job.config = config_publica(cfg)
     registrar(job)
     iniciar_processo(job, [sys.executable, "-u", os.path.abspath(__file__),
                            "--executor", "netdiag"], entrada=cfg)
@@ -1135,6 +1144,9 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
        "img-src 'self' data: blob:; connect-src 'self'; "
        "frame-ancestors 'none'; "
        "base-uri 'none'; form-action 'none'")
+# Tudo que não é a página (JSON, SVG da topologia, relatórios, downloads):
+# aberto direto numa aba, um SVG ou texto com marcação não executa nada.
+CSP_DADOS = "default-src 'none'; frame-ancestors 'none'; sandbox"
 
 
 class Manipulador(BaseHTTPRequestHandler):
@@ -1160,7 +1172,8 @@ class Manipulador(BaseHTTPRequestHandler):
                                    TOKEN.encode("ascii"))
 
     # -- respostas --------------------------------------------------------
-    def _cabecalhos_comuns(self):
+    def _cabecalhos_comuns(self, csp=CSP_DADOS):
+        self.send_header("Content-Security-Policy", csp)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1186,9 +1199,8 @@ class Manipulador(BaseHTTPRequestHandler):
         if baixar:
             self.send_header("Content-Disposition",
                              f'attachment; filename="{os.path.basename(caminho)}"')
-        self._cabecalhos_comuns()
-        if tipo.startswith("text/html"):
-            self.send_header("Content-Security-Policy", CSP)
+        self._cabecalhos_comuns(CSP if tipo.startswith("text/html")
+                                else CSP_DADOS)
         self.end_headers()
         self.wfile.write(corpo)
 

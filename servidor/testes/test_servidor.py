@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -244,6 +245,34 @@ permitir_alvos_locais = sim
         st, js, h = Cliente(self.porta).req("GET", "/tema.js")
         self.assertEqual(st, 200)
         self.assertTrue(h.get("Content-Type", "").startswith("text/javascript"))
+        # Fora da página, nada executa se for aberto direto numa aba.
+        st, r, h = Cliente(self.porta).req("GET", "/api/sessao")
+        self.assertIn("sandbox", h.get("Content-Security-Policy", ""))
+        self.assertIsNone(r["ca_impressao"])
+
+    def test_05b_impressao_da_ca_na_tela_de_login(self):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        import datetime as dt
+        chave = ec.generate_private_key(ec.SECP256R1())
+        nome = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "teste")])
+        agora = dt.datetime.now(dt.timezone.utc)
+        cert = (x509.CertificateBuilder().subject_name(nome).issuer_name(nome)
+                .public_key(chave.public_key()).serial_number(1)
+                .not_valid_before(agora).not_valid_after(agora + dt.timedelta(days=1))
+                .sign(chave, hashes.SHA256()))
+        caminho = os.path.join(self.dados, "publico", "netsnap-ca.crt")
+        with open(caminho, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        try:
+            st, r, _ = Cliente(self.porta).req("GET", "/api/sessao")
+            esperado = ":".join(f"{b:02X}" for b in cert.fingerprint(hashes.SHA256()))
+            self.assertEqual((r["ca_interna"], r["ca_impressao"]), (True, esperado))
+            st, corpo, h = Cliente(self.porta).req("GET", "/ca.crt")
+            self.assertEqual(st, 200)
+        finally:
+            os.remove(caminho)
 
     def test_06_login_com_totp_e_recuperacao(self):
         c = Cliente(self.porta)
@@ -345,6 +374,72 @@ permitir_alvos_locais = sim
         st, r, etapas, _ = dono.entrar("alvo", "Alvo-Final-2026!", segredo=segredo)
         self.assertEqual(st, 200, r)  # navegador de sempre: entra
 
+    def test_08b_erros_no_mesmo_nat_nao_trancam_dispositivo_conhecido(self):
+        st, r, _ = self.admin.req("POST", "/api/usuarios", {
+            "usuario": "vizinho", "senha": "Vizinho-Temp-2026", "papel": "leitura"})
+        dono = Cliente(self.porta)
+        st, r, _, segredo = dono.entrar("vizinho", "Vizinho-Temp-2026",
+                                        nova="Vizinho-Final-2026")
+        self.assertEqual(st, 200, r)
+        nat = {"X-Real-IP": "192.0.2.200"}
+        atacante = Cliente(self.porta)
+        for _ in range(6):
+            atacante.req("POST", "/api/sessao", {"usuario": "vizinho", "senha": "errada"},
+                         cabecalhos=nat)
+        st, _, _ = atacante.req("POST", "/api/sessao", {"usuario": "vizinho",
+                                                        "senha": "Vizinho-Final-2026"},
+                                cabecalhos=nat)
+        self.assertEqual(st, 401)  # navegador desconhecido segue bloqueado
+        dono.cookie = ""
+        st, r, _ = dono.req("POST", "/api/sessao", {"usuario": "vizinho",
+                                                    "senha": "Vizinho-Final-2026"},
+                            cabecalhos=nat)
+        self.assertEqual((st, r.get("etapa")), (200, "totp"), r)
+        # TOTP redefinido pelo admin no meio do login: 401, não erro interno.
+        # (De outra origem: a redefinição esquece o navegador, e o NAT acima
+        # já está bloqueado para desconhecidos.)
+        outra = {"X-Real-IP": "192.0.2.203"}
+        st, r, _ = dono.req("POST", "/api/sessao", {"usuario": "vizinho",
+                                                    "senha": "Vizinho-Final-2026"},
+                            cabecalhos=outra)
+        self.assertEqual((st, r.get("etapa")), (200, "totp"), r)
+        st, lista, _ = self.admin.req("GET", "/api/usuarios")
+        uid = next(u["id"] for u in lista if u["nome"] == "vizinho")
+        self.admin.req("POST", f"/api/usuarios/{uid}/totp", {})
+        st, r, _ = dono.req("POST", "/api/sessao/etapa", {
+            "desafio": r["desafio"], "codigo": codigo_livre(segredo)}, cabecalhos=outra)
+        self.assertEqual(st, 401, r)
+        self.assertIn("expirada", r["erro"])
+
+    def test_08c_nome_desconhecido_mascarado_na_auditoria(self):
+        Cliente(self.porta).req("POST", "/api/sessao", {"usuario": "Senha-Digitada-Aqui!",
+                                                        "senha": "x"},
+                                cabecalhos={"X-Real-IP": "192.0.2.201"})
+        st, aud, _ = self.admin.req("GET", "/api/auditoria?limite=50&acao=login_falha")
+        self.assertNotIn("digitada", json.dumps(aud).lower())
+        self.assertTrue(any(x["usuario"].startswith("se…(20) #") for x in aud), aud[:3])
+        with open(self.log.name) as f:
+            self.assertNotIn("digitada", f.read().lower())
+
+    def test_08d_um_calculo_de_senha_por_origem(self):
+        barreira = threading.Barrier(6)
+        estados = []
+
+        def tentar(i):
+            barreira.wait()
+            st, _, _ = Cliente(self.porta).req(
+                "POST", "/api/sessao", {"usuario": f"ninguem{i}", "senha": "x"},
+                cabecalhos={"X-Real-IP": "192.0.2.202"})
+            estados.append(st)
+        fios = [threading.Thread(target=tentar, args=(i,)) for i in range(6)]
+        for f in fios:
+            f.start()
+        for f in fios:
+            f.join()
+        self.assertIn(429, estados)
+        self.assertIn(401, estados)
+        self.assertNotIn(503, estados)
+
     def test_09_tcp_so_em_modo_de_teste(self):
         conf = os.path.join(self.dir, "sem_tcp.conf")
         texto = open(self.conf).read().replace("tcp_para_testes = sim\n", "")
@@ -399,6 +494,9 @@ permitir_alvos_locais = sim
         self.assertEqual(d["config"]["iniciado_por"], "admin")
         self.assertFalse(d["config"]["sensivel"])  # política do servidor
         self.assertNotIn("Lab#2026!", json.dumps(d))
+        # Usuário do equipamento é parte da credencial: só o número aparece.
+        self.assertEqual(d["config"]["credencial"], self.cid)
+        self.assertNotIn("usuario", d["config"])
         snaps = os.listdir(os.path.join(self.dados, "snapshots"))
         self.assertTrue(any(n.endswith(".md") for n in snaps))
         self.__class__.primeiro_job = r["id"]
@@ -485,6 +583,8 @@ permitir_alvos_locais = sim
         self.assertEqual(st, 403)
         st, r, _ = tec.req("POST", f"/api/cofre/{self.cid}", {"senha": "x"})
         self.assertEqual(st, 403)  # credencial de outra pessoa
+        st, r, _ = tec.req("POST", "/api/netcve", {"sem_rede": True, "inseguro": True})
+        self.assertEqual(st, 403)  # TLS das bases de CVE: só admin desliga
         # último administrador não é desativado nem com ativo=0
         st, lista, _ = self.admin.req("GET", "/api/usuarios")
         uid_admin = next(u["id"] for u in lista if u["nome"] == "admin")
@@ -507,6 +607,39 @@ permitir_alvos_locais = sim
             esperadas += ["coleta_iniciada", "agendamento_criado", "agendamento_executado"]
         for a in esperadas:
             self.assertIn(a, acoes)
+
+    def test_25_rebaixamento_simultaneo_mantem_um_admin(self):
+        st, r, _ = self.admin.req("POST", "/api/usuarios", {
+            "usuario": "admin2", "senha": "Admin2-Temp-2026", "papel": "admin"})
+        self.assertEqual(st, 200, r)
+        outro = Cliente(self.porta)
+        st, r, _, _ = outro.entrar("admin2", "Admin2-Temp-2026", nova="Admin2-Final-2026")
+        self.assertEqual(st, 200, r)
+        st, lista, _ = self.admin.req("GET", "/api/usuarios")
+        ids = {u["nome"]: u["id"] for u in lista}
+        barreira = threading.Barrier(2)
+        estados = {}
+
+        def rebaixar(cliente, alvo):
+            barreira.wait()
+            estados[alvo] = cliente.req("POST", f"/api/usuarios/{ids[alvo]}/alterar",
+                                        {"papel": "tecnico"})[0]
+        fios = [threading.Thread(target=rebaixar, args=(self.admin, "admin2")),
+                threading.Thread(target=rebaixar, args=(outro, "admin"))]
+        for f in fios:
+            f.start()
+        for f in fios:
+            f.join()
+        # Um passa; o outro esbarra no último administrador (409) ou, se
+        # chegou depois, já teve a sessão encerrada pelo rebaixamento (401).
+        self.assertEqual(list(estados.values()).count(200), 1, estados)
+        self.assertTrue(set(estados.values()) <= {200, 401, 409}, estados)
+        if estados["admin"] == 200:
+            # O admin principal foi rebaixado: o outro devolve o perfil para os
+            # testes seguintes.
+            st, _, _ = outro.req("POST", f"/api/usuarios/{ids['admin']}/alterar",
+                                 {"papel": "admin"})
+            self.assertEqual(st, 200)
 
     def test_30_logout(self):
         c = Cliente(self.porta)

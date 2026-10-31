@@ -45,13 +45,25 @@ function mostrarLogin(msg) {
         <input id="l-senha" name="senha" type="password" autocomplete="current-password" required></div>
       <div class="acoes"><button class="principal" type="submit">Entrar</button></div>
     </form>
-    <p class="suave pequeno espaco-acima">Acesso restrito à equipe técnica. Toda ação fica registrada na auditoria.
-      ${S.caInterna ? `<br>Navegador avisando de certificado desconhecido? <a href="/ca.crt">Baixe a CA do servidor</a> e instale como autoridade confiável.` : ""}</p>`);
+    <p class="suave pequeno espaco-acima">Acesso restrito à equipe técnica. Toda ação fica registrada na auditoria.</p>
+    ${S.caInterna ? avisoCa() : ""}`);
   $("#f-login").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     await enviarEtapa(e.target, "sessao", { usuario: fd.get("usuario").trim(), senha: fd.get("senha") });
   });
+}
+
+// Com o aviso de certificado, esta página pode ter vindo de quem está no
+// meio do caminho, junto com a CA e a impressão mostrada aqui. Por isso a
+// conferência é com a impressão que o administrador passa por outro meio.
+function avisoCa() {
+  return `<p class="suave pequeno">Navegador avisando de certificado desconhecido? Antes de instalar a CA do servidor,
+      peça ao administrador a impressão SHA-256 dela (aparece em <code>netsnapctl status</code>) por telefone ou mensagem,
+      nunca por esta página. <a href="/ca.crt">Baixe a CA</a>, abra o arquivo e só instale como autoridade confiável se a
+      impressão SHA-256 dele for igual à do administrador.</p>
+    ${S.caImpressao ? `<p class="suave pequeno">Impressão informada por este servidor (sob ataque, também pode ser falsa):</p>
+      <p class="mono pequeno">${esc(S.caImpressao).replace(/:/g, ":<wbr>")}</p>` : ""}`;
 }
 
 async function enviarEtapa(form, caminho, corpo) {
@@ -183,6 +195,7 @@ async function iniciarServidor() {
   S.sessao = S.info.usuario;
   S.csrf = S.sessao.csrf;
   S.caInterna = S.info.ca_interna;
+  S.caImpressao = S.info.ca_impressao;
   document.body.classList.remove("sem-sessao");
   $$("#menu li[data-papel]").forEach((li) => { li.hidden = !pode(li.dataset.papel); });
   // Botões de ação (cancelar, triagem, coletar pendentes, salvar topologia)
@@ -734,6 +747,7 @@ document.addEventListener("submit", (e) => {
   try {
     const s = await api("GET", "sessao");
     S.caInterna = !!s.ca_interna;
+    S.caImpressao = s.ca_impressao || "";
     if (!s.autenticado) return mostrarLogin();
     S.csrf = s.csrf;
     iniciarServidor();

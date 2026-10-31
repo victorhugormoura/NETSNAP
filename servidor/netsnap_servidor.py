@@ -34,6 +34,7 @@ __version__ = "1.0.2"
 
 import argparse
 import configparser
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -49,6 +50,7 @@ import threading
 import time
 import traceback
 from collections import deque
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from http.server import ThreadingHTTPServer
@@ -229,7 +231,11 @@ class BloqueioPorOrigem:
     /64) bloqueiam aquela conta para aquela origem, com tempo dobrando a cada
     novo bloqueio (até 24 h). Quem erra de outro lugar não tranca o dono da
     conta; o bloqueio da conta inteira (netsnap_banco) só vem com muitos
-    erros vindos de vários lugares."""
+    erros vindos de vários lugares.
+
+    O navegador conhecido (cookie de dispositivo) conta à parte: quem divide
+    o mesmo NAT ou VPN com o dono da conta e erra a senha dele bloqueia só os
+    navegadores desconhecidos daquela origem, não o computador de sempre."""
     LIMITE = 5
 
     def __init__(self):
@@ -237,12 +243,12 @@ class BloqueioPorOrigem:
         self.trava = threading.Lock()
         self.ultima_limpeza = time.monotonic()
 
-    def bloqueado(self, uid, ip):
+    def bloqueado(self, uid, ip, conhecido=False):
         with self.trava:
-            d = self.itens.get((uid, chave_ip(ip)))
+            d = self.itens.get((uid, chave_ip(ip), bool(conhecido)))
             return bool(d and d["ate"] > time.monotonic())
 
-    def falhou(self, uid, ip):
+    def falhou(self, uid, ip, conhecido=False):
         agora = time.monotonic()
         with self.trava:
             if agora - self.ultima_limpeza > 60:
@@ -252,7 +258,7 @@ class BloqueioPorOrigem:
                 for k in [k for k, v in self.itens.items()
                           if v["ate"] <= agora and v["visto"] < agora - 3600]:
                     del self.itens[k]
-            d = self.itens.setdefault((uid, chave_ip(ip)),
+            d = self.itens.setdefault((uid, chave_ip(ip), bool(conhecido)),
                                       {"falhas": 0, "vezes": 0, "ate": 0,
                                        "visto": agora})
             d["visto"] = agora
@@ -264,16 +270,45 @@ class BloqueioPorOrigem:
                 return True
         return False
 
-    def limpar(self, uid, ip=None):
+    def limpar(self, uid, ip=None, conhecido=None):
         with self.trava:
             for k in [k for k in self.itens
-                      if k[0] == uid and (ip is None or k[1] == chave_ip(ip))]:
+                      if k[0] == uid and (ip is None or k[1] == chave_ip(ip))
+                      and (conhecido is None or k[2] == bool(conhecido))]:
                 del self.itens[k]
+
+
+class UmPorOrigem:
+    """Uma verificação de senha por vez para cada IP (ou /64). O cofre só
+    calcula dois scrypt ao mesmo tempo; sem este limite, um único endereço
+    disparando logins em paralelo ocupa as duas vagas e os outros usuários
+    recebem 503."""
+
+    def __init__(self):
+        self.ativos = set()
+        self.trava = threading.Lock()
+
+    @contextmanager
+    def ocupar(self, ip):
+        chave = chave_ip(ip)
+        with self.trava:
+            if chave in self.ativos:
+                raise web.ErroAPI(429, "Já há uma tentativa de login deste "
+                                       "endereço em andamento; aguarde")
+            self.ativos.add(chave)
+        try:
+            yield
+        finally:
+            with self.trava:
+                self.ativos.discard(chave)
 
 
 LIMITE_LOGIN_IP = Limitador(60, 300)
 BLOQUEIOS = BloqueioPorOrigem()
+LOGIN_EM_CURSO = UmPorOrigem()
 TRAVA_EXECUCOES = threading.Lock()
+# Checagem do último administrador e a alteração que ela protege, juntas.
+TRAVA_ADMINS = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +356,43 @@ class Desafios:
 DESAFIOS = Desafios()
 MSG_LOGIN = ("Usuário, senha ou código inválidos, ou conta temporariamente "
              "bloqueada.")
+
+
+_CACHE_CA = (None, None)
+
+
+def impressao_ca(caminho):
+    """SHA-256 da CA interna publicada, no formato do `netsnapctl status`;
+    None se não houver ou não der para ler. Recalculada só quando o arquivo
+    muda."""
+    global _CACHE_CA
+    try:
+        st = os.stat(caminho)
+    except OSError:
+        return None
+    marca = (st.st_mtime_ns, st.st_size)
+    if _CACHE_CA[0] != marca:
+        import ssl
+        try:
+            with open(caminho, encoding="ascii") as f:
+                der = ssl.PEM_cert_to_DER_cert(f.read().strip())
+            valor = ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
+        except (OSError, ValueError):
+            valor = None
+        _CACHE_CA = (marca, valor)
+    return _CACHE_CA[1]
+
+
+def nome_mascarado(nome):
+    """Nome digitado que não é de nenhuma conta, para a auditoria e o journal.
+
+    É comum digitar a senha no campo do usuário; gravado como veio, ela ficaria
+    no banco e no log do sistema. Ficam as duas primeiras letras, o tamanho e
+    um HMAC curto (o mesmo texto dá o mesmo valor: dá para ver tentativas
+    repetidas sem guardar o texto)."""
+    nome = nome.lower()
+    return (f"{limpo(nome[:2], 2)}…({len(nome)}) "
+            f"#{COFRE.hmac('auditoria', 'usuario-desconhecido|' + nome)[:8]}")
 
 
 def qr_svg(texto):
@@ -838,6 +910,10 @@ def criar_manipulador():
         def _caminho_ca():
             return os.path.join(CONF.dados, "publico", "netsnap-ca.crt")
 
+        def _dados_ca(self):
+            return {"ca_interna": os.path.isfile(self._caminho_ca()),
+                    "ca_impressao": impressao_ca(self._caminho_ca())}
+
         def _host_valido(self):
             host = (self.headers.get("Host") or "").strip().lower()
             if host.startswith("["):
@@ -953,6 +1029,8 @@ def criar_manipulador():
                 self._json(e.status, {"erro": e.mensagem})
             except cofre_mod.Ocupado as e:
                 self._json(503, {"erro": str(e)})
+            except banco_mod.ErroUltimoAdmin as e:
+                self._json(409, {"erro": str(e)})
             except (banco_mod.ErroBanco, cofre_mod.ErroCofre) as e:
                 self._json(400, {"erro": str(e)})
             except (BrokenPipeError, ConnectionResetError):
@@ -992,8 +1070,7 @@ def criar_manipulador():
                 if not s:
                     # Sem sessão não é erro aqui: é a pergunta da tela inicial.
                     # A tela de login oferece a CA interna para download.
-                    return {"autenticado": False,
-                            "ca_interna": os.path.isfile(self._caminho_ca())}
+                    return dict(self._dados_ca(), autenticado=False)
                 return dict(self._dados_sessao(s), autenticado=True)
             if p == ["sessao"]:
                 return self._login(self._corpo())
@@ -1016,7 +1093,7 @@ def criar_manipulador():
             return ip
 
         def _registrar_erro(self, u, ip, motivo):
-            par = BLOQUEIOS.falhou(u["id"], ip)
+            par = BLOQUEIOS.falhou(u["id"], ip, self._dispositivo_conhecido(u))
             _, conta = BANCO.registrar_falha(u["id"])
             BANCO.auditar(u["nome"], ip, "login_falha", "", motivo +
                           (", origem bloqueada" if par else "") +
@@ -1024,18 +1101,26 @@ def criar_manipulador():
 
         def _login(self, dados):
             ip = self._limite_ip()
+            with LOGIN_EM_CURSO.ocupar(ip):
+                return self._login_senha(dados, ip)
+
+        def _login_senha(self, dados, ip):
             nome = str(dados.get("usuario") or "")[:64]
             senha = str(dados.get("senha") or "")[:256]
             u = BANCO.usuario(nome=nome)
             try:
                 if not u or not u["ativo"]:
                     cofre_mod.gastar_tempo_como_login(senha)
-                    BANCO.auditar(nome.lower(), ip, "login_falha", "",
-                                  "usuário inexistente ou desativado")
+                    BANCO.auditar(u["nome"] if u else nome_mascarado(nome),
+                                  ip, "login_falha", "",
+                                  "usuário desativado" if u else
+                                  "usuário inexistente")
                     raise web.ErroAPI(401, MSG_LOGIN)
+                conhecido = self._dispositivo_conhecido(u)
                 conta_bloqueada = banco_mod.Banco.bloqueado(u) and \
-                    not self._dispositivo_conhecido(u)
-                if conta_bloqueada or BLOQUEIOS.bloqueado(u["id"], ip):
+                    not conhecido
+                if conta_bloqueada or BLOQUEIOS.bloqueado(u["id"], ip,
+                                                          conhecido):
                     cofre_mod.gastar_tempo_como_login(senha)
                     BANCO.auditar(u["nome"], ip, "login_falha", "",
                                   "conta ou origem bloqueada")
@@ -1074,15 +1159,19 @@ def criar_manipulador():
             return self._abrir_sessao(u, extra)
 
         def _abrir_sessao(self, u, extra):
+            conhecido = self._dispositivo_conhecido(u)
             BANCO.registrar_login(u["id"])
-            BLOQUEIOS.limpar(u["id"], self._ip())
+            # Só a contagem deste tipo de navegador: o login do dono pelo
+            # computador de sempre não zera os erros de um desconhecido no
+            # mesmo NAT.
+            BLOQUEIOS.limpar(u["id"], self._ip(), conhecido)
             token, _ = BANCO.criar_sessao(
                 u["id"], self._ip(), self.headers.get("User-Agent", ""),
                 CONF.duracao)
             BANCO.auditar(u["nome"], self._ip(), "login_ok")
             s = BANCO.sessao(token, CONF.ociosidade)
             cookies = [self._cookie_sessao(token)]
-            if not self._dispositivo_conhecido(u):
+            if not conhecido:
                 atributos = "Path=/; HttpOnly; SameSite=Strict" + \
                     ("; Secure" if CONF.cookie_seguro else "")
                 cookies.append(f"{CONF.cookie_dispositivo}="
@@ -1094,15 +1183,20 @@ def criar_manipulador():
 
         def _etapa(self, dados):
             ip = self._limite_ip()
+            with LOGIN_EM_CURSO.ocupar(ip):
+                return self._etapa_desafio(dados, ip)
+
+        def _etapa_desafio(self, dados, ip):
             token = str(dados.get("desafio") or "")
             d = DESAFIOS.consumir(token)
             if not d:
                 raise web.ErroAPI(401, "Etapa expirada ou tentativas "
                                        "esgotadas; entre novamente")
             u = BANCO.usuario(d["uid"])
-            if not u or not u["ativo"] or BLOQUEIOS.bloqueado(u["id"], ip) or \
-                    (banco_mod.Banco.bloqueado(u) and
-                     not self._dispositivo_conhecido(u)):
+            conhecido = bool(u) and self._dispositivo_conhecido(u)
+            if not u or not u["ativo"] or \
+                    BLOQUEIOS.bloqueado(u["id"], ip, conhecido) or \
+                    (banco_mod.Banco.bloqueado(u) and not conhecido):
                 DESAFIOS.descartar(token)
                 raise web.ErroAPI(401, MSG_LOGIN)
             estado = {k: d[k] for k in ("senha_ok", "totp_ok",
@@ -1110,6 +1204,10 @@ def criar_manipulador():
             etapa = d["etapa"]
 
             if etapa == "totp":
+                if not u["totp_ativo"]:
+                    # TOTP redefinido pelo administrador no meio do login.
+                    DESAFIOS.descartar(token)
+                    raise web.ErroAPI(401, "Etapa expirada; entre novamente")
                 codigo = str(dados.get("codigo") or "").strip()
                 contador = cofre_mod.conferir_totp(
                     BANCO.segredo_totp(u), codigo, u["totp_ultimo"])
@@ -1213,7 +1311,7 @@ def criar_manipulador():
                             permitir_sensivel=CONF.permitir_sensivel and
                             s["papel"] == "admin",
                             permitir_telnet=CONF.permitir_telnet,
-                            ca_interna=os.path.isfile(self._caminho_ca()))
+                            **self._dados_ca())
                 info.pop("pastas", None)
                 return info
             if raiz == "painel":
@@ -1236,11 +1334,20 @@ def criar_manipulador():
                 return self._nova_execucao(raiz, self._corpo())
             if raiz == "netcve" and metodo == "POST":
                 cfg = self._corpo()
+                # Sem conferir o TLS, quem estiver no caminho troca as bases de
+                # CVE que todos os usuários do servidor vão ler: decisão do
+                # administrador, não de cada técnico.
+                if cfg.get("inseguro") and s["papel"] != "admin":
+                    raise web.ErroAPI(403, "Só um administrador desliga a "
+                                           "verificação do certificado das "
+                                           "bases de CVE")
                 with TRAVA_EXECUCOES:
                     self._checar_limite()
                     job = web.novo_netcve(cfg)
                 self._marcar(job)
-                self.auditar("netcve_iniciado", job.id)
+                self.auditar("netcve_iniciado", job.id,
+                             "TLS sem verificação" if cfg.get("inseguro")
+                             else "")
                 return job.resumo()
             if raiz == "jobs" and n == 3 and p[2] == "cancelar":
                 self.auditar("execucao_cancelada", p[1])
@@ -1384,6 +1491,16 @@ def criar_manipulador():
                 uid = int(p[1])
             except ValueError:
                 raise web.ErroAPI(404, "Usuário não encontrado")
+            if (metodo == "DELETE" and len(p) == 2) or \
+                    (metodo == "POST" and p[2:] == ["alterar"]):
+                # Dois administradores rebaixando um ao outro ao mesmo tempo:
+                # cada um veria o outro ainda ativo e os dois passariam. A
+                # contagem e a alteração acontecem sem outra no meio.
+                with TRAVA_ADMINS:
+                    return self._acao_usuario(metodo, p, uid)
+            return self._acao_usuario(metodo, p, uid)
+
+        def _acao_usuario(self, metodo, p, uid):
             alvo = BANCO.usuario(uid)
             if not alvo:
                 raise web.ErroAPI(404, "Usuário não encontrado")
@@ -1589,7 +1706,9 @@ def iniciar(caminho_config):
     os.environ["NETSNAP_DADOS"] = CONF.dados
     COFRE = cofre_mod.Cofre(cofre_mod.carregar_chave_mestra(CONF.arquivo_chave))
     # Os processos de coleta herdam o ambiente: não precisam saber onde o
-    # systemd guardou a chave-mestra.
+    # systemd guardou a chave-mestra. Não é isolamento: eles rodam com o mesmo
+    # usuário e ainda conseguem ler /run/credentials/<unidade>/ e o banco.
+    # Separar de verdade exige a coleta em outro usuário (outra unidade).
     os.environ.pop("CREDENTIALS_DIRECTORY", None)
     BANCO = banco_mod.Banco(CONF.banco, COFRE)
     auditar_banco = BANCO.auditar

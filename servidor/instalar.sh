@@ -277,7 +277,7 @@ if [ "$MODO" != atualizar ]; then
   PING_FIX=0
   if [ "${PING_RANGE%%[[:space:]]*}" -gt "${PING_RANGE##*[[:space:]]}" ] 2>/dev/null; then
     echo "A varredura por ping roda sem privilégio e precisa de net.ipv4.ping_group_range (hoje: $PING_RANGE)."
-    sim "Liberar ping sem privilégio (arquivo /etc/sysctl.d/60-netsnap-ping.conf)?" s && PING_FIX=1
+    sim "Liberar ping sem privilégio para o grupo $USUARIO (arquivo /etc/sysctl.d/60-netsnap-ping.conf)?" s && PING_FIX=1
   fi
 
   titulo "Resumo"
@@ -315,6 +315,12 @@ if ! id "$USUARIO" >/dev/null 2>&1; then
   useradd --system --user-group --home-dir "$DADOS" --no-create-home \
     --shell /usr/sbin/nologin --comment "netsnap servidor" "$USUARIO"
   ok "usuário de serviço '$USUARIO' criado"
+fi
+GID_SERVICO=$(id -g "$USUARIO")
+# Versões anteriores liberavam o ping sem privilégio para todos os grupos.
+if grep -qsx "net.ipv4.ping_group_range = 0 2147483647" /etc/sysctl.d/60-netsnap-ping.conf; then
+  echo "net.ipv4.ping_group_range = $GID_SERVICO $GID_SERVICO" > /etc/sysctl.d/60-netsnap-ping.conf
+  sysctl -q -p /etc/sysctl.d/60-netsnap-ping.conf && ok "ping sem privilégio restrito ao grupo $USUARIO"
 fi
 install -d -m 755 -o root -g root "$PREFIXO" "$ETC"
 install -d -m 700 -o root -g root "$ETC/credenciais" "$ETC/pki"
@@ -441,8 +447,10 @@ PY
     timedatectl set-timezone America/Sao_Paulo && ok "fuso horário: America/Sao_Paulo"
   fi
   if [ "${PING_FIX:-0}" = 1 ]; then
-    echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/60-netsnap-ping.conf
-    sysctl -q -p /etc/sysctl.d/60-netsnap-ping.conf && ok "ping sem privilégio liberado"
+    # Só o grupo do serviço: liberar todos os grupos daria socket ICMP a
+    # qualquer processo da máquina.
+    echo "net.ipv4.ping_group_range = $GID_SERVICO $GID_SERVICO" > /etc/sysctl.d/60-netsnap-ping.conf
+    sysctl -q -p /etc/sysctl.d/60-netsnap-ping.conf && ok "ping sem privilégio liberado para o grupo $USUARIO"
   fi
 fi
 
@@ -564,7 +572,11 @@ rm -rf "$PREFIXO/app.anterior"
 trap - ERR
 titulo "Pronto"
 echo "  Painel:        https://$NOME_PRINCIPAL$( [ "$PORTA_PUB" != 443 ] && echo ":$PORTA_PUB")/"
-[ "$(ler_ini certificado ca-interna)" = ca-interna ] && echo "  CA interna:    baixe pela tela de login e instale como autoridade raiz confiável"
+if [ "$(ler_ini certificado ca-interna)" = ca-interna ]; then
+  echo "  CA interna:    baixe pela tela de login e instale como autoridade raiz confiável"
+  echo "                 só se a impressão SHA-256 bater com a que você passar aos técnicos"
+  echo "                 por outro meio (sudo netsnapctl status mostra a impressão)"
+fi
 echo "  Administração: sudo netsnapctl          (menu)"
 echo "                 sudo netsnapctl status"
 echo "  Logs:          journalctl -u netsnap-servidor -f"

@@ -177,6 +177,22 @@ class TesteBanco(unittest.TestCase):
         with self.assertRaises(bd.ErroBanco):
             self.b.alterar_usuario(uid, ativo="não")
 
+    def test_ultimo_admin_na_transacao(self):
+        # A guarda vale no próprio banco: rebaixar, desativar ou remover o
+        # último administrador ativo é recusado mesmo sem a checagem do
+        # chamador (dois administradores alterando um ao outro ao mesmo tempo).
+        a = self.b.criar_usuario("ana", SENHA, "admin")
+        b = self.b.criar_usuario("bia", SENHA, "admin")
+        self.b.alterar_usuario(a, papel="tecnico")
+        with self.assertRaises(bd.ErroUltimoAdmin):
+            self.b.alterar_usuario(b, papel="leitura")
+        with self.assertRaises(bd.ErroUltimoAdmin):
+            self.b.alterar_usuario(b, ativo=False)
+        with self.assertRaises(bd.ErroUltimoAdmin):
+            self.b.remover_usuario(b)
+        self.assertEqual(self.b.usuario(b)["papel"], "admin")
+        self.assertEqual(self.b.admins_ativos(), 1)
+
     def test_totp_e_recuperacao(self):
         uid = self.b.criar_usuario("ana", SENHA, "leitura")
         seg = cf.novo_segredo_totp()
