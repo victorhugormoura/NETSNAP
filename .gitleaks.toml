@@ -1,0 +1,16 @@
+# Varredura de segredos (gitleaks). Usa as regras padrão e ignora só os
+# arquivos de teste que contêm segredos sintéticos de propósito, os mesmos
+# listados em .github/secret_scanning.yml. Qualquer outro arquivo é varrido.
+title = "netsnap"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Casos de teste do mascaramento e do laboratório simulado"
+paths = [
+  '''^testes/test_sanitizar\.py$''',
+  '''^servidor/testes/test_servidor\.py$''',
+  '''^servidor/testes/test_cofre_banco\.py$''',
+  '''^servidor/testes/equipamento_simulado\.py$''',
+]

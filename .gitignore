@@ -67,5 +67,7 @@ netsnap-chave-*.json
 servidor/build/
 servidor/dist/
 
-# Claude Code: permissões locais de cada máquina
-.claude/settings.local.json
+# Configurações locais de ferramentas de cada máquina
+.claude/
+.vscode/
+.idea/

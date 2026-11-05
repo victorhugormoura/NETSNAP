@@ -622,7 +622,7 @@ Opções: `--modelo` (padrão `claude-sonnet-5-5` no `anthropic`), `--url`, `--m
 - **Segurança:** só sai snapshot declarado mascarado (`sensitive_data: redacted`), e o texto passa de novo pelo sanitizador do netsnap antes do envio, quando ele está instalado. A URL precisa ser `https`; `http` só é aceito para `127.0.0.1`/`localhost`. Cada saída de comando vai entre marcadores com um código novo a cada pedido, e o modelo é instruído a tratar o texto do equipamento como dado; a evidência de cada achado é conferida contra o snapshot enviado (trecho que não está lá rebaixa a confiança); comandos destrutivos ou de reinício propostos, inclusive nos comandos de reversão, são retirados; o texto livre do modelo é escapado no relatório `.md`; redirecionamento HTTP é recusado, para a chave da API não ir a outro host. Os comandos propostos são sugestões para revisão humana; nada é aplicado.
 - **Validação da resposta:** severidade e categoria fora da lista são normalizadas; achado sem evidência fica com confiança baixa.
 
-Testado com servidores de API simulados; a primeira execução contra a API real fica com você (veja `docs/IMPLANTACAO-NUC.md`).
+Testado com servidores de API simulados; a primeira execução contra a API real fica com você.
 
 ## Testes
 
@@ -638,10 +638,14 @@ python3 testes/test_coleta_linux.py       # sintaxe de todos os comandos Linux (
 ./servidor/montar.sh                      # monta o pacote do servidor; os testes dele estão em servidor/testes
 ```
 
-Os testes do servidor e o roteador simulado estão descritos em [`servidor/LEIA-ME.md`](servidor/LEIA-ME.md) (seção 10). A cada push e pull request, o GitHub Actions roda tudo em Python 3.10 e 3.12 (`.github/workflows/testes.yml`).
+Os testes do servidor e o roteador simulado estão descritos em [`servidor/LEIA-ME.md`](servidor/LEIA-ME.md) (seção 10). A cada push e pull request, o GitHub Actions roda tudo em Python 3.10 e 3.12 (`.github/workflows/testes.yml`), e o gitleaks varre o histórico atrás de segredos (`.github/workflows/gitleaks.yml`). Para barrar segredos antes do commit: `pip install pre-commit && pre-commit install`.
 
 ## Licença
 
 Distribuído sob a licença [MIT](LICENSE).
 
 Copyright (c) 2026 Victor Hugo R. Moura (VHRMO3) / Infinity Consulting
+
+## Autor
+
+Infinity Technology - Victor Hugo R. Moura - victorhugormoura@gmail.com
