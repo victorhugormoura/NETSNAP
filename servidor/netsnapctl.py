@@ -568,9 +568,11 @@ def emitir_certificado_servidor(nomes, dias=397):
     agora = dt.datetime.now(dt.timezone.utc)
     san = [x509.DNSName(n) for n in dns] + [
         x509.IPAddress(ipaddress.ip_address(i)) for i in ips]
+    # O OpenSSL confere o CN como nome DNS: um IP ali viola a restrição da CA
+    comum = nomes[0] if nomes[0] in dns else "netsnap"
     cert = (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,
-                                                        nomes[0])]))
+                                                        comum)]))
             .issuer_name(ca_cert.subject)
             .public_key(chave.public_key())
             .serial_number(x509.random_serial_number())
